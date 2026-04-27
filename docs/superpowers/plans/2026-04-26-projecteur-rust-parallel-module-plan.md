@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a Linux-only Rust workspace with a shared config crate, separate spotlight, annotation, and zoom crates, and a thin app shell that routes `spot=...`, `annotation=...`, and `zoom=...` commands to the right module, plus a `config init` subcommand that writes the default config file.
+**Goal:** Build a Linux/X11-only Rust workspace with a shared config crate, separate spotlight, annotation, and zoom crates, and a thin app shell that routes `spot=...`, `annotation=...`, and `zoom=...` commands to the right module, plus a configurable shortcut layer that routes keyboard and mouse events to the active mode, treats the mode shortcuts as toggle bindings (`Ctrl+1` toggles spotlight, `Ctrl+2` toggles annotation, `Ctrl+3` toggles zoom), uses a modifier-key gate for spotlight wheel resizing, and includes a `config init` subcommand that writes the default config file.
 
-**Architecture:** Use a Cargo workspace with five packages: `rpresent-config` for the shared TOML contract and default config generation, `rpresent-spotlight` for spotlight state and rendering, `rpresent-annotation` for drawing tools and stroke history, `rpresent-zoom` for live capture and magnified rendering, and `rpresent` for CLI, IPC, and runtime composition. Task 1 locks the config schema, default config writing, and crate boundaries so spotlight, annotation, zoom, and config-init can proceed independently after that. The app crate stays thin and only composes the feature crates at startup or when `config init` is called.
+**Architecture:** Use a Cargo workspace with five packages: `rpresent-config` for the shared TOML contract, default config generation, and shortcut bindings; `rpresent-spotlight` for spotlight state and rendering; `rpresent-annotation` for drawing tools and stroke history; `rpresent-zoom` for live capture and magnified rendering; and `rpresent` for CLI, IPC, X11 shortcut grabs, and runtime composition. Task 1 locks the config schema, default config writing, toggle-style shortcut bindings, wheel-gate config, and crate boundaries so spotlight, annotation, zoom, config-init, and the input path can proceed independently after that. The app crate stays thin and only composes the feature crates at startup, when processing configured X11 toggle shortcuts, or when `config init` is called.
 
-**Tech Stack:** Rust 2024, `serde`, `toml`, `directories`, `thiserror`, `clap`, `winit`, `pixels`, `wgpu`, `xcap`, `bytemuck`, `crossbeam-channel`, `tempfile`.
+**Tech Stack:** Rust 2024, `serde`, `toml`, `directories`, `thiserror`, `clap`, `winit`, `pixels`, `wgpu`, `xcap`, `x11rb`, `bytemuck`, `crossbeam-channel`, `tempfile`.
 
-**Non-goals:** presenter hardware support, configuration GUI, tray UI, repeated init/retry loops, overwriting an existing config file during `config init`, or cross-desktop fallback logic beyond Linux/X11-first overlay behavior.
+**Non-goals:** presenter hardware support, configuration GUI, tray UI, repeated init/retry loops, overwriting an existing config file during `config init`, non-X11 input support, or cross-desktop fallback logic beyond the X11 input path.
 
 ---
 
@@ -31,7 +31,7 @@
 - Create: `crates/rpresent/src/lib.rs`
 - Create: `crates/rpresent/src/main.rs`
 
-**Why this task exists:** The workspace split and shared config contract are the only hard dependency that must exist before spotlight, annotation, and zoom can be built independently. This is the first green checkpoint: once the config crate lands, `cargo test -p rpresent-config` must pass before anything else in the workspace is treated as ready. The feature-crate files created here are scaffolding for later tasks and are not part of this checkpoint.
+**Why this task exists:** The workspace split and shared config contract are the only hard dependency that must exist before spotlight, annotation, and zoom can be built independently. This is the first green checkpoint: once the config crate lands, `cargo test -p rpresent-config` must pass before anything else in the workspace is treated as ready. The feature-crate files created here are scaffolding for later tasks and are not part of this checkpoint. The shared config also defines the configurable toggle shortcuts that the X11 input layer will bind later.
 The feature-crate manifests are created here with minimal package stanzas so Cargo can resolve the full workspace before later tasks add dependencies and module contents.
 
 - [ ] **Step 1: Write the failing tests**
@@ -65,6 +65,12 @@ fn parses_module_sections_and_applies_defaults() {
         [zoom]
         initial_scale = 2.5
         capture_target = "active-monitor"
+
+        [shortcuts]
+        spotlight_mode = "Ctrl+1"
+        annotation_mode = "Ctrl+2"
+        zoom_mode = "Ctrl+3"
+        spotlight_wheel_modifier = "Ctrl"
         "#,
     )
     .unwrap();
@@ -84,6 +90,10 @@ fn parses_module_sections_and_applies_defaults() {
     assert_eq!(config.zoom.min_scale, 1.0);
     assert_eq!(config.zoom.max_scale, 6.0);
     assert_eq!(config.zoom.capture_target, "active-monitor");
+    assert_eq!(config.shortcuts.spotlight_mode, "Ctrl+1");
+    assert_eq!(config.shortcuts.annotation_mode, "Ctrl+2");
+    assert_eq!(config.shortcuts.zoom_mode, "Ctrl+3");
+    assert_eq!(config.shortcuts.spotlight_wheel_modifier, "Ctrl");
 }
 
 #[test]
@@ -120,7 +130,10 @@ fn default_config_file_is_written_with_all_sections() {
     assert!(contents.contains("[spotlight]"));
     assert!(contents.contains("[annotation]"));
     assert!(contents.contains("[zoom]"));
+    assert!(contents.contains("[shortcuts]"));
     assert!(contents.contains("socket_name = \"rpresent.sock\""));
+    assert!(contents.contains("spotlight_mode = \"Ctrl+1\""));
+    assert!(contents.contains("spotlight_wheel_modifier = \"Ctrl\""));
 }
 
 #[test]
@@ -174,8 +187,8 @@ resolver = "2"
 mod config;
 
 pub use config::{
-    AnnotationConfig, AnnotationTool, AppConfig, Config, ConfigError, SpotlightConfig,
-    ZoomConfig, default_config_path, default_config_toml, load_from_path,
+    AnnotationConfig, AnnotationTool, AppConfig, Config, ConfigError, ShortcutConfig,
+    SpotlightConfig, ZoomConfig, default_config_path, default_config_toml, load_from_path,
     load_or_default_from_path, load_from_str, write_default_config,
 };
 ```
@@ -262,6 +275,8 @@ pub struct Config {
     pub annotation: AnnotationConfig,
     #[serde(default)]
     pub zoom: ZoomConfig,
+    #[serde(default)]
+    pub shortcuts: ShortcutConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -425,6 +440,19 @@ pub struct ZoomConfig {
     pub capture_target: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShortcutConfig {
+    #[serde(default = "default_spotlight_mode_shortcut")]
+    pub spotlight_mode: String,
+    #[serde(default = "default_annotation_mode_shortcut")]
+    pub annotation_mode: String,
+    #[serde(default = "default_zoom_mode_shortcut")]
+    pub zoom_mode: String,
+    #[serde(default = "default_spotlight_wheel_modifier")]
+    pub spotlight_wheel_modifier: String,
+}
+
 impl Default for ZoomConfig {
     fn default() -> Self {
         Self {
@@ -436,6 +464,17 @@ impl Default for ZoomConfig {
             scroll_speed: default_scroll_speed(),
             pan_friction: default_pan_friction(),
             capture_target: default_capture_target().to_owned(),
+        }
+    }
+}
+
+impl Default for ShortcutConfig {
+    fn default() -> Self {
+        Self {
+            spotlight_mode: default_spotlight_mode_shortcut().to_owned(),
+            annotation_mode: default_annotation_mode_shortcut().to_owned(),
+            zoom_mode: default_zoom_mode_shortcut().to_owned(),
+            spotlight_wheel_modifier: default_spotlight_wheel_modifier().to_owned(),
         }
     }
 }
@@ -470,6 +509,22 @@ fn default_pan_friction() -> f32 {
 
 fn default_capture_target() -> &'static str {
     "active-monitor"
+}
+
+fn default_spotlight_mode_shortcut() -> &'static str {
+    "Ctrl+1"
+}
+
+fn default_annotation_mode_shortcut() -> &'static str {
+    "Ctrl+2"
+}
+
+fn default_zoom_mode_shortcut() -> &'static str {
+    "Ctrl+3"
+}
+
+fn default_spotlight_wheel_modifier() -> &'static str {
+    "Ctrl"
 }
 
 fn default_stroke_width_px() -> u32 {
@@ -556,6 +611,7 @@ pub use rpresent_config::AnnotationTool;
 ```rust
 pub mod app;
 pub mod command;
+pub mod input;
 pub mod ipc;
 
 pub use app::{run, run_from_env};
@@ -1727,20 +1783,22 @@ git add crates/rpresent-zoom
 git commit -m "feat: add zoom module"
 ```
 
-### Task 5: App shell and command routing
+### Task 5: App shell, X11 shortcuts, and command routing
 
 **Files:**
 - Create: `crates/rpresent/src/app.rs`
 - Create: `crates/rpresent/src/command.rs`
+- Create: `crates/rpresent/src/input.rs`
 - Create: `crates/rpresent/src/ipc.rs`
 - Modify: `crates/rpresent/src/lib.rs`
 - Modify: `crates/rpresent/src/main.rs`
 - Modify: `crates/rpresent/Cargo.toml`
 - Create: `crates/rpresent/tests/app_cli.rs`
+- Create: `crates/rpresent/tests/input.rs`
 - Create: `crates/rpresent/tests/config_init.rs`
 - Create: `crates/rpresent/tests/ipc.rs`
 
-**Why this task exists:** The app shell is the only place where all three modules are composed together. It must stay thin and only route commands to spotlight, annotation, or zoom, plus a one-shot `config init` path that materializes the default config file. Regular command parsing uses clap, but the top-level entrypoint does a small pre-parse for `config init` and preserves clap's normal help/version exits.
+**Why this task exists:** The app shell is the only place where all three modules are composed together. It must stay thin and only route commands to spotlight, annotation, or zoom, plus a one-shot `config init` path that materializes the default config file. It also owns the X11 shortcut layer: configurable passive grabs from the config file emit toggle commands for the matching module, so pressing `Ctrl+1` turns spotlight on when it is off and turns it off when it is already on; the same pattern applies to annotation and zoom. Spotlight wheel resizing only applies while the configured modifier key is held. Regular command parsing uses clap, but the top-level entrypoint does a small pre-parse for `config init` and preserves clap's normal help/version exits.
 
 `crates/rpresent/Cargo.toml`
 
@@ -1758,12 +1816,83 @@ rpresent-config = { path = "../rpresent-config" }
 rpresent-spotlight = { path = "../rpresent-spotlight" }
 rpresent-zoom = { path = "../rpresent-zoom" }
 thiserror = "2"
+x11rb = "0.13"
 
 [dev-dependencies]
 tempfile = "3"
 ```
 
+The runtime has two event sources: IPC commands and X11 input events. IPC continues to carry direct module commands (`spot=...`, `annotation=...`, `zoom=...`); the X11 input layer uses `rpresent::input` to translate configured shortcuts into toggle commands, keep track of the active mode, and only surface spotlight wheel resizing when the configured modifier is held.
+
 - [ ] **Step 1: Write the failing tests**
+
+`crates/rpresent/tests/input.rs`
+
+Tests in this file cover config-driven shortcut binding, toggle command routing, modifier-gated wheel routing, and active-mode tracking.
+
+```rust
+use rpresent::command::{AnnotationCommand, AppCommand, SpotlightCommand, ZoomCommand};
+use rpresent::input::{ActiveMode, InputAction, InputBindings, InputRouter};
+use rpresent_config::ShortcutConfig;
+
+#[test]
+fn shortcut_bindings_follow_the_config() {
+    let config = ShortcutConfig {
+        spotlight_mode: "Alt+1".to_owned(),
+        annotation_mode: "Alt+2".to_owned(),
+        zoom_mode: "Alt+3".to_owned(),
+        spotlight_wheel_modifier: "Alt".to_owned(),
+    };
+
+    let bindings = InputBindings::from(&config);
+
+    assert_eq!(bindings.spotlight_mode, "Alt+1");
+    assert_eq!(bindings.annotation_mode, "Alt+2");
+    assert_eq!(bindings.zoom_mode, "Alt+3");
+    assert_eq!(bindings.spotlight_wheel_modifier, "Alt");
+}
+
+#[test]
+fn mode_shortcuts_toggle_and_update_the_active_mode() {
+    let bindings = InputBindings::from(&ShortcutConfig::default());
+    let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);
+
+    assert_eq!(
+        router.handle_key("Ctrl+1"),
+        Some(AppCommand::Spotlight(SpotlightCommand::Toggle))
+    );
+    assert_eq!(router.active_mode(), ActiveMode::Spotlight);
+
+    assert_eq!(
+        router.handle_key("Ctrl+2"),
+        Some(AppCommand::Annotation(AnnotationCommand::Toggle))
+    );
+    assert_eq!(router.active_mode(), ActiveMode::Annotation);
+
+    assert_eq!(
+        router.handle_key("Ctrl+3"),
+        Some(AppCommand::Zoom(ZoomCommand::Toggle))
+    );
+    assert_eq!(router.active_mode(), ActiveMode::Zoom);
+}
+
+#[test]
+fn spotlight_wheel_requires_the_active_mode_and_modifier() {
+    let bindings = InputBindings::from(&ShortcutConfig::default());
+    let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);
+
+    assert_eq!(router.handle_wheel("Shift", 1.0), None);
+
+    assert!(router.handle_key("Ctrl+2").is_some());
+    assert_eq!(router.handle_wheel("Ctrl", 1.0), None);
+
+    assert!(router.handle_key("Ctrl+1").is_some());
+    assert_eq!(
+        router.handle_wheel("Ctrl", 1.0),
+        Some(InputAction::SpotlightWheel { delta: 1.0 })
+    );
+}
+```
 
 `crates/rpresent/tests/app_cli.rs`
 
@@ -1963,6 +2092,94 @@ impl Display for AppCommand {
 }
 ```
 
+`crates/rpresent/src/input.rs`
+
+```rust
+use rpresent_annotation::AnnotationCommand;
+use rpresent_config::ShortcutConfig;
+use rpresent_spotlight::SpotlightCommand;
+use rpresent_zoom::ZoomCommand;
+
+use crate::command::AppCommand;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveMode {
+    Spotlight,
+    Annotation,
+    Zoom,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputBindings {
+    pub spotlight_mode: String,
+    pub annotation_mode: String,
+    pub zoom_mode: String,
+    pub spotlight_wheel_modifier: String,
+}
+
+impl From<&ShortcutConfig> for InputBindings {
+    fn from(config: &ShortcutConfig) -> Self {
+        Self {
+            spotlight_mode: config.spotlight_mode.clone(),
+            annotation_mode: config.annotation_mode.clone(),
+            zoom_mode: config.zoom_mode.clone(),
+            spotlight_wheel_modifier: config.spotlight_wheel_modifier.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputAction {
+    SpotlightWheel { delta: f32 },
+}
+
+pub struct InputRouter {
+    bindings: InputBindings,
+    active_mode: ActiveMode,
+}
+
+impl InputRouter {
+    pub fn new(bindings: InputBindings, active_mode: ActiveMode) -> Self {
+        Self {
+            bindings,
+            active_mode,
+        }
+    }
+
+    pub fn active_mode(&self) -> ActiveMode {
+        self.active_mode
+    }
+
+    pub fn handle_key(&mut self, shortcut: &str) -> Option<AppCommand> {
+        match shortcut {
+            shortcut if shortcut == self.bindings.spotlight_mode => {
+                self.active_mode = ActiveMode::Spotlight;
+                Some(AppCommand::Spotlight(SpotlightCommand::Toggle))
+            }
+            shortcut if shortcut == self.bindings.annotation_mode => {
+                self.active_mode = ActiveMode::Annotation;
+                Some(AppCommand::Annotation(AnnotationCommand::Toggle))
+            }
+            shortcut if shortcut == self.bindings.zoom_mode => {
+                self.active_mode = ActiveMode::Zoom;
+                Some(AppCommand::Zoom(ZoomCommand::Toggle))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn handle_wheel(&self, modifier: &str, delta: f32) -> Option<InputAction> {
+        if self.active_mode == ActiveMode::Spotlight
+            && modifier == self.bindings.spotlight_wheel_modifier
+        {
+            Some(InputAction::SpotlightWheel { delta })
+        } else {
+            None
+        }
+    }
+}
+```
+
 `crates/rpresent/src/ipc.rs`
 
 ```rust
@@ -2050,7 +2267,7 @@ use crate::ipc;
 
 #[derive(Debug, Parser, Clone, PartialEq, Eq)]
 #[command(
-    after_long_help = "Examples:\n  rpresent spot=toggle\n  rpresent config init --config ~/.config/rpresent/config.toml"
+    after_long_help = "Examples:\n  rpresent spot=toggle\n  rpresent annotation=tool=line\n  rpresent zoom=reset\n  rpresent config init --config ~/.config/rpresent/config.toml"
 )]
 pub struct Cli {
     #[arg(long)]
@@ -2279,7 +2496,7 @@ Run in terminal 5:
 cargo run -p rpresent -- --config /tmp/rpresent.toml zoom=reset
 ```
 
-Expected: the daemon remains running while the client commands exit 0; the specific routing and state transitions are covered by the unit tests and IPC round-trip tests in this task. If `~/.config/rpresent/config.toml` is missing, `cargo run -p rpresent` still starts with built-in defaults.
+Expected: the daemon remains running while the client commands exit 0; the specific routing, shortcut binding, and state transitions are covered by the unit tests and IPC round-trip tests in this task. If `~/.config/rpresent/config.toml` is missing, `cargo run -p rpresent` still starts with built-in defaults.
 
 - [ ] **Step 6: Commit the slice**
 
