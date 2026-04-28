@@ -75,10 +75,23 @@ pub fn run_overlay(
     appearance: ZoomAppearance,
     rx: Receiver<ZoomState>,
 ) -> Result<(), OverlayError> {
-    let _ = appearance;
+    tracing::debug!(?appearance, "starting zoom overlay");
+
+    let mut last_state: Option<ZoomState> = None;
 
     for state in rx {
-        let _ = zoom_sample_rect(1920, 1080, &state);
+        if last_state.as_ref() != Some(&state) {
+            tracing::debug!(?state, "zoom state changed");
+            last_state = Some(state.clone());
+        }
+        let rect = zoom_sample_rect(1920, 1080, &state);
+        tracing::trace!(
+            left = rect.left,
+            top = rect.top,
+            width = rect.width,
+            height = rect.height,
+            "zoom sample rectangle"
+        );
     }
 
     Ok(())

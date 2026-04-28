@@ -50,25 +50,57 @@ impl ZoomController {
     }
 
     pub fn zoom_by_scroll(&mut self, delta: f32, pivot: (f32, f32)) -> bool {
+        let previous_pivot = self.state.pivot;
+        let previous_scale = self.state.scale;
         self.state.pivot = pivot;
-        self.set_scale(self.state.scale * (1.0 + delta * self.scroll_speed))
+        let changed = self.set_scale(self.state.scale * (1.0 + delta * self.scroll_speed));
+        if previous_pivot != self.state.pivot || (previous_scale - self.state.scale).abs() > f32::EPSILON {
+            tracing::trace!(
+                from_pivot = ?previous_pivot,
+                to_pivot = ?self.state.pivot,
+                from_scale = previous_scale,
+                to_scale = self.state.scale,
+                delta,
+                "zoom state changed from scroll"
+            );
+        }
+        changed
     }
 
     pub fn pan_by(&mut self, dx: f32, dy: f32) -> bool {
+        let previous_pivot = self.state.pivot;
         self.state.pivot.0 += dx * self.pan_friction;
         self.state.pivot.1 += dy * self.pan_friction;
+        if previous_pivot != self.state.pivot {
+            tracing::trace!(from_pivot = ?previous_pivot, to_pivot = ?self.state.pivot, dx, dy, "zoom pivot changed");
+        }
         true
     }
 
     pub fn reset(&mut self) -> bool {
+        let previous_pivot = self.state.pivot;
+        let previous_scale = self.state.scale;
         self.state.scale = self.initial_scale;
         self.state.pivot = (0.0, 0.0);
+        if previous_pivot != self.state.pivot || (previous_scale - self.state.scale).abs() > f32::EPSILON {
+            tracing::debug!(
+                from_pivot = ?previous_pivot,
+                to_pivot = ?self.state.pivot,
+                from_scale = previous_scale,
+                to_scale = self.state.scale,
+                "zoom state reset"
+            );
+        }
         true
     }
 
     fn set_enabled(&mut self, enabled: bool) -> bool {
+        let previous = self.state.enabled;
         let changed = self.state.enabled != enabled;
         self.state.enabled = enabled;
+        if changed {
+            tracing::debug!(from = previous, to = enabled, "zoom enabled state changed");
+        }
         changed
     }
 

@@ -28,16 +28,20 @@ pub enum AppCommandParseError {
 impl FromStr for AppCommand {
     type Err = AppCommandParseError;
 
+    #[tracing::instrument(level = "debug", skip(text), fields(command = %text), err)]
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         if text.starts_with("spot=") {
+            tracing::trace!(command = %text, "matched spotlight command route");
             return Ok(Self::Spotlight(text.parse()?));
         }
 
         if text.starts_with("annotation=") {
+            tracing::trace!(command = %text, "matched annotation command route");
             return Ok(Self::Annotation(text.parse()?));
         }
 
         if text.starts_with("zoom=") {
+            tracing::trace!(command = %text, "matched zoom command route");
             return Ok(Self::Zoom(text.parse()?));
         }
 

@@ -104,16 +104,23 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
         match state {
             SpotlightState::On => {
                 if !self.visible {
+                    tracing::debug!(state = ?state, "showing spotlight overlay");
                     self.backend.show()?;
                     self.visible = true;
+                } else {
+                    tracing::trace!(state = ?state, "spotlight overlay already visible");
                 }
 
+                tracing::trace!(state = ?state, "spotlight overlay redrawing after state update");
                 self.tick()?;
             }
             SpotlightState::Off => {
                 if self.visible {
+                    tracing::debug!(state = ?state, "hiding spotlight overlay");
                     self.backend.hide()?;
                     self.visible = false;
+                } else {
+                    tracing::trace!(state = ?state, "spotlight overlay already hidden");
                 }
             }
         }
@@ -126,6 +133,7 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
             return Ok(());
         }
 
+        tracing::trace!("spotlight overlay redraw tick");
         let frame = build_spotlight_frame(
             self.backend.surface_size()?,
             self.backend.cursor_position()?,
@@ -176,6 +184,7 @@ pub fn run_overlay(
     use std::sync::mpsc::RecvTimeoutError;
     use std::time::Duration;
 
+    tracing::debug!(?appearance, "starting spotlight overlay");
     let backend = crate::x11::X11SpotlightOverlay::new()?;
     let mut runtime = SpotlightOverlayRuntime::new(appearance, backend);
     let mut visible = false;

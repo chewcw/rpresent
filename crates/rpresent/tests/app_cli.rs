@@ -7,6 +7,8 @@ use rpresent::command::{AnnotationCommand, AppCommand, SpotlightCommand, ZoomCom
 
 #[test]
 fn parses_config_override_and_spot_command() {
+    rpresent::logging::init();
+
     let cli =
         Cli::try_parse_from(["rpresent", "--config", "/tmp/rpresent.toml", "spot=toggle"]).unwrap();
 
@@ -20,6 +22,8 @@ fn parses_config_override_and_spot_command() {
 
 #[test]
 fn parses_annotation_command_and_resolve_mode() {
+    rpresent::logging::init();
+
     let cli = Cli::try_parse_from(["rpresent", "annotation=tool=line"]).unwrap();
 
     assert_eq!(
@@ -32,6 +36,8 @@ fn parses_annotation_command_and_resolve_mode() {
 
 #[test]
 fn parses_zoom_command_and_resolve_mode() {
+    rpresent::logging::init();
+
     let cli = Cli::try_parse_from(["rpresent", "zoom=reset"]).unwrap();
 
     assert_eq!(
@@ -42,6 +48,8 @@ fn parses_zoom_command_and_resolve_mode() {
 
 #[test]
 fn no_command_enters_run_mode() {
+    rpresent::logging::init();
+
     let cli = Cli::try_parse_from(["rpresent"]).unwrap();
 
     assert_eq!(resolve_mode(&cli).unwrap(), AppMode::Run);
@@ -49,6 +57,8 @@ fn no_command_enters_run_mode() {
 
 #[test]
 fn parses_config_init_entrypoint() {
+    rpresent::logging::init();
+
     let entry = parse_entrypoint(vec![
         "rpresent".into(),
         "config".into(),

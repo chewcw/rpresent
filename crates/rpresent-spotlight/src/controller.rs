@@ -26,6 +26,7 @@ impl SpotlightController {
     }
 
     pub fn apply(&mut self, command: SpotlightCommand) -> bool {
+        let previous = self.state;
         let next_state = match command {
             SpotlightCommand::On => SpotlightState::On,
             SpotlightCommand::Off => SpotlightState::Off,
@@ -35,8 +36,11 @@ impl SpotlightController {
             },
         };
 
-        let changed = next_state != self.state;
+        let changed = next_state != previous;
         self.state = next_state;
+        if changed {
+            tracing::debug!(from = ?previous, to = ?next_state, "spotlight state changed");
+        }
         changed
     }
 }

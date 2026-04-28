@@ -49,22 +49,63 @@ impl AnnotationController {
             AnnotationCommand::Off => self.set_state(AnnotationState::Off),
             AnnotationCommand::Toggle => self.toggle_state(),
             AnnotationCommand::Clear => {
+                let strokes_before = self.history.strokes().len();
+                let redo_before = self.history.redo_len();
                 self.history.clear();
+                if strokes_before > 0 || redo_before > 0 {
+                    tracing::debug!(
+                        strokes_before,
+                        redo_before,
+                        "annotation history cleared"
+                    );
+                }
                 true
             }
-            AnnotationCommand::Undo => self.history.undo().is_some(),
-            AnnotationCommand::Redo => self.history.redo().is_some(),
+            AnnotationCommand::Undo => {
+                if let Some(stroke) = self.history.undo() {
+                    tracing::debug!(
+                        tool = ?stroke.tool,
+                        strokes = self.history.strokes().len(),
+                        redo = self.history.redo_len(),
+                        "annotation stroke undone"
+                    );
+                    true
+                } else {
+                    false
+                }
+            }
+            AnnotationCommand::Redo => {
+                if let Some(stroke) = self.history.redo() {
+                    tracing::debug!(
+                        tool = ?stroke.tool,
+                        strokes = self.history.strokes().len(),
+                        redo = self.history.redo_len(),
+                        "annotation stroke redone"
+                    );
+                    true
+                } else {
+                    false
+                }
+            }
             AnnotationCommand::Tool(tool) => {
+                let previous = self.active_tool;
                 let changed = tool != self.active_tool;
                 self.active_tool = tool;
+                if changed {
+                    tracing::debug!(from = ?previous, to = ?tool, "annotation tool changed");
+                }
                 changed
             }
         }
     }
 
     fn set_state(&mut self, next: AnnotationState) -> bool {
+        let previous = self.state;
         let changed = self.state != next;
         self.state = next;
+        if changed {
+            tracing::debug!(from = ?previous, to = ?next, "annotation state changed");
+        }
         changed
     }
 
