@@ -1,8 +1,9 @@
 use x11rb::connection::Connection;
+use x11rb::image::Image;
 use x11rb::protocol::render::{self, ConnectionExt as RenderConnectionExt, PictType};
 use x11rb::protocol::xproto::{
     ColormapAlloc, ConnectionExt as XprotoConnectionExt, CreateGCAux, CreateWindowAux, Gcontext,
-    ImageFormat, Visualid, Window, WindowClass,
+    Visualid, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -27,10 +28,6 @@ fn overlay_window_spec(surface_size: (u16, u16)) -> OverlayWindowSpec {
         override_redirect: true,
         input_transparent: true,
     }
-}
-
-fn frame_to_put_image_bytes(frame: &SpotlightFrame) -> Vec<u8> {
-    frame.pixels.clone()
 }
 
 fn runtime_error(error: impl std::fmt::Display) -> OverlayError {
@@ -236,20 +233,18 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
     }
 
     fn redraw(&mut self, frame: &SpotlightFrame) -> Result<(), OverlayError> {
-        let bytes = frame_to_put_image_bytes(frame);
-        self.connection
-            .put_image(
-                ImageFormat::Z_PIXMAP,
-                self.window,
-                self.gc,
-                frame.width,
-                frame.height,
-                0,
-                0,
-                0,
-                self.depth,
-                &bytes,
-            )
+        let mut image = Image::allocate_native(frame.width, frame.height, self.depth, self.connection.setup())
+            .map_err(runtime_error)?;
+        if image.data().len() != frame.pixels.len() {
+            return Err(runtime_error(format!(
+                "spotlight frame size mismatch: image expects {} bytes, frame has {} bytes",
+                image.data().len(),
+                frame.pixels.len()
+            )));
+        }
+        image.data_mut().copy_from_slice(&frame.pixels);
+        image
+            .put(&self.connection, self.window, self.gc, 0, 0)
             .inspect_err(|error| {
                 tracing::error!(
                     window = self.window,
@@ -281,13 +276,13 @@ mod tests {
     }
 
     #[test]
-    fn frame_to_put_image_bytes_keeps_the_alpha_payload() {
+    fn redraw_frame_uses_the_same_pixel_dimensions() {
         let frame = SpotlightFrame {
             width: 2,
             height: 1,
             pixels: vec![0, 0, 0, 255, 0, 0, 0, 0],
         };
 
-        assert_eq!(frame_to_put_image_bytes(&frame), frame.pixels);
+        assert_eq!(frame.pixels.len(), frame.width as usize * frame.height as usize * 4);
     }
 }
