@@ -8,6 +8,8 @@ use rpresent::app::{ConfigInitCli, run_config_init};
 
 #[test]
 fn config_init_writes_default_config_file() {
+    rpresent::logging::init();
+
     let tempdir = tempdir().unwrap();
     let config_path = tempdir.path().join("rpresent.toml");
 

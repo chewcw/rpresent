@@ -19,6 +19,19 @@ This repository is a Rust workspace with five crates:
 
 The spotlight overlay uses X11 on Linux. It opens one overlay window, tracks the cursor, and redraws the spotlight mask from the current spotlight state. Transparent compositing requires a running compositor on the desktop session.
 
+## Logging
+
+Logs go to stderr by default. If `RUST_LOG` is unset, `rpresent` falls back to the `info` level.
+
+Example commands for debugging:
+
+```bash
+RUST_LOG=debug cargo run -p rpresent -- spot=toggle
+RUST_LOG=trace cargo run -p rpresent -- zoom=reset
+```
+
+The `config init` command still writes the generated config path to stdout; that output is separate from log messages.
+
 ## Build and Test
 
 Run the full workspace test suite:

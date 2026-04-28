@@ -42,11 +42,16 @@ pub fn run_overlay(
     appearance: AnnotationAppearance,
     rx: Receiver<AnnotationState>,
 ) -> Result<(), OverlayError> {
-    let _ = appearance;
+    tracing::debug!(?appearance, "starting annotation overlay");
+
+    let mut visible = false;
 
     for state in rx {
-        let visible = matches!(state, AnnotationState::On);
-        let _ = visible;
+        let next_visible = matches!(state, AnnotationState::On);
+        if next_visible != visible {
+            tracing::debug!(state = ?state, visible = next_visible, "annotation overlay visibility changed");
+            visible = next_visible;
+        }
     }
 
     Ok(())

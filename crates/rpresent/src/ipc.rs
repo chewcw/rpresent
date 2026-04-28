@@ -30,6 +30,7 @@ pub fn read_command(stream: &mut impl Read) -> Result<AppCommand, IpcError> {
 }
 
 pub fn send_command(socket_path: &Path, command: AppCommand) -> Result<(), IpcError> {
+    tracing::debug!(socket_path = %socket_path.display(), command = %command, "sending IPC command");
     let mut stream = UnixStream::connect(socket_path)?;
     stream.write_all(encode_command(command).as_bytes())?;
     stream.flush()?;
@@ -42,20 +43,37 @@ pub fn socket_path_for(socket_name: &str) -> Result<PathBuf, IpcError> {
 }
 
 pub fn serve(socket_path: &Path, tx: Sender<AppCommand>) -> Result<(), IpcError> {
+    tracing::debug!(socket_path = %socket_path.display(), "starting IPC server");
+
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
     if socket_path.exists() {
+        tracing::debug!(socket_path = %socket_path.display(), "removing stale IPC socket");
         std::fs::remove_file(socket_path)?;
     }
 
+    tracing::debug!(socket_path = %socket_path.display(), "binding IPC listener");
     let listener = UnixListener::bind(socket_path)?;
+    tracing::debug!(socket_path = %socket_path.display(), "IPC server started");
+
     for connection in listener.incoming() {
         let mut stream = connection?;
-        let command = read_command(&mut stream)?;
-        tx.send(command)
-            .map_err(|source| std::io::Error::new(std::io::ErrorKind::BrokenPipe, source))?;
+        let command = match read_command(&mut stream) {
+            Ok(command) => command,
+            Err(error @ IpcError::Command(_)) => {
+                tracing::error!(socket_path = %socket_path.display(), error = %error, "failed to parse IPC command");
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+
+        tracing::debug!(socket_path = %socket_path.display(), command = %command, "received IPC command");
+        if let Err(source) = tx.send(command.clone()) {
+            tracing::error!(socket_path = %socket_path.display(), command = %command, error = %source, "failed to forward IPC command");
+            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, source).into());
+        }
     }
 
     Ok(())

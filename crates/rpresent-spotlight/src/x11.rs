@@ -89,18 +89,34 @@ pub(crate) struct X11SpotlightOverlay {
 
 impl X11SpotlightOverlay {
     pub(crate) fn new() -> Result<Self, OverlayError> {
-        let (connection, screen_num) = x11rb::connect(None).map_err(runtime_error)?;
+        tracing::debug!("starting spotlight X11 backend");
+        let (connection, screen_num) = x11rb::connect(None)
+            .inspect_err(|error| {
+                tracing::error!(?error, "failed to connect to X11 for spotlight backend");
+            })
+            .map_err(runtime_error)?;
         let screen = &connection.setup().roots[screen_num];
-        let (depth, visual_id) = choose_visual(&connection, screen_num)?;
+        let (depth, visual_id) = choose_visual(&connection, screen_num).inspect_err(|error| {
+            tracing::error!(screen_num, ?error, "failed to choose spotlight visual");
+        })?;
         let spec = overlay_window_spec((screen.width_in_pixels, screen.height_in_pixels));
         let transparent = spec.input_transparent && depth == 32;
 
-        let colormap = connection.generate_id().map_err(runtime_error)?;
+        let colormap = connection.generate_id().inspect_err(|error| {
+            tracing::error!(screen_num, ?error, "failed to allocate spotlight colormap id");
+        })
+        .map_err(runtime_error)?;
         connection
             .create_colormap(ColormapAlloc::NONE, colormap, screen.root, visual_id)
+            .inspect_err(|error| {
+                tracing::error!(screen_num, ?error, "failed to create spotlight colormap");
+            })
             .map_err(runtime_error)?;
 
-        let window = connection.generate_id().map_err(runtime_error)?;
+        let window = connection.generate_id().inspect_err(|error| {
+            tracing::error!(screen_num, ?error, "failed to allocate spotlight window id");
+        })
+        .map_err(runtime_error)?;
         let window_aux = CreateWindowAux::new()
             .override_redirect(if spec.override_redirect { 1 } else { 0 })
             .background_pixel(if transparent {
@@ -125,14 +141,35 @@ impl X11SpotlightOverlay {
                 visual_id,
                 &window_aux,
             )
+            .inspect_err(|error| {
+                tracing::error!(screen_num, ?error, "failed to create spotlight window");
+            })
             .map_err(runtime_error)?;
 
-        let gc = connection.generate_id().map_err(runtime_error)?;
+        let gc = connection.generate_id().inspect_err(|error| {
+            tracing::error!(screen_num, ?error, "failed to allocate spotlight graphics context id");
+        })
+        .map_err(runtime_error)?;
         connection
             .create_gc(gc, window, &CreateGCAux::default().graphics_exposures(0))
+            .inspect_err(|error| {
+                tracing::error!(window, ?error, "failed to create spotlight graphics context");
+            })
             .map_err(runtime_error)?;
 
-        connection.flush().map_err(runtime_error)?;
+        connection.flush().inspect_err(|error| {
+            tracing::error!(window, ?error, "failed to flush spotlight X11 backend startup");
+        })
+        .map_err(runtime_error)?;
+
+        tracing::debug!(
+            screen_num,
+            depth,
+            width = spec.width,
+            height = spec.height,
+            transparent,
+            "spotlight X11 backend started"
+        );
 
         Ok(Self {
             connection,
@@ -145,7 +182,10 @@ impl X11SpotlightOverlay {
     }
 
     fn flush(&self) -> Result<(), OverlayError> {
-        self.connection.flush().map_err(runtime_error)
+        self.connection.flush().inspect_err(|error| {
+            tracing::error!(window = self.window, ?error, "failed to flush spotlight X11 backend");
+        })
+        .map_err(runtime_error)
     }
 }
 
@@ -153,6 +193,9 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
     fn show(&mut self) -> Result<(), OverlayError> {
         self.connection
             .map_window(self.window)
+            .inspect_err(|error| {
+                tracing::error!(window = self.window, ?error, "failed to show spotlight overlay");
+            })
             .map_err(runtime_error)?;
         self.flush()
     }
@@ -160,6 +203,9 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
     fn hide(&mut self) -> Result<(), OverlayError> {
         self.connection
             .unmap_window(self.window)
+            .inspect_err(|error| {
+                tracing::error!(window = self.window, ?error, "failed to hide spotlight overlay");
+            })
             .map_err(runtime_error)?;
         self.flush()
     }
@@ -173,8 +219,14 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
         let reply = self
             .connection
             .query_pointer(screen.root)
+            .inspect_err(|error| {
+                tracing::error!(screen_num = self.screen_num, ?error, "failed to query spotlight cursor position");
+            })
             .map_err(runtime_error)?
             .reply()
+            .inspect_err(|error| {
+                tracing::error!(screen_num = self.screen_num, ?error, "failed to read spotlight cursor position");
+            })
             .map_err(runtime_error)?;
 
         Ok(CursorPosition {
@@ -198,6 +250,15 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
                 self.depth,
                 &bytes,
             )
+            .inspect_err(|error| {
+                tracing::error!(
+                    window = self.window,
+                    width = frame.width,
+                    height = frame.height,
+                    ?error,
+                    "failed to redraw spotlight overlay"
+                );
+            })
             .map_err(runtime_error)?;
         self.flush()
     }

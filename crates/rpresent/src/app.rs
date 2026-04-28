@@ -65,10 +65,15 @@ pub enum AppError {
     Zoom(#[from] rpresent_zoom::OverlayError),
 }
 
+#[tracing::instrument(level = "debug", skip(args))]
 pub fn parse_entrypoint(args: Vec<OsString>) -> Result<AppEntry, AppError> {
+    tracing::debug!(arg_count = args.len(), "parsing entrypoint");
+
     if args.get(1).and_then(|arg| arg.to_str()) == Some("config")
         && args.get(2).and_then(|arg| arg.to_str()) == Some("init")
     {
+        tracing::debug!("resolved config init entrypoint");
+
         let filtered_args = std::iter::once(args[0].clone())
             .chain(args.into_iter().skip(3))
             .collect::<Vec<_>>();
@@ -76,13 +81,24 @@ pub fn parse_entrypoint(args: Vec<OsString>) -> Result<AppEntry, AppError> {
         return Ok(AppEntry::InitConfig(cli));
     }
 
+    tracing::debug!("resolved run entrypoint");
+
     Ok(AppEntry::Run(Cli::try_parse_from(args)?))
 }
 
+#[tracing::instrument(level = "debug", skip(cli))]
 pub fn resolve_mode(cli: &Cli) -> Result<AppMode, AppError> {
+    tracing::debug!(command = ?cli.command, "resolving app mode");
+
     match cli.command.as_deref() {
-        Some(command) => Ok(AppMode::Send(command.parse()?)),
-        None => Ok(AppMode::Run),
+        Some(command) => {
+            tracing::debug!(command = %command, "resolved send mode");
+            Ok(AppMode::Send(command.parse()?))
+        }
+        None => {
+            tracing::debug!("resolved run mode");
+            Ok(AppMode::Run)
+        }
     }
 }
 
@@ -106,33 +122,52 @@ pub fn run_from_env() -> Result<(), AppError> {
     }
 }
 
+#[tracing::instrument(level = "debug", skip(cli))]
 pub fn run(cli: Cli) -> Result<(), AppError> {
+    tracing::debug!(config_override = cli.config.is_some(), "starting app run");
+
     let mode = resolve_mode(&cli)?;
+    tracing::debug!(mode = ?mode, "resolved app mode");
+
     let config_path = match cli.config {
         Some(path) => path,
         None => default_config_path()?,
     };
+    tracing::debug!(config_path = %config_path.display(), "loading configuration");
+
     let config = load_or_default_from_path(config_path)?;
 
     match mode {
         AppMode::Send(command) => {
             let socket_path = ipc::socket_path_for(&config.app.socket_name)?;
+            tracing::debug!(socket_path = %socket_path.display(), "sending command to daemon");
             ipc::send_command(&socket_path, command)?;
             Ok(())
         }
-        AppMode::Run => run_daemon(config),
+        AppMode::Run => {
+            tracing::debug!("entering daemon mode");
+            run_daemon(config)
+        }
     }
 }
 
+#[tracing::instrument(level = "debug", skip(cli))]
 pub fn run_config_init(cli: ConfigInitCli) -> Result<PathBuf, AppError> {
+    tracing::debug!(config_override = cli.config.is_some(), "writing default config");
+
     let config_path = match cli.config {
         Some(path) => path,
         None => default_config_path()?,
     };
+    tracing::debug!(config_path = %config_path.display(), "resolved config init path");
+
     Ok(write_default_config(config_path)?)
 }
 
+#[tracing::instrument(level = "debug", skip(config))]
 fn run_daemon(config: Config) -> Result<(), AppError> {
+    tracing::debug!(socket_name = %config.app.socket_name, "starting daemon runtime");
+
     let (app_tx, app_rx) = mpsc::channel();
     let (spotlight_tx, spotlight_rx) = mpsc::channel::<SpotlightState>();
     let (annotation_tx, annotation_rx) = mpsc::channel::<AnnotationState>();
@@ -148,7 +183,7 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
 
     std::thread::spawn(move || {
         if let Err(error) = ipc::serve(&socket_path, app_tx) {
-            eprintln!("{error}");
+            tracing::error!(error = %error, "ipc server failed");
             std::process::exit(1);
         }
     });

@@ -5,5 +5,6 @@ edition = "2024"
 
 [dependencies]
 rpresent-config = { path = "../rpresent-config" }
+tracing = { workspace = true }
 thiserror = "2"
 x11rb = { version = "0.13", features = ["render"] }

@@ -7,6 +7,8 @@ use rpresent::ipc::{encode_command, read_command, send_command};
 
 #[test]
 fn round_trips_one_command_over_unix_socket() {
+    rpresent::logging::init();
+
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("rpresent.sock");
     let listener = UnixListener::bind(&socket_path).unwrap();
@@ -25,6 +27,8 @@ fn round_trips_one_command_over_unix_socket() {
 
 #[test]
 fn encodes_commands_as_single_lines() {
+    rpresent::logging::init();
+
     assert_eq!(
         encode_command(AppCommand::Zoom(ZoomCommand::On)),
         "zoom=on\n"
