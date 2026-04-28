@@ -61,6 +61,7 @@ pub(crate) struct SpotlightFrame {
 }
 
 impl SpotlightFrame {
+    #[cfg(test)]
     pub(crate) fn alpha_at(&self, x: u16, y: u16) -> u8 {
         let index = ((y as usize * self.width as usize) + x as usize) * 4 + 3;
         self.pixels[index]
@@ -90,6 +91,7 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn run(&mut self, rx: Receiver<SpotlightState>) -> Result<(), OverlayError> {
         for state in rx {
             self.process_state(state)?;
@@ -171,13 +173,34 @@ pub fn run_overlay(
     appearance: SpotlightAppearance,
     rx: Receiver<SpotlightState>,
 ) -> Result<(), OverlayError> {
-    for state in rx {
-        if matches!(state, SpotlightState::On) {
-            let _ = spotlight_alpha(
-                0.0,
-                appearance.radius_px as f32,
-                appearance.softness_px as f32,
-            );
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Duration;
+
+    let backend = crate::x11::X11SpotlightOverlay::new()?;
+    let mut runtime = SpotlightOverlayRuntime::new(appearance, backend);
+    let mut visible = false;
+
+    loop {
+        let next_state = if visible {
+            match rx.recv_timeout(Duration::from_millis(16)) {
+                Ok(state) => Some(state),
+                Err(RecvTimeoutError::Timeout) => {
+                    runtime.tick()?;
+                    None
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(state) => Some(state),
+                Err(_) => break,
+            }
+        };
+
+        if let Some(state) = next_state {
+            let next_visible = matches!(state, SpotlightState::On);
+            runtime.process_state(state)?;
+            visible = next_visible;
         }
     }
 
