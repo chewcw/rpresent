@@ -1,0 +1,67 @@
+use std::path::{Path, PathBuf};
+
+use clap::Parser;
+
+use rpresent::app::{AppEntry, AppMode, Cli, ConfigInitCli, parse_entrypoint, resolve_mode};
+use rpresent::command::{AnnotationCommand, AppCommand, SpotlightCommand, ZoomCommand};
+
+#[test]
+fn parses_config_override_and_spot_command() {
+    let cli =
+        Cli::try_parse_from(["rpresent", "--config", "/tmp/rpresent.toml", "spot=toggle"]).unwrap();
+
+    assert_eq!(cli.config.as_deref(), Some(Path::new("/tmp/rpresent.toml")));
+    assert_eq!(cli.command.as_deref(), Some("spot=toggle"));
+    assert_eq!(
+        resolve_mode(&cli).unwrap(),
+        AppMode::Send(AppCommand::Spotlight(SpotlightCommand::Toggle))
+    );
+}
+
+#[test]
+fn parses_annotation_command_and_resolve_mode() {
+    let cli = Cli::try_parse_from(["rpresent", "annotation=tool=line"]).unwrap();
+
+    assert_eq!(
+        resolve_mode(&cli).unwrap(),
+        AppMode::Send(AppCommand::Annotation(AnnotationCommand::Tool(
+            rpresent_config::AnnotationTool::Line,
+        )))
+    );
+}
+
+#[test]
+fn parses_zoom_command_and_resolve_mode() {
+    let cli = Cli::try_parse_from(["rpresent", "zoom=reset"]).unwrap();
+
+    assert_eq!(
+        resolve_mode(&cli).unwrap(),
+        AppMode::Send(AppCommand::Zoom(ZoomCommand::Reset))
+    );
+}
+
+#[test]
+fn no_command_enters_run_mode() {
+    let cli = Cli::try_parse_from(["rpresent"]).unwrap();
+
+    assert_eq!(resolve_mode(&cli).unwrap(), AppMode::Run);
+}
+
+#[test]
+fn parses_config_init_entrypoint() {
+    let entry = parse_entrypoint(vec![
+        "rpresent".into(),
+        "config".into(),
+        "init".into(),
+        "--config".into(),
+        "/tmp/rpresent.toml".into(),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        entry,
+        AppEntry::InitConfig(ConfigInitCli {
+            config: Some(PathBuf::from("/tmp/rpresent.toml")),
+        })
+    );
+}

@@ -1,0 +1,13 @@
+[package]
+name = "rpresent-zoom"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rpresent-config = { path = "../rpresent-config" }
+thiserror = "2"
+xcap = "0.4"
+winit = "0.30"
+wgpu = "0.20"
+bytemuck = { version = "1", features = ["derive"] }
+crossbeam-channel = "0.5"

@@ -1,0 +1,203 @@
+use clap::Parser;
+use std::ffi::OsString;
+use std::path::PathBuf;
+use std::sync::mpsc;
+
+use rpresent_annotation::{AnnotationAppearance, AnnotationController, AnnotationState};
+use rpresent_config::{
+    Config, default_config_path, load_or_default_from_path, write_default_config,
+};
+use rpresent_spotlight::{SpotlightAppearance, SpotlightController, SpotlightState};
+use rpresent_zoom::{ZoomAppearance, ZoomController, ZoomState};
+
+use crate::command::AppCommand;
+use crate::ipc;
+
+#[derive(Debug, Parser, Clone, PartialEq, Eq)]
+#[command(
+    version,
+    about = "Presentation shell and command router",
+    long_about = None,
+    after_long_help = "Examples:\n  rpresent spot=toggle\n  rpresent annotation=tool=line\n  rpresent zoom=reset\n  rpresent config init --config ~/.config/rpresent/config.toml"
+)]
+pub struct Cli {
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+
+    #[arg(value_name = "COMMAND")]
+    pub command: Option<String>,
+}
+
+#[derive(Debug, Parser, Clone, PartialEq, Eq)]
+#[command(version, about = "Write the default config file", long_about = None)]
+pub struct ConfigInitCli {
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppMode {
+    Run,
+    Send(AppCommand),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppEntry {
+    Run(Cli),
+    InitConfig(ConfigInitCli),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AppError {
+    #[error(transparent)]
+    Clap(#[from] clap::Error),
+    #[error(transparent)]
+    Config(#[from] rpresent_config::ConfigError),
+    #[error(transparent)]
+    Command(#[from] crate::command::AppCommandParseError),
+    #[error(transparent)]
+    Ipc(#[from] crate::ipc::IpcError),
+    #[error(transparent)]
+    Spotlight(#[from] rpresent_spotlight::OverlayError),
+    #[error(transparent)]
+    Annotation(#[from] rpresent_annotation::OverlayError),
+    #[error(transparent)]
+    Zoom(#[from] rpresent_zoom::OverlayError),
+}
+
+pub fn parse_entrypoint(args: Vec<OsString>) -> Result<AppEntry, AppError> {
+    if args.get(1).and_then(|arg| arg.to_str()) == Some("config")
+        && args.get(2).and_then(|arg| arg.to_str()) == Some("init")
+    {
+        let filtered_args = std::iter::once(args[0].clone())
+            .chain(args.into_iter().skip(3))
+            .collect::<Vec<_>>();
+        let cli = ConfigInitCli::try_parse_from(filtered_args)?;
+        return Ok(AppEntry::InitConfig(cli));
+    }
+
+    Ok(AppEntry::Run(Cli::try_parse_from(args)?))
+}
+
+pub fn resolve_mode(cli: &Cli) -> Result<AppMode, AppError> {
+    match cli.command.as_deref() {
+        Some(command) => Ok(AppMode::Send(command.parse()?)),
+        None => Ok(AppMode::Run),
+    }
+}
+
+pub fn run_from_env() -> Result<(), AppError> {
+    match parse_entrypoint(std::env::args_os().collect()) {
+        Ok(AppEntry::Run(cli)) => run(cli),
+        Ok(AppEntry::InitConfig(cli)) => {
+            let written_path = run_config_init(cli)?;
+            println!("{}", written_path.display());
+            Ok(())
+        }
+        Err(AppError::Clap(error))
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) =>
+        {
+            error.exit();
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub fn run(cli: Cli) -> Result<(), AppError> {
+    let mode = resolve_mode(&cli)?;
+    let config_path = match cli.config {
+        Some(path) => path,
+        None => default_config_path()?,
+    };
+    let config = load_or_default_from_path(config_path)?;
+
+    match mode {
+        AppMode::Send(command) => {
+            let socket_path = ipc::socket_path_for(&config.app.socket_name)?;
+            ipc::send_command(&socket_path, command)?;
+            Ok(())
+        }
+        AppMode::Run => run_daemon(config),
+    }
+}
+
+pub fn run_config_init(cli: ConfigInitCli) -> Result<PathBuf, AppError> {
+    let config_path = match cli.config {
+        Some(path) => path,
+        None => default_config_path()?,
+    };
+    Ok(write_default_config(config_path)?)
+}
+
+fn run_daemon(config: Config) -> Result<(), AppError> {
+    let (app_tx, app_rx) = mpsc::channel();
+    let (spotlight_tx, spotlight_rx) = mpsc::channel::<SpotlightState>();
+    let (annotation_tx, annotation_rx) = mpsc::channel::<AnnotationState>();
+    let (zoom_tx, zoom_rx) = crossbeam_channel::unbounded::<ZoomState>();
+    let socket_path = ipc::socket_path_for(&config.app.socket_name)?;
+
+    let spotlight_config = config.spotlight.clone();
+    let annotation_config = config.annotation.clone();
+    let zoom_config = config.zoom.clone();
+    let spotlight_appearance = SpotlightAppearance::from(spotlight_config.clone());
+    let annotation_appearance = AnnotationAppearance::from(annotation_config.clone());
+    let zoom_appearance = ZoomAppearance::from(zoom_config.clone());
+
+    std::thread::spawn(move || {
+        if let Err(error) = ipc::serve(&socket_path, app_tx) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    });
+
+    std::thread::spawn(move || {
+        let mut spotlight_controller = SpotlightController::new(spotlight_config.enabled_on_start);
+        let mut annotation_controller = AnnotationController::new(
+            annotation_config.enabled_on_start,
+            annotation_config.default_tool,
+            annotation_config.history_depth,
+        );
+        let mut zoom_controller = ZoomController::from_config(zoom_config);
+
+        let _ = spotlight_tx.send(spotlight_controller.state());
+        let _ = annotation_tx.send(annotation_controller.state());
+        let _ = zoom_tx.send(zoom_controller.state());
+
+        for command in app_rx {
+            match command {
+                AppCommand::Spotlight(command) => {
+                    if spotlight_controller.apply(command) {
+                        let _ = spotlight_tx.send(spotlight_controller.state());
+                    }
+                }
+                AppCommand::Annotation(command) => {
+                    if annotation_controller.apply(command) {
+                        let _ = annotation_tx.send(annotation_controller.state());
+                    }
+                }
+                AppCommand::Zoom(command) => {
+                    if zoom_controller.apply(command) {
+                        let _ = zoom_tx.send(zoom_controller.state());
+                    }
+                }
+            }
+        }
+    });
+
+    let spotlight_handle = std::thread::spawn(move || {
+        rpresent_spotlight::run_overlay(spotlight_appearance, spotlight_rx)
+    });
+    let annotation_handle = std::thread::spawn(move || {
+        rpresent_annotation::run_overlay(annotation_appearance, annotation_rx)
+    });
+    let zoom_handle =
+        std::thread::spawn(move || rpresent_zoom::run_overlay(zoom_appearance, zoom_rx));
+
+    spotlight_handle.join().unwrap()?;
+    annotation_handle.join().unwrap()?;
+    zoom_handle.join().unwrap()?;
+    Ok(())
+}

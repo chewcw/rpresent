@@ -1,6 +1,10 @@
-[package]
-name = "rpresent"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
+[workspace]
+members = [
+	"crates/rpresent-config",
+	"crates/rpresent-spotlight",
+	"crates/rpresent-annotation",
+	"crates/rpresent-zoom",
+	"crates/rpresent",
+]
+default-members = ["crates/rpresent"]
+resolver = "2"

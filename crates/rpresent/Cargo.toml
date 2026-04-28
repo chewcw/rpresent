@@ -1,0 +1,18 @@
+[package]
+name = "rpresent"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
+directories = "5"
+rpresent-annotation = { path = "../rpresent-annotation" }
+rpresent-config = { path = "../rpresent-config" }
+rpresent-spotlight = { path = "../rpresent-spotlight" }
+rpresent-zoom = { path = "../rpresent-zoom" }
+thiserror = "2"
+x11rb = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
