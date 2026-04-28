@@ -17,6 +17,8 @@ This repository is a Rust workspace with five crates:
 - Rust 2024 toolchain
 - Linux with X11 support
 
+The spotlight overlay uses X11 on Linux. It opens one overlay window, tracks the cursor, and redraws the spotlight mask from the current spotlight state. Transparent compositing requires a running compositor on the desktop session.
+
 ## Build and Test
 
 Run the full workspace test suite:

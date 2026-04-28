@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 rpresent-config = { path = "../rpresent-config" }
 thiserror = "2"
+x11rb = { version = "0.13", features = ["render"] }

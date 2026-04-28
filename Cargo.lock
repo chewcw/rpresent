@@ -2092,6 +2092,7 @@ version = "0.1.0"
 dependencies = [
  "rpresent-config",
  "thiserror 2.0.18",
+ "x11rb",
 ]
 
 [[package]]
