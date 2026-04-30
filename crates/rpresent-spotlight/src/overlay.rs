@@ -93,6 +93,12 @@ pub(crate) trait SpotlightOverlayBackend {
     ) -> Result<(), OverlayError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SpotlightRuntimeMessage {
+    Visibility(SpotlightState),
+    ResizeBy(f32),
+}
+
 pub(crate) struct SpotlightOverlayRuntime<B> {
     config: rpresent_config::SpotlightConfig,
     backend: B,
@@ -113,12 +119,33 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
     }
 
     #[cfg(test)]
-    pub(crate) fn run(&mut self, rx: Receiver<SpotlightState>) -> Result<(), OverlayError> {
-        for state in rx {
-            self.process_state(state)?;
+    pub(crate) fn run(&mut self, rx: Receiver<SpotlightRuntimeMessage>) -> Result<(), OverlayError> {
+        for msg in rx {
+            self.process_message(msg)?;
         }
-
         Ok(())
+    }
+
+    pub(crate) fn process_message(
+        &mut self,
+        message: SpotlightRuntimeMessage,
+    ) -> Result<(), OverlayError> {
+        match message {
+            SpotlightRuntimeMessage::Visibility(state) => self.process_state(state),
+            SpotlightRuntimeMessage::ResizeBy(delta) => {
+                let next = (self.config.radius_px as f32 + delta)
+                    .round()
+                    .clamp(24.0, 4096.0) as u32;
+                if next != self.config.radius_px {
+                    self.config.radius_px = next;
+                    self.needs_redraw = true;
+                    if self.visible {
+                        self.tick()?;
+                    }
+                }
+                Ok(())
+            }
+        }
     }
 
     pub(crate) fn process_state(&mut self, state: SpotlightState) -> Result<(), OverlayError> {
@@ -217,7 +244,7 @@ pub(crate) fn build_spotlight_frame(
 #[cfg(target_os = "linux")]
 pub fn run_overlay(
     config: rpresent_config::SpotlightConfig,
-    rx: Receiver<SpotlightState>,
+    rx: Receiver<SpotlightRuntimeMessage>,
 ) -> Result<(), OverlayError> {
     use std::sync::mpsc::RecvTimeoutError;
     use std::time::Duration;
@@ -228,9 +255,9 @@ pub fn run_overlay(
     let mut visible = false;
 
     loop {
-        let next_state = if visible {
+        let next_msg = if visible {
             match rx.recv_timeout(Duration::from_millis(16)) {
-                Ok(state) => Some(state),
+                Ok(msg) => Some(msg),
                 Err(RecvTimeoutError::Timeout) => {
                     runtime.tick()?;
                     None
@@ -239,14 +266,14 @@ pub fn run_overlay(
             }
         } else {
             match rx.recv() {
-                Ok(state) => Some(state),
+                Ok(msg) => Some(msg),
                 Err(_) => break,
             }
         };
 
-        if let Some(state) = next_state {
-            let next_visible = matches!(state, SpotlightState::On);
-            runtime.process_state(state)?;
+        if let Some(msg) = next_msg {
+            let next_visible = matches!(msg, SpotlightRuntimeMessage::Visibility(SpotlightState::On));
+            runtime.process_message(msg)?;
             visible = next_visible;
         }
     }
@@ -257,7 +284,7 @@ pub fn run_overlay(
 #[cfg(not(target_os = "linux"))]
 pub fn run_overlay(
     _config: rpresent_config::SpotlightConfig,
-    _rx: Receiver<SpotlightState>,
+    _rx: Receiver<SpotlightRuntimeMessage>,
 ) -> Result<(), OverlayError> {
     Err(OverlayError::UnsupportedPlatform)
 }
@@ -315,8 +342,8 @@ mod tests {
         let mut runtime =
             SpotlightOverlayRuntime::new(rpresent_config::SpotlightConfig::default(), backend);
 
-        tx.send(SpotlightState::On).unwrap();
-        tx.send(SpotlightState::Off).unwrap();
+        tx.send(SpotlightRuntimeMessage::Visibility(SpotlightState::On)).unwrap();
+        tx.send(SpotlightRuntimeMessage::Visibility(SpotlightState::Off)).unwrap();
         drop(tx);
 
         runtime.run(rx).unwrap();
@@ -355,6 +382,30 @@ mod tests {
         runtime.tick().unwrap();
 
         assert_eq!(runtime.backend.calls, vec!["show", "redraw", "redraw"]);
+    }
+
+    #[test]
+    fn resize_message_updates_radius_and_marks_redraw() {
+        let backend = FakeBackend {
+            surface_size: (16, 16),
+            cursor: CursorPosition { x: 8, y: 8 },
+            ..Default::default()
+        };
+
+        let mut config = rpresent_config::SpotlightConfig::default();
+        config.radius_px = 100;
+
+        let mut runtime = SpotlightOverlayRuntime::new(config, backend);
+        runtime
+            .process_message(SpotlightRuntimeMessage::Visibility(SpotlightState::On))
+            .unwrap();
+        runtime
+            .process_message(SpotlightRuntimeMessage::ResizeBy(20.0))
+            .unwrap();
+
+        assert_eq!(runtime.config.radius_px, 120);
+        // Confirm a redraw happened (backend got "show" on On, then "redraw" for the resize)
+        assert!(runtime.backend.calls.contains(&"redraw"));
     }
 
     #[test]
