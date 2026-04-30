@@ -145,7 +145,7 @@ Task 3 (polling, broken):
 	(rasterizes every tick regardless of changes)
 
 Task 3.3 (on-demand transport):
-	SpotlightOverlayRuntime::tick(cursor, config) 
+	SpotlightOverlayRuntime::tick(cursor, config)
 		→ backend.redraw(cursor, config)  [pass raw parameters, not pre-rasterized frame]
 		→ backend decides: render only if needed
 	(backend controls rasterization frequency)
@@ -161,14 +161,14 @@ Task 3.3 (on-demand transport):
 3. **Eliminate unconditional rasterization**: No per-tick rasterization unless state actually changed
 
 **Subtasks:**
-- [ ] 3.3.1: Modify `SpotlightOverlayRuntime::tick()` signature to pass `cursor` and `config` instead of pre-built frame
-- [ ] 3.3.2: Modify `SpotlightOverlayBackend::redraw()` signature to accept `cursor: CursorPosition, config: &SpotlightConfig` instead of pre-rasterized frame
-- [ ] 3.3.3: Implement state-change detection in `X11SpotlightOverlay::redraw()`:
+- [x] 3.3.1: Move `SpotlightOverlayRuntime::tick()` to pass render inputs (`cursor` + config) to the backend instead of constructing a `SpotlightFrame` in the runtime
+- [x] 3.3.2: Modify `SpotlightOverlayBackend::redraw()` to accept `cursor: CursorPosition, config: &SpotlightConfig` instead of a pre-rasterized frame
+- [x] 3.3.3: Implement backend-side change detection in `X11SpotlightOverlay::redraw()`:
 	- Compare (cursor, config) hash with last hash
 	- Only call `build_projecteur_frame()` if changed
 	- Reuse cached `SpotlightFrame` otherwise
-- [ ] 3.3.4: Update overlay.rs and controller.rs to match new signatures (pass cursor + config, not frame)
-- [ ] 3.3.5: Verify all 36 tests pass with new architecture
+- [ ] 3.3.4: Update remaining call sites to match the new backend contract as Task 3.3 expands; `overlay.rs` is updated, and `controller.rs` does not currently depend on the redraw signature
+- [x] 3.3.5: Verify all 36 tests pass with new architecture (`cargo test -p rpresent-spotlight` and `cargo test -p rpresent`)
 - [ ] 3.3.6: Benchmark: Measure CPU usage under static cursor, moving cursor, rapid movement (compare vs Task 3.2)
 - [ ] 3.3.7: Document performance gains in PERFORMANCE_ANALYSIS.md
 - [ ] 3.3.8: Commit with message "task 3.3: restore on-demand architecture for maximum performance recovery"
