@@ -272,9 +272,10 @@ pub fn run_overlay(
         };
 
         if let Some(msg) = next_msg {
-            let next_visible = matches!(msg, SpotlightRuntimeMessage::Visibility(SpotlightState::On));
+            if let SpotlightRuntimeMessage::Visibility(state) = msg {
+                visible = matches!(state, SpotlightState::On);
+            }
             runtime.process_message(msg)?;
-            visible = next_visible;
         }
     }
 
