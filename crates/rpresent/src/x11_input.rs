@@ -37,34 +37,95 @@ fn run_input_loop(
     // Passive grab Ctrl+1/2/3 on the root window for global shortcut capture.
     // ChangeWindowAttributes with KEY_PRESS does NOT capture events over other windows;
     // GrabKey is required for global hotkey delivery.
+    // Use common lock-mask variants so Ctrl+<key> still works when NumLock/CapsLock is active.
+    let key_grab_modifiers = [
+        ModMask::CONTROL,
+        ModMask::CONTROL | ModMask::LOCK,
+        ModMask::CONTROL | ModMask::M2,
+        ModMask::CONTROL | ModMask::M2 | ModMask::LOCK,
+        ModMask::CONTROL | ModMask::M5,
+        ModMask::CONTROL | ModMask::M5 | ModMask::LOCK,
+        ModMask::CONTROL | ModMask::M2 | ModMask::M5,
+        ModMask::CONTROL | ModMask::M2 | ModMask::M5 | ModMask::LOCK,
+    ];
     for &keycode in keycode_map.keys() {
-        conn.grab_key(
-            false,
-            root,
-            ModMask::CONTROL,
-            keycode,
-            GrabMode::ASYNC,
-            GrabMode::ASYNC,
-        )?
-        .check()?;
+        for modifiers in key_grab_modifiers {
+            match conn.grab_key(
+                false,
+                root,
+                modifiers,
+                keycode,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            ) {
+                Ok(cookie) => {
+                    if let Err(error) = cookie.check() {
+                        tracing::warn!(
+                            keycode,
+                            ?modifiers,
+                            ?error,
+                            "failed to grab global key shortcut"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        keycode,
+                        ?modifiers,
+                        ?error,
+                        "failed to request global key shortcut grab"
+                    );
+                }
+            }
+        }
     }
 
     // Passive grab Ctrl+wheel (buttons 4 and 5) globally on the root window.
     // ChangeWindowAttributes with BUTTON_PRESS only fires when the pointer is over the root
     // background; GrabButton is required to intercept wheel events over any window.
+    let wheel_grab_modifiers = [
+        ModMask::CONTROL,
+        ModMask::CONTROL | ModMask::LOCK,
+        ModMask::CONTROL | ModMask::M2,
+        ModMask::CONTROL | ModMask::M2 | ModMask::LOCK,
+        ModMask::CONTROL | ModMask::M5,
+        ModMask::CONTROL | ModMask::M5 | ModMask::LOCK,
+        ModMask::CONTROL | ModMask::M2 | ModMask::M5,
+        ModMask::CONTROL | ModMask::M2 | ModMask::M5 | ModMask::LOCK,
+    ];
     for button in [ButtonIndex::M4, ButtonIndex::M5] {
-        conn.grab_button(
-            false,
-            root,
-            EventMask::BUTTON_PRESS,
-            GrabMode::ASYNC,
-            GrabMode::ASYNC,
-            0u32, // confine_to: NONE
-            0u32, // cursor: NONE
-            button,
-            ModMask::CONTROL,
-        )?
-        .check()?;
+        for modifiers in wheel_grab_modifiers {
+            match conn.grab_button(
+                false,
+                root,
+                EventMask::BUTTON_PRESS,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+                0u32, // confine_to: NONE
+                0u32, // cursor: NONE
+                button,
+                modifiers,
+            ) {
+                Ok(cookie) => {
+                    if let Err(error) = cookie.check() {
+                        tracing::warn!(
+                            ?button,
+                            ?modifiers,
+                            ?error,
+                            "failed to grab global wheel shortcut"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        ?button,
+                        ?modifiers,
+                        ?error,
+                        "failed to request global wheel shortcut grab"
+                    );
+                }
+            }
+        }
     }
 
     conn.flush()?;
