@@ -272,6 +272,7 @@ pub fn run_overlay(
         };
 
         if let Some(msg) = next_msg {
+            // ResizeBy does not change visibility — only Visibility messages control the recv-mode timing
             if let SpotlightRuntimeMessage::Visibility(state) = msg {
                 visible = matches!(state, SpotlightState::On);
             }
@@ -445,8 +446,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(runtime.config.radius_px, 120);
-        // Confirm a redraw happened (backend got "show" on On, then "redraw" for the resize)
-        assert!(runtime.backend.calls.contains(&"redraw"));
+        assert_eq!(runtime.backend.calls, vec!["show", "redraw", "redraw"]);
     }
 
     #[test]
