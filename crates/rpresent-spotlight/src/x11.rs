@@ -250,6 +250,13 @@ struct DotRenderCache {
     picture: Picture,
 }
 
+struct SoftwareFrameBuffer {
+    width: u16,
+    height: u16,
+    depth: u8,
+    image: Image<'static>,
+}
+
 pub(crate) struct X11SpotlightOverlay {
     connection: RustConnection,
     screen_num: usize,
@@ -257,6 +264,7 @@ pub(crate) struct X11SpotlightOverlay {
     surface_size: (u16, u16),
     backend: BackendKind,
     dot_cache: Option<DotRenderCache>,
+    software_frame_buffer: Option<SoftwareFrameBuffer>,
 }
 
 impl X11SpotlightOverlay {
@@ -355,6 +363,7 @@ impl X11SpotlightOverlay {
             surface_size: (spec.width, spec.height),
             backend,
             dot_cache: None,
+            software_frame_buffer: None,
         })
     }
 
@@ -641,6 +650,7 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
                     self.surface_size,
                     cursor,
                     config,
+                    &mut self.software_frame_buffer,
                 )
             }
         };
@@ -814,19 +824,51 @@ fn redraw_software(
     surface_size: (u16, u16),
     cursor: CursorPosition,
     config: &rpresent_config::SpotlightConfig,
+    software_frame_buffer: &mut Option<SoftwareFrameBuffer>,
 ) -> Result<(), OverlayError> {
     let frame = crate::render::build_projecteur_frame(surface_size, cursor, config);
-    let mut image = Image::allocate_native(frame.width, frame.height, depth, connection.setup())
-        .map_err(runtime_error)?;
-    if image.data().len() != frame.pixels.len() {
+
+    let needs_realloc = software_frame_buffer
+        .as_ref()
+        .map(|buffer| {
+            buffer.width != frame.width || buffer.height != frame.height || buffer.depth != depth
+        })
+        .unwrap_or(true);
+
+    if needs_realloc {
+        let image = Image::allocate_native(frame.width, frame.height, depth, connection.setup())
+            .map_err(runtime_error)?;
+        if image.data().len() != frame.pixels.len() {
+            return Err(runtime_error(format!(
+                "spotlight frame size mismatch: image expects {} bytes, frame has {} bytes",
+                image.data().len(),
+                frame.pixels.len()
+            )));
+        }
+
+        *software_frame_buffer = Some(SoftwareFrameBuffer {
+            width: frame.width,
+            height: frame.height,
+            depth,
+            image,
+        });
+    }
+
+    let buffer = software_frame_buffer
+        .as_mut()
+        .ok_or_else(|| runtime_error("software frame buffer unavailable"))?;
+
+    if buffer.image.data().len() != frame.pixels.len() {
         return Err(runtime_error(format!(
             "spotlight frame size mismatch: image expects {} bytes, frame has {} bytes",
-            image.data().len(),
+            buffer.image.data().len(),
             frame.pixels.len()
         )));
     }
-    image.data_mut().copy_from_slice(&frame.pixels);
-    let _ = image
+
+    buffer.image.data_mut().copy_from_slice(&frame.pixels);
+    let _ = buffer
+        .image
         .put(connection, window, gc, 0, 0)
         .inspect_err(|error| {
             tracing::error!(
