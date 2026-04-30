@@ -223,7 +223,7 @@ fn create_gradient_picture<'a>(
 }
 
 enum BackendKind {
-    Render { window_picture: Picture, depth: u8 },
+    Render { window_picture: Picture, gc: Gcontext, depth: u8 },
     Software { gc: Gcontext, depth: u8 },
 }
 
@@ -542,6 +542,9 @@ impl Drop for X11SpotlightOverlay {
         if let Some(cache) = self.dot_cache.take() {
             free_dot_cache(&self.connection, cache);
         }
+        if let BackendKind::Render { gc, .. } = self.backend {
+            let _ = self.connection.free_gc(gc);
+        }
     }
 }
 
@@ -612,8 +615,9 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
         cursor: CursorPosition,
         config: &SpotlightConfig,
     ) -> Result<(), OverlayError> {
-        let result = match self.backend {
-            BackendKind::Render { window_picture, depth } => {
+        let strategy = select_render_strategy(config);
+        let result = match (strategy, &self.backend) {
+            (RenderStrategy::XrenderRadial, &BackendKind::Render { window_picture, depth, .. }) => {
                 let appearance = legacy_appearance(config);
                 redraw_render(
                     &self.connection,
@@ -627,7 +631,8 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
                     depth,
                 )
             }
-            BackendKind::Software { gc, depth } => {
+            (RenderStrategy::SoftwareFrame, &BackendKind::Render { gc, depth, .. })
+            | (_, &BackendKind::Software { gc, depth }) => {
                 redraw_software(
                     &self.connection,
                     self.window,
@@ -670,9 +675,14 @@ fn create_backend(
                     &CreatePictureAux::default(),
                 ) {
                     Ok(window_picture) => {
+                        let gc = connection.generate_id().map_err(runtime_error)?;
+                        connection
+                            .create_gc(gc, window, &CreateGCAux::default().graphics_exposures(0))
+                            .map_err(runtime_error)?;
                         tracing::debug!(window, pictformat, "using XRender spotlight backend");
                         Ok(BackendKind::Render {
                             window_picture: window_picture.into_picture(),
+                            gc,
                             depth,
                         })
                     }
