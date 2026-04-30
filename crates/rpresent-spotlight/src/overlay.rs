@@ -141,11 +141,25 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
         match message {
             SpotlightRuntimeMessage::Visibility(state) => self.process_state(state),
             SpotlightRuntimeMessage::ResizeBy(delta) => {
-                let next = (self.config.radius_px as f32 + delta)
+                let next_radius = (self.config.radius_px as f32 + delta)
                     .round()
                     .clamp(24.0, 4096.0) as u32;
-                if next != self.config.radius_px {
-                    self.config.radius_px = next;
+
+                // Keep spot_size_pct in sync so the software/QML renderer (which uses
+                // spot_size_pct, not radius_px) also reflects the resize.
+                // Formula: spot_size_pct = radius_px * 200 / surface_height
+                let next_size_pct = match self.backend.surface_size() {
+                    Ok((_, h)) if h > 0 => {
+                        ((next_radius as f32 * 200.0 / h as f32).round() as u32).max(1)
+                    }
+                    _ => self.config.spot_size_pct,
+                };
+
+                if next_radius != self.config.radius_px
+                    || next_size_pct != self.config.spot_size_pct
+                {
+                    self.config.radius_px = next_radius;
+                    self.config.spot_size_pct = next_size_pct;
                     self.needs_redraw = true;
                     if self.visible {
                         self.tick()?;
@@ -459,6 +473,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(runtime.config.radius_px, 120);
+        // spot_size_pct must be synced so the software/QML renderer (which reads it) also
+        // reflects the resize. surface_size is (16,16) → pct = 120 * 200 / 16 = 1500.
+        assert_eq!(runtime.config.spot_size_pct, 1500);
         assert_eq!(runtime.backend.calls, vec!["show", "redraw", "redraw"]);
     }
 
