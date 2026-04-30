@@ -7,7 +7,7 @@ use rpresent_annotation::{AnnotationAppearance, AnnotationController, Annotation
 use rpresent_config::{
     Config, default_config_path, load_or_default_from_path, write_default_config,
 };
-use rpresent_spotlight::{SpotlightAppearance, SpotlightController, SpotlightState};
+use rpresent_spotlight::{SpotlightController, SpotlightState};
 use rpresent_zoom::{ZoomAppearance, ZoomController, ZoomState};
 
 use crate::command::AppCommand;
@@ -177,7 +177,6 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
     let spotlight_config = config.spotlight.clone();
     let annotation_config = config.annotation.clone();
     let zoom_config = config.zoom.clone();
-    let spotlight_appearance = SpotlightAppearance::from(spotlight_config.clone());
     let annotation_appearance = AnnotationAppearance::from(annotation_config.clone());
     let zoom_appearance = ZoomAppearance::from(zoom_config.clone());
 
@@ -223,7 +222,7 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
     });
 
     let spotlight_handle = std::thread::spawn(move || {
-        rpresent_spotlight::run_overlay(spotlight_appearance, spotlight_rx)
+        rpresent_spotlight::run_overlay(spotlight_config, spotlight_rx)
     });
     let annotation_handle = std::thread::spawn(move || {
         rpresent_annotation::run_overlay(annotation_appearance, annotation_rx)
