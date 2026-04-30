@@ -6,11 +6,11 @@ use x11rb::protocol::render::{
 };
 use x11rb::protocol::xproto::{
     ColormapAlloc, ConnectionExt as XprotoConnectionExt, CreateGCAux, CreateWindowAux, Gcontext,
-    Pixmap, Visualid, Window, WindowClass,
+    Visualid, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 
-use crate::overlay::{CursorPosition, OverlayError, SpotlightFrame, SpotlightOverlayBackend};
+use crate::overlay::{CursorPosition, OverlayError, SpotlightOverlayBackend};
 use rpresent_config::SpotlightConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,43 +80,6 @@ fn choose_visual(
     }
 
     Ok((screen.root_depth, screen.root_visual))
-}
-
-/// Try to find a 32-bit BGRA XRender format (matching the visual format).
-/// Returns `None` if XRender is not available or no suitable format exists.
-fn find_xrender_bgra_format(
-    connection: &RustConnection,
-) -> Result<Option<u32>, OverlayError> {
-    if connection
-        .extension_information(render::X11_EXTENSION_NAME)
-        .map_err(runtime_error)?
-        .is_none()
-    {
-        return Ok(None);
-    }
-
-    let formats = connection
-        .render_query_pict_formats()
-        .map_err(runtime_error)?
-        .reply()
-        .map_err(runtime_error)?;
-
-    Ok(formats
-        .formats
-        .iter()
-        .find(|format| {
-            format.type_ == PictType::DIRECT
-                && format.depth == 32
-                && format.direct.red_shift == 16
-                && format.direct.red_mask == 255
-                && format.direct.green_shift == 8
-                && format.direct.green_mask == 255
-                && format.direct.blue_shift == 0
-                && format.direct.blue_mask == 255
-                && format.direct.alpha_shift == 24
-                && format.direct.alpha_mask == 255
-        })
-        .map(|f| f.id))
 }
 
 fn find_visual_format(
@@ -225,18 +188,9 @@ fn create_gradient_picture<'a>(
     Ok(gradient)
 }
 
-/// (Task 3.2) Compute a simple hash of frame pixel data for caching.
-/// Uses a 64-bit seed-based hash to detect pixel changes.
-fn hash_frame(frame: &SpotlightFrame) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    // Hash dimensions and pixel data
-    frame.width.hash(&mut hasher);
-    frame.height.hash(&mut hasher);
-    frame.pixels.hash(&mut hasher);
-    hasher.finish()
+enum BackendKind {
+    Render { window_picture: Picture },
+    Software { gc: Gcontext, depth: u8 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,27 +215,7 @@ pub(crate) struct X11SpotlightOverlay {
     screen_num: usize,
     window: Window,
     surface_size: (u16, u16),
-    gc: Gcontext,
-    depth: u8,
-    /// Reused image buffer (software fallback); reallocated only on surface dimension change.
-    image_buf: Option<Image<'static>>,
-    /// XRender support flag: set if both XRender is available and BGRA format is found.
-    xrender_available: bool,
-    /// Optional XRender picture ID for compositing (created on first redraw if XRender available).
-    picture: Option<Picture>,
-    /// XRender pixmap ID paired with the picture (created on first redraw if XRender available).
-    pixmap: Option<Pixmap>,
-    /// XRender format ID for BGRA32 (cached at startup if available).
-    pictformat: Option<u32>,
-    /// XRender window picture for direct compositing.
-    window_picture: Option<Picture>,
-    /// (Task 3.2) Hash of the last rendered frame for pixmap caching.
-    /// If frame hash matches, skip rasterization and reuse cached pixmap.
-    last_frame_hash: u64,
-    /// Last cursor position rendered by this backend.
-    /// The current runtime keeps config fixed, so cursor + surface validity is enough
-    /// to avoid rebuilding identical frames in the backend hot path.
-    last_cursor: Option<CursorPosition>,
+    backend: BackendKind,
 }
 
 impl X11SpotlightOverlay {
@@ -351,26 +285,7 @@ impl X11SpotlightOverlay {
             })
             .map_err(runtime_error)?;
 
-        let gc = connection
-            .generate_id()
-            .inspect_err(|error| {
-                tracing::error!(
-                    window,
-                    ?error,
-                    "failed to allocate spotlight graphics context id"
-                );
-            })
-            .map_err(runtime_error)?;
-        connection
-            .create_gc(gc, window, &CreateGCAux::default().graphics_exposures(0))
-            .inspect_err(|error| {
-                tracing::error!(
-                    window,
-                    ?error,
-                    "failed to create spotlight graphics context"
-                );
-            })
-            .map_err(runtime_error)?;
+        let backend = create_backend(&connection, window, screen_num, visual_id, depth)?;
 
         connection
             .flush()
@@ -383,79 +298,12 @@ impl X11SpotlightOverlay {
             })
             .map_err(runtime_error)?;
 
-        // Detect XRender support and create window picture.
-        let (xrender_available, pictformat, window_picture) =
-            match find_xrender_bgra_format(&connection) {
-                Ok(Some(fmt)) => {
-                    // Try to create a picture for the window.
-                    match connection.render_create_picture(
-                        connection
-                            .generate_id()
-                            .map_err(runtime_error)?,
-                        window,
-                        fmt,
-                        &Default::default(),
-                    ) {
-                        Ok(_) => {
-                            let pic_id = connection
-                                .generate_id()
-                                .map_err(runtime_error)?;
-                            match connection.render_create_picture(
-                                pic_id,
-                                window,
-                                fmt,
-                                &Default::default(),
-                            ) {
-                                Ok(_) => {
-                                    tracing::debug!(
-                                        screen_num,
-                                        format = fmt,
-                                        "XRender BGRA32 format available"
-                                    );
-                                    (true, Some(fmt), Some(pic_id))
-                                }
-                                Err(e) => {
-                                    tracing::debug!(
-                                        ?e,
-                                        "failed to create XRender window picture; fallback to software"
-                                    );
-                                    (false, Some(fmt), None)
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::debug!(
-                                ?e,
-                                "failed to test XRender picture creation; fallback to software"
-                            );
-                            (false, Some(fmt), None)
-                        }
-                    }
-                }
-                Ok(None) => {
-                    tracing::debug!(
-                        screen_num,
-                        "XRender not available; using software upload fallback"
-                    );
-                    (false, None, None)
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        screen_num,
-                        ?e,
-                        "error detecting XRender; fallback to software"
-                    );
-                    (false, None, None)
-                }
-            };
-
         tracing::debug!(
             screen_num,
             depth,
             width = spec.width,
             height = spec.height,
             transparent,
-            xrender_available,
             "spotlight X11 backend started"
         );
 
@@ -464,16 +312,7 @@ impl X11SpotlightOverlay {
             screen_num,
             window,
             surface_size: (spec.width, spec.height),
-            gc,
-            depth,
-            image_buf: None,
-            xrender_available,
-            picture: None,
-            pixmap: None,
-            pictformat,
-            window_picture,
-            last_frame_hash: 0,
-            last_cursor: None,
+            backend,
         })
     }
 
@@ -490,112 +329,6 @@ impl X11SpotlightOverlay {
             .map_err(runtime_error)
     }
 
-    fn cleanup_xrender(&mut self) {
-        if let Some(pic) = self.picture.take() {
-            let _ = self.connection.render_free_picture(pic);
-        }
-        if let Some(pix) = self.pixmap.take() {
-            let _ = self.connection.free_pixmap(pix);
-        }
-        if let Some(wpic) = self.window_picture.take() {
-            let _ = self.connection.render_free_picture(wpic);
-        }
-    }
-
-    fn redraw_frame(&mut self, frame: &SpotlightFrame) -> Result<(), OverlayError> {
-        // (Task 3.2) Check if frame content is identical to last redraw via hash.
-        // If unchanged, skip pixel upload to avoid network bandwidth on remote X11.
-        let frame_hash = hash_frame(frame);
-
-        let needs_realloc = self.image_buf.as_ref().map_or(true, |img: &Image<'_>| {
-            img.width() != frame.width || img.height() != frame.height
-        });
-
-        // On window resize, invalidate frame hash cache to force fresh upload (Task 3.2 cache invalidation)
-        if needs_realloc {
-            self.last_frame_hash = 0;
-        }
-
-        if frame_hash == self.last_frame_hash && self.image_buf.is_some() && !needs_realloc {
-            tracing::trace!(
-                frame_hash,
-                "spotlight frame unchanged; skipping pixel upload (Task 3.2 cache hit)"
-            );
-            return self.flush();
-        }
-
-        // If XRender is available, use cached pixmap/picture for compositing (when implemented).
-        // For now, we use PutImage to the window (software fallback), but the architecture
-        // supports future optimization via XRender pixmaps and composite operations.
-        if self.xrender_available && needs_realloc && self.window_picture.is_some() {
-            // Reallocate XRender pixmap/picture for new frame size.
-            if let Some(pic) = self.picture.take() {
-                let _ = self.connection.render_free_picture(pic);
-            }
-            if let Some(pix) = self.pixmap.take() {
-                let _ = self.connection.free_pixmap(pix);
-            }
-
-            let pixmap = self.connection.generate_id().map_err(runtime_error)?;
-            self.connection
-                .create_pixmap(self.depth, pixmap, self.window, frame.width, frame.height)
-                .map_err(runtime_error)?;
-
-            if let Some(fmt) = self.pictformat {
-                let picture = self.connection.generate_id().map_err(runtime_error)?;
-                if self
-                    .connection
-                    .render_create_picture(picture, pixmap, fmt, &Default::default())
-                    .is_ok()
-                {
-                    self.picture = Some(picture);
-                    self.pixmap = Some(pixmap);
-                    tracing::trace!(pixmap, picture, "created XRender pixmap for spotlight");
-                } else {
-                    let _ = self.connection.free_pixmap(pixmap);
-                }
-            }
-        }
-
-        // Allocate or reuse image buffer (both XRender and software paths need this).
-        if needs_realloc {
-            self.image_buf = Some(
-                Image::allocate_native(frame.width, frame.height, self.depth, self.connection.setup())
-                    .map_err(runtime_error)?,
-            );
-        }
-
-        let image = self.image_buf.as_mut().expect("allocated above");
-        if image.data().len() != frame.pixels.len() {
-            return Err(runtime_error(format!(
-                "spotlight frame size mismatch: image expects {} bytes, frame has {} bytes",
-                image.data().len(),
-                frame.pixels.len()
-            )));
-        }
-        image.data_mut().copy_from_slice(&frame.pixels);
-
-        // Upload pixels to window via PutImage.
-        // TODO: For XRender-capable systems, upload to cached pixmap and composite,
-        // avoiding direct window PutImage and keeping pixel data server-side.
-        image
-            .put(&self.connection, self.window, self.gc, 0, 0)
-            .inspect_err(|error| {
-                tracing::error!(
-                    window = self.window,
-                    width = frame.width,
-                    height = frame.height,
-                    ?error,
-                    "failed to redraw spotlight overlay"
-                );
-            })
-            .map_err(runtime_error)?;
-
-        // (Task 3.2) Update frame hash on successful upload.
-        self.last_frame_hash = frame_hash;
-
-        self.flush()
-    }
 }
 
 impl SpotlightOverlayBackend for X11SpotlightOverlay {
@@ -665,26 +398,191 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
         cursor: CursorPosition,
         config: &SpotlightConfig,
     ) -> Result<(), OverlayError> {
-        let needs_realloc = self.image_buf.as_ref().map_or(true, |img: &Image<'_>| {
-            img.width() != self.surface_size.0 || img.height() != self.surface_size.1
-        });
-
-        if self.last_cursor == Some(cursor) && self.image_buf.is_some() && !needs_realloc {
-            tracing::trace!(?cursor, "spotlight backend inputs unchanged; skipping rerender");
-            return self.flush();
-        }
-
-        let frame = crate::render::build_projecteur_frame(self.surface_size, cursor, config);
-        self.redraw_frame(&frame)?;
-        self.last_cursor = Some(cursor);
-        Ok(())
+        let result = match self.backend {
+            BackendKind::Render { window_picture } => {
+                let appearance = legacy_appearance(config);
+                redraw_render(
+                    &self.connection,
+                    self.window,
+                    window_picture,
+                    self.surface_size,
+                    cursor,
+                    &appearance,
+                )
+            }
+            BackendKind::Software { gc, depth } => {
+                redraw_software(
+                    &self.connection,
+                    self.window,
+                    gc,
+                    depth,
+                    self.surface_size,
+                    cursor,
+                    config,
+                )
+            }
+        };
+        result.inspect_err(|error| {
+            tracing::error!(window = self.window, ?error, "failed to redraw spotlight overlay");
+        })?;
+        self.flush()
     }
 }
 
-impl Drop for X11SpotlightOverlay {
-    fn drop(&mut self) {
-        self.cleanup_xrender();
+fn create_backend(
+    connection: &RustConnection,
+    window: Window,
+    screen_num: usize,
+    visual_id: Visualid,
+    depth: u8,
+) -> Result<BackendKind, OverlayError> {
+    match connection
+        .extension_information(render::X11_EXTENSION_NAME)
+        .map_err(runtime_error)?
+    {
+        Some(_) => match connection
+            .render_query_pict_formats()
+            .map_err(runtime_error)?
+            .reply()
+        {
+            Ok(reply) => match find_visual_format(&reply, screen_num, visual_id) {
+                Some(pictformat) => match PictureWrapper::create_picture(
+                    connection,
+                    window,
+                    pictformat,
+                    &CreatePictureAux::default(),
+                ) {
+                    Ok(window_picture) => {
+                        tracing::debug!(window, pictformat, "using XRender spotlight backend");
+                        Ok(BackendKind::Render {
+                            window_picture: window_picture.into_picture(),
+                        })
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            window,
+                            ?error,
+                            "failed to create XRender spotlight picture; falling back to software backend"
+                        );
+                        create_software_backend(connection, window, depth)
+                    }
+                },
+                None => {
+                    tracing::debug!(
+                        window,
+                        "XRender alpha format unavailable for spotlight visual; using software backend"
+                    );
+                    create_software_backend(connection, window, depth)
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    window,
+                    ?error,
+                    "failed to query XRender formats; using software backend"
+                );
+                create_software_backend(connection, window, depth)
+            }
+        },
+        None => create_software_backend(connection, window, depth),
     }
+}
+
+fn create_software_backend(
+    connection: &RustConnection,
+    window: Window,
+    depth: u8,
+) -> Result<BackendKind, OverlayError> {
+    let gc = connection
+        .generate_id()
+        .inspect_err(|error| {
+            tracing::error!(
+                window,
+                ?error,
+                "failed to allocate spotlight graphics context id"
+            );
+        })
+        .map_err(runtime_error)?;
+    connection
+        .create_gc(gc, window, &CreateGCAux::default().graphics_exposures(0))
+        .inspect_err(|error| {
+            tracing::error!(
+                window,
+                ?error,
+                "failed to create spotlight graphics context"
+            );
+        })
+        .map_err(runtime_error)?;
+
+    Ok(BackendKind::Software { gc, depth })
+}
+
+fn redraw_render(
+    connection: &RustConnection,
+    window: Window,
+    window_picture: Picture,
+    surface_size: (u16, u16),
+    cursor: CursorPosition,
+    appearance: &crate::overlay::SpotlightAppearance,
+) -> Result<(), OverlayError> {
+    let gradient = create_gradient_picture(connection, cursor, appearance)?;
+    let _ = render::composite(
+        connection,
+        PictOp::SRC,
+        gradient.picture(),
+        x11rb::NONE,
+        window_picture,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        surface_size.0,
+        surface_size.1,
+    )
+    .inspect_err(|error| {
+        tracing::error!(window, ?error, "failed to composite spotlight overlay");
+    })
+    .map_err(runtime_error)?;
+
+    Ok(())
+}
+
+fn redraw_software(
+    connection: &RustConnection,
+    window: Window,
+    gc: Gcontext,
+    depth: u8,
+    surface_size: (u16, u16),
+    cursor: CursorPosition,
+    config: &rpresent_config::SpotlightConfig,
+) -> Result<(), OverlayError> {
+    let frame = crate::render::build_projecteur_frame(surface_size, cursor, config);
+    let mut image = Image::allocate_native(frame.width, frame.height, depth, connection.setup())
+        .map_err(runtime_error)?;
+    if image.data().len() != frame.pixels.len() {
+        return Err(runtime_error(format!(
+            "spotlight frame size mismatch: image expects {} bytes, frame has {} bytes",
+            image.data().len(),
+            frame.pixels.len()
+        )));
+    }
+    image.data_mut().copy_from_slice(&frame.pixels);
+    let _ = image
+        .put(connection, window, gc, 0, 0)
+        .inspect_err(|error| {
+            tracing::error!(
+                window,
+                width = frame.width,
+                height = frame.height,
+                ?error,
+                "failed to redraw spotlight overlay"
+            );
+        })
+        .map_err(runtime_error)?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -705,7 +603,7 @@ mod tests {
 
     #[test]
     fn redraw_frame_uses_the_same_pixel_dimensions() {
-        let frame = SpotlightFrame {
+        let frame = crate::overlay::SpotlightFrame {
             width: 2,
             height: 1,
             pixels: vec![0, 0, 0, 255, 0, 0, 0, 0],
