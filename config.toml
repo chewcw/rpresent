@@ -3,10 +3,10 @@ socket_name = "rpresent.sock"
 
 [spotlight]
 enabled_on_start = true
-show_spot_shade = true
-spot_size_pct = 30
+show_spot_shade = false
+spot_size_pct = 10
 spot_rotation_deg = 0.0
-show_center_dot = true
+show_center_dot = false
 dot_size_px = 8
 dot_color = "#ffffff"
 dot_opacity = 0.8
