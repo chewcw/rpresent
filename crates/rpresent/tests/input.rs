@@ -59,3 +59,24 @@ fn spotlight_wheel_requires_the_active_mode_and_modifier() {
         Some(InputAction::SpotlightWheel { delta: 1.0 })
     );
 }
+
+#[test]
+fn spotlight_wheel_accepts_ctrl_aliases() {
+    let bindings = InputBindings::from(&ShortcutConfig::default());
+    let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);
+
+    assert!(router.handle_key("Ctrl+1").is_some());
+    assert_eq!(
+        router.handle_wheel("Control", 1.0),
+        Some(InputAction::SpotlightWheel { delta: 1.0 })
+    );
+}
+
+#[test]
+fn spotlight_wheel_is_blocked_outside_spotlight_mode_even_with_ctrl() {
+    let bindings = InputBindings::from(&ShortcutConfig::default());
+    let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);
+
+    assert!(router.handle_key("Ctrl+2").is_some());
+    assert_eq!(router.handle_wheel("Control", 1.0), None);
+}

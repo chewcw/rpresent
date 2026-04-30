@@ -70,12 +70,20 @@ impl InputRouter {
     }
 
     pub fn handle_wheel(&self, modifier: &str, delta: f32) -> Option<InputAction> {
-        if self.active_mode == ActiveMode::Spotlight
-            && modifier == self.bindings.spotlight_wheel_modifier
-        {
+        let active_modifier = normalize_modifier(modifier);
+        let configured_modifier = normalize_modifier(&self.bindings.spotlight_wheel_modifier);
+
+        if self.active_mode == ActiveMode::Spotlight && active_modifier == configured_modifier {
             Some(InputAction::SpotlightWheel { delta })
         } else {
             None
         }
+    }
+}
+
+fn normalize_modifier(raw: &str) -> &str {
+    match raw {
+        "Control" => "Ctrl",
+        other => other,
     }
 }
