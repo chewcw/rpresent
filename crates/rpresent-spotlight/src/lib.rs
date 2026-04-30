@@ -6,6 +6,11 @@ pub(crate) mod render;
 #[cfg(target_os = "linux")]
 mod x11;
 
+#[cfg(feature = "qml")]
+pub(crate) mod qml_backend;
+#[cfg(feature = "qml")]
+pub use qml_backend::IpcMessage;
+
 pub use command::{CommandParseError, SpotlightCommand};
 pub use controller::{SpotlightController, SpotlightState};
 pub use overlay::{CursorPosition, OverlayError, SpotlightAppearance, SpotlightFrame, run_overlay, spotlight_alpha};
