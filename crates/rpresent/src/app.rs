@@ -11,7 +11,13 @@ use rpresent_spotlight::{SpotlightController, SpotlightRuntimeMessage};
 use rpresent_zoom::{ZoomAppearance, ZoomController, ZoomState};
 
 use crate::command::AppCommand;
+use crate::input::InputAction;
 use crate::ipc;
+
+pub(crate) enum AppEvent {
+    Command(AppCommand),
+    Input(InputAction),
+}
 
 #[derive(Debug, Parser, Clone, PartialEq, Eq)]
 #[command(
@@ -168,7 +174,8 @@ pub fn run_config_init(cli: ConfigInitCli) -> Result<PathBuf, AppError> {
 fn run_daemon(config: Config) -> Result<(), AppError> {
     tracing::debug!(socket_name = %config.app.socket_name, "starting daemon runtime");
 
-    let (app_tx, app_rx) = mpsc::channel();
+    let (ipc_tx, ipc_rx) = mpsc::channel::<AppCommand>();
+    let (event_tx, event_rx) = mpsc::channel::<AppEvent>();
     let (spotlight_tx, spotlight_rx) = mpsc::channel::<SpotlightRuntimeMessage>();
     let (annotation_tx, annotation_rx) = mpsc::channel::<AnnotationState>();
     let (zoom_tx, zoom_rx) = crossbeam_channel::unbounded::<ZoomState>();
@@ -180,12 +187,23 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
     let annotation_appearance = AnnotationAppearance::from(annotation_config.clone());
     let zoom_appearance = ZoomAppearance::from(zoom_config.clone());
 
+    // Forward IPC commands into unified event channel
+    let event_tx_for_ipc = event_tx.clone();
     std::thread::spawn(move || {
-        if let Err(error) = ipc::serve(&socket_path, app_tx) {
+        for cmd in ipc_rx {
+            let _ = event_tx_for_ipc.send(AppEvent::Command(cmd));
+        }
+    });
+    std::thread::spawn(move || {
+        if let Err(error) = ipc::serve(&socket_path, ipc_tx) {
             tracing::error!(error = %error, "ipc server failed");
             std::process::exit(1);
         }
     });
+
+    // X11 input capture (Linux only)
+    #[cfg(target_os = "linux")]
+    crate::x11_input::spawn(config.shortcuts.clone(), event_tx);
 
     std::thread::spawn(move || {
         let mut spotlight_controller = SpotlightController::new(spotlight_config.enabled_on_start);
@@ -200,22 +218,25 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
         let _ = annotation_tx.send(annotation_controller.state());
         let _ = zoom_tx.send(zoom_controller.state());
 
-        for command in app_rx {
-            match command {
-                AppCommand::Spotlight(command) => {
+        for event in event_rx {
+            match event {
+                AppEvent::Command(AppCommand::Spotlight(command)) => {
                     if spotlight_controller.apply(command) {
                         let _ = spotlight_tx.send(SpotlightRuntimeMessage::Visibility(spotlight_controller.state()));
                     }
                 }
-                AppCommand::Annotation(command) => {
+                AppEvent::Command(AppCommand::Annotation(command)) => {
                     if annotation_controller.apply(command) {
                         let _ = annotation_tx.send(annotation_controller.state());
                     }
                 }
-                AppCommand::Zoom(command) => {
+                AppEvent::Command(AppCommand::Zoom(command)) => {
                     if zoom_controller.apply(command) {
                         let _ = zoom_tx.send(zoom_controller.state());
                     }
+                }
+                AppEvent::Input(crate::input::InputAction::SpotlightWheel { delta }) => {
+                    let _ = spotlight_tx.send(SpotlightRuntimeMessage::ResizeBy(delta * 12.0));
                 }
             }
         }
