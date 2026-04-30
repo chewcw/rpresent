@@ -31,6 +31,7 @@ impl From<&ShortcutConfig> for InputBindings {
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputAction {
     SpotlightWheel { delta: f32 },
+    ZoomWheel { delta: f32, cursor_x: i16, cursor_y: i16 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,12 +76,14 @@ impl InputRouter {
         None
     }
 
-    pub fn handle_wheel(&self, modifier: &str, delta: f32) -> Option<InputAction> {
+    pub fn handle_wheel(&self, modifier: &str, delta: f32, cursor_x: i16, cursor_y: i16) -> Option<InputAction> {
         let active_modifier = normalize_modifier(modifier);
         let configured_modifier = normalize_modifier(&self.bindings.spotlight_wheel_modifier);
 
         if self.active_mode == ActiveMode::Spotlight && active_modifier == configured_modifier {
             Some(InputAction::SpotlightWheel { delta })
+        } else if self.active_mode == ActiveMode::Zoom && active_modifier == configured_modifier {
+            Some(InputAction::ZoomWheel { delta, cursor_x, cursor_y })
         } else {
             None
         }

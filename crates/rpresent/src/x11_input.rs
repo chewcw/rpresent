@@ -144,7 +144,7 @@ fn run_input_loop(
                 } else {
                     -1.0_f32
                 };
-                if let Some(action) = router.handle_wheel(modifier, delta) {
+                if let Some(action) = router.handle_wheel(modifier, delta, ev.root_x, ev.root_y) {
                     let _ = tx.send(crate::input::AppEvent::Input(action));
                 }
             }
