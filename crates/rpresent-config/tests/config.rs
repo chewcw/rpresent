@@ -4,7 +4,7 @@ use std::path::Path;
 use tempfile::tempdir;
 
 use rpresent_config::{
-    AnnotationTool, Config, ConfigError, default_config_path, load_from_str,
+    AnnotationTool, Config, ConfigError, SpotShape, default_config_path, load_from_str,
     load_or_default_from_path, write_default_config,
 };
 
@@ -39,6 +39,21 @@ fn parses_module_sections_and_applies_defaults() {
     assert_eq!(config.spotlight.radius_px, 260);
     assert_eq!(config.spotlight.softness_px, 80);
     assert!((config.spotlight.dim_alpha - 0.72).abs() < f32::EPSILON);
+    // Projecteur-style defaults applied when not specified in TOML
+    assert!(config.spotlight.show_spot_shade);
+    assert_eq!(config.spotlight.spot_size_pct, 30);
+    assert_eq!(config.spotlight.shape, SpotShape::Circle);
+    assert!((config.spotlight.spot_rotation_deg - 0.0).abs() < f32::EPSILON);
+    assert!(config.spotlight.show_center_dot);
+    assert_eq!(config.spotlight.dot_size_px, 8);
+    assert_eq!(config.spotlight.dot_color, "#ffffff");
+    assert!((config.spotlight.dot_opacity - 0.8).abs() < f32::EPSILON);
+    assert_eq!(config.spotlight.shade_color, "#000000");
+    assert!((config.spotlight.shade_opacity - 0.6).abs() < f32::EPSILON);
+    assert!(config.spotlight.show_border);
+    assert_eq!(config.spotlight.border_color, "#ffffff");
+    assert_eq!(config.spotlight.border_size_pct, 10);
+    assert!((config.spotlight.border_opacity - 0.8).abs() < f32::EPSILON);
     assert!(!config.annotation.enabled_on_start);
     assert_eq!(config.annotation.default_tool, AnnotationTool::Line);
     assert_eq!(config.annotation.stroke_width_px, 6);
@@ -93,6 +108,9 @@ fn default_config_file_is_written_with_all_sections() {
     assert!(contents.contains("socket_name = \"rpresent.sock\""));
     assert!(contents.contains("spotlight_mode = \"Ctrl+1\""));
     assert!(contents.contains("spotlight_wheel_modifier = \"Ctrl\""));
+    assert!(contents.contains("spot_size_pct = 30"));
+    assert!(contents.contains("shade_color = \"#000000\""));
+    assert!(contents.contains("border_size_pct = 10"));
 }
 
 #[test]

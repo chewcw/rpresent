@@ -1,0 +1,43 @@
+[app]
+socket_name = "rpresent.sock"
+
+[spotlight]
+enabled_on_start = true
+show_spot_shade = true
+spot_size_pct = 30
+spot_rotation_deg = 0.0
+show_center_dot = true
+dot_size_px = 8
+dot_color = "#ffffff"
+dot_opacity = 0.8
+shade_color = "#000000"
+shade_opacity = 0.6
+show_border = true
+border_color = "#ffffff"
+border_size_pct = 10
+border_opacity = 0.8
+
+[spotlight.shape]
+type = "circle"
+
+[annotation]
+enabled_on_start = false
+default_tool = "pen"
+stroke_width_px = 6
+history_depth = 64
+
+[zoom]
+enabled_on_start = false
+follow_cursor = true
+initial_scale = 2.0
+min_scale = 1.0
+max_scale = 6.0
+scroll_speed = 0.25
+pan_friction = 0.8199999928474426
+capture_target = "active-monitor"
+
+[shortcuts]
+spotlight_mode = "Ctrl+1"
+annotation_mode = "Ctrl+2"
+zoom_mode = "Ctrl+3"
+spotlight_wheel_modifier = "Ctrl"
