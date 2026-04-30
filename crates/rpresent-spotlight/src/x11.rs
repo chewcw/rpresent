@@ -8,6 +8,7 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 
 use crate::overlay::{CursorPosition, OverlayError, SpotlightFrame, SpotlightOverlayBackend};
+use rpresent_config::SpotlightConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OverlayWindowSpec {
@@ -152,6 +153,10 @@ pub(crate) struct X11SpotlightOverlay {
     /// (Task 3.2) Hash of the last rendered frame for pixmap caching.
     /// If frame hash matches, skip rasterization and reuse cached pixmap.
     last_frame_hash: u64,
+    /// Last cursor position rendered by this backend.
+    /// The current runtime keeps config fixed, so cursor + surface validity is enough
+    /// to avoid rebuilding identical frames in the backend hot path.
+    last_cursor: Option<CursorPosition>,
 }
 
 impl X11SpotlightOverlay {
@@ -343,6 +348,7 @@ impl X11SpotlightOverlay {
             pictformat,
             window_picture,
             last_frame_hash: 0,
+            last_cursor: None,
         })
     }
 
@@ -369,6 +375,101 @@ impl X11SpotlightOverlay {
         if let Some(wpic) = self.window_picture.take() {
             let _ = self.connection.render_free_picture(wpic);
         }
+    }
+
+    fn redraw_frame(&mut self, frame: &SpotlightFrame) -> Result<(), OverlayError> {
+        // (Task 3.2) Check if frame content is identical to last redraw via hash.
+        // If unchanged, skip pixel upload to avoid network bandwidth on remote X11.
+        let frame_hash = hash_frame(frame);
+
+        let needs_realloc = self.image_buf.as_ref().map_or(true, |img: &Image<'_>| {
+            img.width() != frame.width || img.height() != frame.height
+        });
+
+        // On window resize, invalidate frame hash cache to force fresh upload (Task 3.2 cache invalidation)
+        if needs_realloc {
+            self.last_frame_hash = 0;
+        }
+
+        if frame_hash == self.last_frame_hash && self.image_buf.is_some() && !needs_realloc {
+            tracing::trace!(
+                frame_hash,
+                "spotlight frame unchanged; skipping pixel upload (Task 3.2 cache hit)"
+            );
+            return self.flush();
+        }
+
+        // If XRender is available, use cached pixmap/picture for compositing (when implemented).
+        // For now, we use PutImage to the window (software fallback), but the architecture
+        // supports future optimization via XRender pixmaps and composite operations.
+        if self.xrender_available && needs_realloc && self.window_picture.is_some() {
+            // Reallocate XRender pixmap/picture for new frame size.
+            if let Some(pic) = self.picture.take() {
+                let _ = self.connection.render_free_picture(pic);
+            }
+            if let Some(pix) = self.pixmap.take() {
+                let _ = self.connection.free_pixmap(pix);
+            }
+
+            let pixmap = self.connection.generate_id().map_err(runtime_error)?;
+            self.connection
+                .create_pixmap(self.depth, pixmap, self.window, frame.width, frame.height)
+                .map_err(runtime_error)?;
+
+            if let Some(fmt) = self.pictformat {
+                let picture = self.connection.generate_id().map_err(runtime_error)?;
+                if self
+                    .connection
+                    .render_create_picture(picture, pixmap, fmt, &Default::default())
+                    .is_ok()
+                {
+                    self.picture = Some(picture);
+                    self.pixmap = Some(pixmap);
+                    tracing::trace!(pixmap, picture, "created XRender pixmap for spotlight");
+                } else {
+                    let _ = self.connection.free_pixmap(pixmap);
+                }
+            }
+        }
+
+        // Allocate or reuse image buffer (both XRender and software paths need this).
+        if needs_realloc {
+            self.image_buf = Some(
+                Image::allocate_native(frame.width, frame.height, self.depth, self.connection.setup())
+                    .map_err(runtime_error)?,
+            );
+        }
+
+        let image = self.image_buf.as_mut().expect("allocated above");
+        if image.data().len() != frame.pixels.len() {
+            return Err(runtime_error(format!(
+                "spotlight frame size mismatch: image expects {} bytes, frame has {} bytes",
+                image.data().len(),
+                frame.pixels.len()
+            )));
+        }
+        image.data_mut().copy_from_slice(&frame.pixels);
+
+        // Upload pixels to window via PutImage.
+        // TODO: For XRender-capable systems, upload to cached pixmap and composite,
+        // avoiding direct window PutImage and keeping pixel data server-side.
+        image
+            .put(&self.connection, self.window, self.gc, 0, 0)
+            .inspect_err(|error| {
+                tracing::error!(
+                    window = self.window,
+                    width = frame.width,
+                    height = frame.height,
+                    ?error,
+                    "failed to redraw spotlight overlay"
+                );
+            })
+            .map_err(runtime_error)?;
+
+        // (Task 3.2) Update frame hash on successful upload.
+        self.last_frame_hash = frame_hash;
+
+        self.flush()
     }
 }
 
@@ -434,109 +535,24 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
         })
     }
 
-    fn redraw(&mut self, frame: &SpotlightFrame) -> Result<(), OverlayError> {
-        // (Task 3.2) Check if frame content is identical to last redraw via hash.
-        // If unchanged, skip pixel upload to avoid network bandwidth on remote X11.
-        let frame_hash = hash_frame(frame);
-        
+    fn redraw(
+        &mut self,
+        cursor: CursorPosition,
+        config: &SpotlightConfig,
+    ) -> Result<(), OverlayError> {
         let needs_realloc = self.image_buf.as_ref().map_or(true, |img: &Image<'_>| {
-            img.width() != frame.width || img.height() != frame.height
+            img.width() != self.surface_size.0 || img.height() != self.surface_size.1
         });
-        
-        // On window resize, invalidate frame hash cache to force fresh upload (Task 3.2 cache invalidation)
-        if needs_realloc {
-            self.last_frame_hash = 0;
-        }
-        
-        if frame_hash == self.last_frame_hash && self.image_buf.is_some() && !needs_realloc {
-            tracing::trace!(
-                frame_hash,
-                "spotlight frame unchanged; skipping pixel upload (Task 3.2 cache hit)"
-            );
+
+        if self.last_cursor == Some(cursor) && self.image_buf.is_some() && !needs_realloc {
+            tracing::trace!(?cursor, "spotlight backend inputs unchanged; skipping rerender");
             return self.flush();
         }
 
-        // If XRender is available, use cached pixmap/picture for compositing (when implemented).
-        // For now, we use PutImage to the window (software fallback), but the architecture
-        // supports future optimization via XRender pixmaps and composite operations.
-        if self.xrender_available && needs_realloc && self.window_picture.is_some() {
-            // Reallocate XRender pixmap/picture for new frame size.
-            if let Some(pic) = self.picture.take() {
-                let _ = self.connection.render_free_picture(pic);
-            }
-            if let Some(pix) = self.pixmap.take() {
-                let _ = self.connection.free_pixmap(pix);
-            }
-
-            let pixmap = self
-                .connection
-                .generate_id()
-                .map_err(runtime_error)?;
-            self.connection
-                .create_pixmap(self.depth, pixmap, self.window, frame.width, frame.height)
-                .map_err(runtime_error)?;
-
-            if let Some(fmt) = self.pictformat {
-                let picture = self
-                    .connection
-                    .generate_id()
-                    .map_err(runtime_error)?;
-                if self.connection
-                    .render_create_picture(picture, pixmap, fmt, &Default::default())
-                    .is_ok()
-                {
-                    self.picture = Some(picture);
-                    self.pixmap = Some(pixmap);
-                    tracing::trace!(pixmap, picture, "created XRender pixmap for spotlight");
-                } else {
-                    let _ = self.connection.free_pixmap(pixmap);
-                }
-            }
-        }
-
-        // Allocate or reuse image buffer (both XRender and software paths need this).
-        if needs_realloc {
-            self.image_buf = Some(
-                Image::allocate_native(
-                    frame.width,
-                    frame.height,
-                    self.depth,
-                    self.connection.setup(),
-                )
-                .map_err(runtime_error)?,
-            );
-        }
-
-        let image = self.image_buf.as_mut().expect("allocated above");
-        if image.data().len() != frame.pixels.len() {
-            return Err(runtime_error(format!(
-                "spotlight frame size mismatch: image expects {} bytes, frame has {} bytes",
-                image.data().len(),
-                frame.pixels.len()
-            )));
-        }
-        image.data_mut().copy_from_slice(&frame.pixels);
-
-        // Upload pixels to window via PutImage.
-        // TODO: For XRender-capable systems, upload to cached pixmap and composite,
-        // avoiding direct window PutImage and keeping pixel data server-side.
-        image
-            .put(&self.connection, self.window, self.gc, 0, 0)
-            .inspect_err(|error| {
-                tracing::error!(
-                    window = self.window,
-                    width = frame.width,
-                    height = frame.height,
-                    ?error,
-                    "failed to redraw spotlight overlay"
-                );
-            })
-            .map_err(runtime_error)?;
-
-        // (Task 3.2) Update frame hash on successful upload.
-        self.last_frame_hash = frame_hash;
-
-        self.flush()
+        let frame = crate::render::build_projecteur_frame(self.surface_size, cursor, config);
+        self.redraw_frame(&frame)?;
+        self.last_cursor = Some(cursor);
+        Ok(())
     }
 }
 

@@ -86,7 +86,11 @@ pub(crate) trait SpotlightOverlayBackend {
     fn hide(&mut self) -> Result<(), OverlayError>;
     fn surface_size(&self) -> Result<(u16, u16), OverlayError>;
     fn cursor_position(&self) -> Result<CursorPosition, OverlayError>;
-    fn redraw(&mut self, frame: &SpotlightFrame) -> Result<(), OverlayError>;
+    fn redraw(
+        &mut self,
+        cursor: CursorPosition,
+        config: &rpresent_config::SpotlightConfig,
+    ) -> Result<(), OverlayError>;
 }
 
 pub(crate) struct SpotlightOverlayRuntime<B> {
@@ -162,12 +166,7 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
         }
 
         tracing::trace!(?inputs, "spotlight overlay redraw tick");
-        let frame = crate::render::build_projecteur_frame(
-            inputs.surface_size,
-            inputs.cursor,
-            &self.config,
-        );
-        self.backend.redraw(&frame)?;
+        self.backend.redraw(inputs.cursor, &self.config)?;
         self.last_render_inputs = Some(inputs);
         self.needs_redraw = false;
         Ok(())
@@ -181,6 +180,7 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn build_spotlight_frame(
     surface_size: (u16, u16),
     cursor: CursorPosition,
@@ -294,7 +294,11 @@ mod tests {
             Ok(self.cursor)
         }
 
-        fn redraw(&mut self, _frame: &SpotlightFrame) -> Result<(), OverlayError> {
+        fn redraw(
+            &mut self,
+            _cursor: CursorPosition,
+            _config: &rpresent_config::SpotlightConfig,
+        ) -> Result<(), OverlayError> {
             self.calls.push("redraw");
             Ok(())
         }
