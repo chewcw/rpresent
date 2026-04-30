@@ -40,11 +40,70 @@ impl Default for AnnotationTool {
     }
 }
 
+/// Shape of the spotlight cutout, mirroring Projecteur's shape variants.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SpotShape {
+    Circle,
+    Square {
+        #[serde(default = "default_corner_radius_pct")]
+        corner_radius_pct: u32,
+    },
+    Star {
+        #[serde(default = "default_star_points")]
+        points: u32,
+        #[serde(default = "default_star_inner_radius_pct")]
+        inner_radius_pct: u32,
+    },
+    Ngon {
+        #[serde(default = "default_ngon_sides")]
+        sides: u32,
+    },
+}
+
+impl Default for SpotShape {
+    fn default() -> Self {
+        Self::Circle
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpotlightConfig {
     #[serde(default = "default_spotlight_enabled")]
     pub enabled_on_start: bool,
+
+    // Projecteur-style visual fields
+    #[serde(default = "default_show_spot_shade")]
+    pub show_spot_shade: bool,
+    #[serde(default = "default_spot_size_pct")]
+    pub spot_size_pct: u32,
+    #[serde(default)]
+    pub shape: SpotShape,
+    #[serde(default = "default_spot_rotation_deg")]
+    pub spot_rotation_deg: f32,
+    #[serde(default = "default_show_center_dot")]
+    pub show_center_dot: bool,
+    #[serde(default = "default_dot_size_px")]
+    pub dot_size_px: u32,
+    #[serde(default = "default_dot_color")]
+    pub dot_color: String,
+    #[serde(default = "default_dot_opacity")]
+    pub dot_opacity: f32,
+    #[serde(default = "default_shade_color")]
+    pub shade_color: String,
+    #[serde(default = "default_shade_opacity")]
+    pub shade_opacity: f32,
+    #[serde(default = "default_show_border")]
+    pub show_border: bool,
+    #[serde(default = "default_border_color")]
+    pub border_color: String,
+    #[serde(default = "default_border_size_pct")]
+    pub border_size_pct: u32,
+    #[serde(default = "default_border_opacity")]
+    pub border_opacity: f32,
+
+    // Legacy compatibility fields — kept as a bridge; new renderer does not use these.
     #[serde(default = "default_radius_px")]
     pub radius_px: u32,
     #[serde(default = "default_softness_px")]
@@ -95,6 +154,20 @@ impl Default for SpotlightConfig {
     fn default() -> Self {
         Self {
             enabled_on_start: default_spotlight_enabled(),
+            show_spot_shade: default_show_spot_shade(),
+            spot_size_pct: default_spot_size_pct(),
+            shape: SpotShape::default(),
+            spot_rotation_deg: default_spot_rotation_deg(),
+            show_center_dot: default_show_center_dot(),
+            dot_size_px: default_dot_size_px(),
+            dot_color: default_dot_color(),
+            dot_opacity: default_dot_opacity(),
+            shade_color: default_shade_color(),
+            shade_opacity: default_shade_opacity(),
+            show_border: default_show_border(),
+            border_color: default_border_color(),
+            border_size_pct: default_border_size_pct(),
+            border_opacity: default_border_opacity(),
             radius_px: default_radius_px(),
             softness_px: default_softness_px(),
             dim_alpha: default_dim_alpha(),
@@ -240,6 +313,74 @@ fn default_socket_name() -> String {
 
 fn default_spotlight_enabled() -> bool {
     true
+}
+
+fn default_show_spot_shade() -> bool {
+    true
+}
+
+fn default_spot_size_pct() -> u32 {
+    30
+}
+
+fn default_spot_rotation_deg() -> f32 {
+    0.0
+}
+
+fn default_show_center_dot() -> bool {
+    true
+}
+
+fn default_dot_size_px() -> u32 {
+    8
+}
+
+fn default_dot_color() -> String {
+    "#ffffff".to_owned()
+}
+
+fn default_dot_opacity() -> f32 {
+    0.8
+}
+
+fn default_shade_color() -> String {
+    "#000000".to_owned()
+}
+
+fn default_shade_opacity() -> f32 {
+    0.6
+}
+
+fn default_show_border() -> bool {
+    true
+}
+
+fn default_border_color() -> String {
+    "#ffffff".to_owned()
+}
+
+fn default_border_size_pct() -> u32 {
+    10
+}
+
+fn default_border_opacity() -> f32 {
+    0.8
+}
+
+fn default_corner_radius_pct() -> u32 {
+    20
+}
+
+fn default_star_points() -> u32 {
+    5
+}
+
+fn default_star_inner_radius_pct() -> u32 {
+    50
+}
+
+fn default_ngon_sides() -> u32 {
+    3
 }
 
 fn default_radius_px() -> u32 {
