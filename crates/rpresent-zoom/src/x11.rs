@@ -3,12 +3,12 @@ use x11rb::image::Image;
 use x11rb::protocol::render::{self, ConnectionExt as RenderConnectionExt, PictType};
 use x11rb::protocol::xproto::{
     ColormapAlloc, ConnectionExt as XprotoConnectionExt, CreateGCAux, CreateWindowAux, EventMask,
-    Gcontext, ImageFormat, Window, WindowClass,
+    Gcontext, ImageFormat, Visualid, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 
 use crate::controller::ZoomState;
-use crate::overlay::{zoom_sample_rect, OverlayError, ZoomAppearance};
+use crate::overlay::{zoom_sample_rect, OverlayError};
 
 fn runtime_error(error: impl std::fmt::Display) -> OverlayError {
     OverlayError::Runtime(error.to_string())
@@ -18,7 +18,7 @@ fn runtime_error(error: impl std::fmt::Display) -> OverlayError {
 fn choose_visual(
     connection: &impl Connection,
     screen_num: usize,
-) -> Result<(u8, u32), OverlayError> {
+) -> Result<(u8, Visualid), OverlayError> {
     let screen = &connection.setup().roots[screen_num];
 
     if connection
@@ -64,7 +64,6 @@ fn choose_visual(
 
 pub(crate) struct X11ZoomOverlay {
     connection: RustConnection,
-    screen_num: usize,
     root: Window,
     window: Window,
     gc: Gcontext,
@@ -144,7 +143,6 @@ impl X11ZoomOverlay {
 
         Ok(Self {
             connection,
-            screen_num,
             root,
             window,
             gc,
@@ -195,7 +193,6 @@ impl X11ZoomOverlay {
     pub(crate) fn render(
         &mut self,
         state: &ZoomState,
-        _appearance: &ZoomAppearance,
     ) -> Result<(), OverlayError> {
         // Determine pivot: follow cursor or use state pivot.
         let pivot = if state.follow_cursor {
@@ -204,13 +201,16 @@ impl X11ZoomOverlay {
             state.pivot
         };
 
-        let effective = ZoomState {
+        let effective_pivot = ZoomState {
             pivot,
-            ..state.clone()
+            enabled: state.enabled,
+            scale: state.scale,
+            follow_cursor: state.follow_cursor,
+            capture_target: String::new(),
         };
 
         let rect =
-            zoom_sample_rect(self.screen_width as u32, self.screen_height as u32, &effective);
+            zoom_sample_rect(self.screen_width as u32, self.screen_height as u32, &effective_pivot);
 
         let src_x = rect.left as i16;
         let src_y = rect.top as i16;
@@ -247,11 +247,7 @@ impl X11ZoomOverlay {
         let dst_h = self.screen_height as usize;
 
         // Stride may include scanline padding; compute per-row byte count.
-        let src_stride = if src_h > 0 {
-            captured.data.len() / src_h as usize
-        } else {
-            return Ok(());
-        };
+        let src_stride = captured.data.len() / src_h as usize;
 
         // Allocate upload buffer once (screen size is fixed for the session).
         if self.image_buffer.is_none() {
@@ -282,13 +278,13 @@ impl X11ZoomOverlay {
                 // 4 bytes/pixel assumed (bpp=32, the standard on modern X11 for depth 24 and 32).
                 let src_idx = sy * src_stride + sx * 4;
                 let dst_idx = dy * dst_stride + dx * 4;
-                if src_idx + 3 < captured.data.len() && dst_idx + 3 < buf_data.len() {
-                    buf_data[dst_idx] = captured.data[src_idx];
-                    buf_data[dst_idx + 1] = captured.data[src_idx + 1];
-                    buf_data[dst_idx + 2] = captured.data[src_idx + 2];
-                    // Force fully opaque so the compositor renders us on top.
-                    buf_data[dst_idx + 3] = 255;
-                }
+                debug_assert!(src_idx + 3 < captured.data.len());
+                debug_assert!(dst_idx + 3 < buf_data.len());
+                buf_data[dst_idx] = captured.data[src_idx];
+                buf_data[dst_idx + 1] = captured.data[src_idx + 1];
+                buf_data[dst_idx + 2] = captured.data[src_idx + 2];
+                // Force fully opaque so the compositor renders us on top.
+                buf_data[dst_idx + 3] = 255;
             }
         }
 
