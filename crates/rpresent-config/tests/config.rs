@@ -29,7 +29,7 @@ fn parses_module_sections_and_applies_defaults() {
         spotlight_mode = "Ctrl+1"
         annotation_mode = "Ctrl+2"
         zoom_mode = "Ctrl+3"
-        spotlight_wheel_modifier = "Ctrl"
+        wheel_modifier = "Ctrl"
         "#,
     )
     .unwrap();
@@ -67,7 +67,7 @@ fn parses_module_sections_and_applies_defaults() {
     assert_eq!(config.shortcuts.spotlight_mode, "Ctrl+1");
     assert_eq!(config.shortcuts.annotation_mode, "Ctrl+2");
     assert_eq!(config.shortcuts.zoom_mode, "Ctrl+3");
-    assert_eq!(config.shortcuts.spotlight_wheel_modifier, "Ctrl");
+    assert_eq!(config.shortcuts.wheel_modifier, "Ctrl");
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn default_config_file_is_written_with_all_sections() {
     assert!(contents.contains("[shortcuts]"));
     assert!(contents.contains("socket_name = \"rpresent.sock\""));
     assert!(contents.contains("spotlight_mode = \"Ctrl+1\""));
-    assert!(contents.contains("spotlight_wheel_modifier = \"Ctrl\""));
+    assert!(contents.contains("wheel_modifier = \"Ctrl\""));
     assert!(contents.contains("spot_size_pct = 30"));
     assert!(contents.contains("shade_color = \"#000000\""));
     assert!(contents.contains("border_size_pct = 10"));

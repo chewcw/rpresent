@@ -206,8 +206,8 @@ pub struct ShortcutConfig {
     pub annotation_mode: String,
     #[serde(default = "default_zoom_mode_shortcut")]
     pub zoom_mode: String,
-    #[serde(default = "default_spotlight_wheel_modifier")]
-    pub spotlight_wheel_modifier: String,
+    #[serde(default = "default_wheel_modifier")]
+    pub wheel_modifier: String,
 }
 
 impl Default for ZoomConfig {
@@ -231,7 +231,7 @@ impl Default for ShortcutConfig {
             spotlight_mode: default_spotlight_mode_shortcut(),
             annotation_mode: default_annotation_mode_shortcut(),
             zoom_mode: default_zoom_mode_shortcut(),
-            spotlight_wheel_modifier: default_spotlight_wheel_modifier(),
+            wheel_modifier: default_wheel_modifier(),
         }
     }
 }
@@ -437,7 +437,7 @@ fn default_zoom_mode_shortcut() -> String {
     "Ctrl+3".to_owned()
 }
 
-fn default_spotlight_wheel_modifier() -> String {
+fn default_wheel_modifier() -> String {
     "Ctrl".to_owned()
 }
 
