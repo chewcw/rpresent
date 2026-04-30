@@ -130,6 +130,22 @@ fn hash_frame(frame: &SpotlightFrame) -> u64 {
     hasher.finish()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderStrategy {
+    XrenderRadial,
+    SoftwareFrame,
+}
+
+fn select_render_strategy(config: &rpresent_config::SpotlightConfig) -> RenderStrategy {
+    let is_circle = matches!(config.shape, rpresent_config::SpotShape::Circle);
+    let rotated = config.spot_rotation_deg != 0.0;
+
+    if is_circle && !rotated {
+        RenderStrategy::XrenderRadial
+    } else {
+        RenderStrategy::SoftwareFrame
+    }
+}
 
 pub(crate) struct X11SpotlightOverlay {
     connection: RustConnection,
@@ -590,5 +606,36 @@ mod tests {
             frame.pixels.len(),
             frame.width as usize * frame.height as usize * 4
         );
+    }
+
+    #[test]
+    fn default_circle_prefers_xrender_radial() {
+        // Default config has show_border=true, show_center_dot=true — XRender fires anyway
+        // and silently omits those features (same as 54ace59 behavior).
+        let config = rpresent_config::SpotlightConfig::default();
+        assert!(matches!(
+            select_render_strategy(&config),
+            RenderStrategy::XrenderRadial
+        ));
+    }
+
+    #[test]
+    fn rotated_circle_falls_back_to_software() {
+        let mut config = rpresent_config::SpotlightConfig::default();
+        config.spot_rotation_deg = 45.0;
+        assert!(matches!(
+            select_render_strategy(&config),
+            RenderStrategy::SoftwareFrame
+        ));
+    }
+
+    #[test]
+    fn non_circle_shape_falls_back_to_software() {
+        let mut config = rpresent_config::SpotlightConfig::default();
+        config.shape = rpresent_config::SpotShape::Square { corner_radius_pct: 0 };
+        assert!(matches!(
+            select_render_strategy(&config),
+            RenderStrategy::SoftwareFrame
+        ));
     }
 }
