@@ -262,6 +262,46 @@ pub fn run_overlay(
     Err(OverlayError::UnsupportedPlatform)
 }
 
+#[cfg(all(target_os = "linux", feature = "qml"))]
+pub fn run_overlay_qml(
+    config: rpresent_config::SpotlightConfig,
+    rx: Receiver<SpotlightState>,
+) -> Result<(), OverlayError> {
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Duration;
+
+    tracing::debug!("starting QML spotlight overlay");
+    let backend = crate::qml_backend::QmlSpotlightOverlay::new()?;
+    let mut runtime = SpotlightOverlayRuntime::new(config, backend);
+    let mut visible = false;
+
+    loop {
+        let next_state = if visible {
+            match rx.recv_timeout(Duration::from_millis(16)) {
+                Ok(state) => Some(state),
+                Err(RecvTimeoutError::Timeout) => {
+                    runtime.tick()?;
+                    None
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(state) => Some(state),
+                Err(_) => break,
+            }
+        };
+
+        if let Some(state) = next_state {
+            let next_visible = matches!(state, SpotlightState::On);
+            runtime.process_state(state)?;
+            visible = next_visible;
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;

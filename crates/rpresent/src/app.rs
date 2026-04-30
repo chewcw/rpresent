@@ -26,6 +26,11 @@ pub struct Cli {
 
     #[arg(value_name = "COMMAND")]
     pub command: Option<String>,
+
+    /// Spotlight rendering backend.  Only available when compiled with --features qml.
+    #[cfg(feature = "qml")]
+    #[arg(long, default_value = "x11", value_parser = ["x11", "qml"])]
+    pub spotlight_backend: String,
 }
 
 #[derive(Debug, Parser, Clone, PartialEq, Eq)]
@@ -135,6 +140,11 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
     };
     tracing::debug!(config_path = %config_path.display(), "loading configuration");
 
+    #[cfg(feature = "qml")]
+    let _use_qml = cli.spotlight_backend == "qml";
+    #[cfg(not(feature = "qml"))]
+    let _use_qml = false;
+
     let config = load_or_default_from_path(config_path)?;
 
     match mode {
@@ -146,7 +156,7 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
         }
         AppMode::Run => {
             tracing::debug!("entering daemon mode");
-            run_daemon(config)
+            run_daemon(config, _use_qml)
         }
     }
 }
@@ -165,7 +175,7 @@ pub fn run_config_init(cli: ConfigInitCli) -> Result<PathBuf, AppError> {
 }
 
 #[tracing::instrument(level = "debug", skip(config))]
-fn run_daemon(config: Config) -> Result<(), AppError> {
+fn run_daemon(config: Config, _use_qml: bool) -> Result<(), AppError> {
     tracing::debug!(socket_name = %config.app.socket_name, "starting daemon runtime");
 
     let (app_tx, app_rx) = mpsc::channel();
@@ -221,7 +231,11 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
         }
     });
 
-    let spotlight_handle = std::thread::spawn(move || {
+    let spotlight_handle = std::thread::spawn(move || -> Result<(), rpresent_spotlight::OverlayError> {
+        #[cfg(all(target_os = "linux", feature = "qml"))]
+        if _use_qml {
+            return rpresent_spotlight::run_overlay_qml(spotlight_config, spotlight_rx);
+        }
         rpresent_spotlight::run_overlay(spotlight_config, spotlight_rx)
     });
     let annotation_handle = std::thread::spawn(move || {

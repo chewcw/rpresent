@@ -3,6 +3,9 @@ name = "rpresent"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+qml = ["rpresent-spotlight/qml"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
