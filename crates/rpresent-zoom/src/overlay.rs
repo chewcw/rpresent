@@ -78,12 +78,21 @@ pub fn run_overlay(
     tracing::debug!(?appearance, "starting zoom overlay");
 
     let mut last_state: Option<ZoomState> = None;
+    let mut warned_not_rendering = false;
 
     for state in rx {
         if last_state.as_ref() != Some(&state) {
             tracing::debug!(?state, "zoom state changed");
             last_state = Some(state.clone());
         }
+
+        if state.enabled && !warned_not_rendering {
+            tracing::warn!(
+                "zoom overlay backend is not implemented yet; zoom state updates are running but no visual zoom is rendered"
+            );
+            warned_not_rendering = true;
+        }
+
         let rect = zoom_sample_rect(1920, 1080, &state);
         tracing::trace!(
             left = rect.left,
