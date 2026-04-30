@@ -53,11 +53,7 @@ impl AnnotationController {
                 let redo_before = self.history.redo_len();
                 self.history.clear();
                 if strokes_before > 0 || redo_before > 0 {
-                    tracing::debug!(
-                        strokes_before,
-                        redo_before,
-                        "annotation history cleared"
-                    );
+                    tracing::debug!(strokes_before, redo_before, "annotation history cleared");
                 }
                 true
             }

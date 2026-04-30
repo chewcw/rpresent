@@ -46,7 +46,10 @@ fn circle_interior_is_transparent() {
     let frame = build_projecteur_frame((W, H), CURSOR, &config);
     // Pixel 30 px above cursor: distance=30 < inner_r(108) → inside hole and inside inner shape
     let alpha = frame.bgra_at(200, 120)[3];
-    assert_eq!(alpha, 0, "pixel inside the spotlight hole should be transparent");
+    assert_eq!(
+        alpha, 0,
+        "pixel inside the spotlight hole should be transparent"
+    );
 }
 
 #[test]
@@ -54,7 +57,10 @@ fn circle_border_ring_has_border_color() {
     let mut config = base_config();
     config.show_spot_shade = false; // simplify: shade off, ring still drawn
     // Pixel 114 px above cursor: between inner_r(108) and outer_r(120) → solidly in ring
-    assert!(dist(200, 36) > 108.0 && dist(200, 36) < 120.0, "test pixel must be in ring");
+    assert!(
+        dist(200, 36) > 108.0 && dist(200, 36) < 120.0,
+        "test pixel must be in ring"
+    );
     let frame = build_projecteur_frame((W, H), CURSOR, &config);
     let bgra = frame.bgra_at(200, 36);
     let expected_alpha = (0.8_f32 * 255.0).round() as u8; // 204
@@ -65,9 +71,18 @@ fn circle_border_ring_has_border_color() {
     );
     // border_color="#ffffff" white at 80% — tiny-skia stores premultiplied values.
     // All channels (including colour) equal alpha when colour is white.
-    assert_eq!(bgra[0], expected_alpha, "border B channel (premultiplied) should equal alpha");
-    assert_eq!(bgra[1], expected_alpha, "border G channel (premultiplied) should equal alpha");
-    assert_eq!(bgra[2], expected_alpha, "border R channel (premultiplied) should equal alpha");
+    assert_eq!(
+        bgra[0], expected_alpha,
+        "border B channel (premultiplied) should equal alpha"
+    );
+    assert_eq!(
+        bgra[1], expected_alpha,
+        "border G channel (premultiplied) should equal alpha"
+    );
+    assert_eq!(
+        bgra[2], expected_alpha,
+        "border R channel (premultiplied) should equal alpha"
+    );
 }
 
 #[test]
@@ -78,7 +93,10 @@ fn circle_no_shade_exterior_is_transparent() {
     config.show_center_dot = false;
     let frame = build_projecteur_frame((W, H), CURSOR, &config);
     let alpha = frame.bgra_at(0, 0)[3];
-    assert_eq!(alpha, 0, "exterior pixel should be transparent when shade is off");
+    assert_eq!(
+        alpha, 0,
+        "exterior pixel should be transparent when shade is off"
+    );
 }
 
 #[test]
@@ -97,18 +115,26 @@ fn circle_center_dot_is_visible() {
 #[test]
 fn square_exterior_has_shade_and_interior_is_transparent() {
     let mut config = base_config();
-    config.shape = SpotShape::Square { corner_radius_pct: 20 };
+    config.shape = SpotShape::Square {
+        corner_radius_pct: 20,
+    };
     config.show_center_dot = false;
     config.show_border = false;
     let frame = build_projecteur_frame((W, H), CURSOR, &config);
 
     let exterior = frame.bgra_at(0, 0)[3];
     let expected = (0.6_f32 * 255.0).round() as u8;
-    assert_eq!(exterior, expected, "square: exterior alpha should be shade_opacity×255");
+    assert_eq!(
+        exterior, expected,
+        "square: exterior alpha should be shade_opacity×255"
+    );
 
     // Centre of the square hole:
     let interior = frame.bgra_at(200, 150)[3];
-    assert_eq!(interior, 0, "square: pixel at cursor centre should be transparent");
+    assert_eq!(
+        interior, 0,
+        "square: pixel at cursor centre should be transparent"
+    );
 }
 
 // ─────────────────────────────── Star ────────────────────────────────────
@@ -116,13 +142,19 @@ fn square_exterior_has_shade_and_interior_is_transparent() {
 #[test]
 fn star_exterior_has_shade() {
     let mut config = base_config();
-    config.shape = SpotShape::Star { points: 5, inner_radius_pct: 50 };
+    config.shape = SpotShape::Star {
+        points: 5,
+        inner_radius_pct: 50,
+    };
     config.show_border = false;
     config.show_center_dot = false;
     let frame = build_projecteur_frame((W, H), CURSOR, &config);
     let alpha = frame.bgra_at(0, 0)[3];
     let expected = (0.6_f32 * 255.0).round() as u8;
-    assert_eq!(alpha, expected, "star: exterior alpha should be shade_opacity×255");
+    assert_eq!(
+        alpha, expected,
+        "star: exterior alpha should be shade_opacity×255"
+    );
 }
 
 // ─────────────────────────────── Ngon ────────────────────────────────────
@@ -136,7 +168,10 @@ fn ngon_exterior_has_shade() {
     let frame = build_projecteur_frame((W, H), CURSOR, &config);
     let alpha = frame.bgra_at(0, 0)[3];
     let expected = (0.6_f32 * 255.0).round() as u8;
-    assert_eq!(alpha, expected, "ngon: exterior alpha should be shade_opacity×255");
+    assert_eq!(
+        alpha, expected,
+        "ngon: exterior alpha should be shade_opacity×255"
+    );
 }
 
 // ─────────────────────────────── Frame metadata ──────────────────────────

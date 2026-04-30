@@ -3,9 +3,11 @@ use rpresent_zoom::{ZoomCommand, ZoomController};
 
 #[test]
 fn applies_zoom_commands_and_resets_geometry() {
-    let mut config = ZoomConfig::default();
-    config.enabled_on_start = false;
-    config.initial_scale = 2.0;
+    let config = ZoomConfig {
+        enabled_on_start: false,
+        initial_scale: 2.0,
+        ..ZoomConfig::default()
+    };
 
     let mut controller = ZoomController::from_config(config);
 
@@ -28,10 +30,12 @@ fn applies_zoom_commands_and_resets_geometry() {
 
 #[test]
 fn zoom_by_scroll_uses_speed_and_clamps_and_pan_uses_friction() {
-    let mut config = ZoomConfig::default();
-    config.initial_scale = 2.0;
-    config.scroll_speed = 0.5;
-    config.pan_friction = 0.5;
+    let config = ZoomConfig {
+        initial_scale: 2.0,
+        scroll_speed: 0.5,
+        pan_friction: 0.5,
+        ..ZoomConfig::default()
+    };
 
     let mut controller = ZoomController::from_config(config);
 
