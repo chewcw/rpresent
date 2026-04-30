@@ -48,16 +48,23 @@ pub enum OverlayError {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct CursorPosition {
-    pub(crate) x: i16,
-    pub(crate) y: i16,
+pub struct CursorPosition {
+    pub x: i16,
+    pub y: i16,
 }
 
+/// Spotlight overlay frame.  Pixels are stored in **BGRA** premultiplied byte order.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SpotlightFrame {
-    pub(crate) width: u16,
-    pub(crate) height: u16,
-    pub(crate) pixels: Vec<u8>,
+pub struct SpotlightFrame {
+    pub width: u16,
+    pub height: u16,
+    pub pixels: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RenderInputs {
+    surface_size: (u16, u16),
+    cursor: CursorPosition,
 }
 
 impl SpotlightFrame {
@@ -66,6 +73,12 @@ impl SpotlightFrame {
         let index = ((y as usize * self.width as usize) + x as usize) * 4 + 3;
         self.pixels[index]
     }
+
+    /// Return the raw `[B, G, R, A]` bytes at pixel `(x, y)`.
+    pub fn bgra_at(&self, x: u16, y: u16) -> [u8; 4] {
+        let i = ((y as usize * self.width as usize) + x as usize) * 4;
+        [self.pixels[i], self.pixels[i + 1], self.pixels[i + 2], self.pixels[i + 3]]
+    }
 }
 
 pub(crate) trait SpotlightOverlayBackend {
@@ -73,13 +86,20 @@ pub(crate) trait SpotlightOverlayBackend {
     fn hide(&mut self) -> Result<(), OverlayError>;
     fn surface_size(&self) -> Result<(u16, u16), OverlayError>;
     fn cursor_position(&self) -> Result<CursorPosition, OverlayError>;
-    fn redraw(&mut self, frame: &SpotlightFrame) -> Result<(), OverlayError>;
+    fn redraw(
+        &mut self,
+        surface_size: (u16, u16),
+        cursor: CursorPosition,
+        appearance: &SpotlightAppearance,
+    ) -> Result<(), OverlayError>;
 }
 
 pub(crate) struct SpotlightOverlayRuntime<B> {
     appearance: SpotlightAppearance,
     backend: B,
     visible: bool,
+    last_render_inputs: Option<RenderInputs>,
+    needs_redraw: bool,
 }
 
 impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
@@ -88,6 +108,8 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
             appearance,
             backend,
             visible: false,
+            last_render_inputs: None,
+            needs_redraw: false,
         }
     }
 
@@ -107,6 +129,7 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
                     tracing::debug!(state = ?state, "showing spotlight overlay");
                     self.backend.show()?;
                     self.visible = true;
+                    self.needs_redraw = true;
                 } else {
                     tracing::trace!(state = ?state, "spotlight overlay already visible");
                 }
@@ -119,6 +142,7 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
                     tracing::debug!(state = ?state, "hiding spotlight overlay");
                     self.backend.hide()?;
                     self.visible = false;
+                    self.needs_redraw = false;
                 } else {
                     tracing::trace!(state = ?state, "spotlight overlay already hidden");
                 }
@@ -133,24 +157,39 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
             return Ok(());
         }
 
-        tracing::trace!("spotlight overlay redraw tick");
-        let frame = build_spotlight_frame(
-            self.backend.surface_size()?,
-            self.backend.cursor_position()?,
-            &self.appearance,
-        );
-        self.backend.redraw(&frame)?;
+        let inputs = self.current_render_inputs()?;
+        if !self.needs_redraw && self.last_render_inputs == Some(inputs) {
+            tracing::trace!(
+                ?inputs,
+                "spotlight overlay inputs unchanged; skipping redraw"
+            );
+            return Ok(());
+        }
+
+        tracing::trace!(?inputs, "spotlight overlay redraw tick");
+        self.backend
+            .redraw(inputs.surface_size, inputs.cursor, &self.appearance)?;
+        self.last_render_inputs = Some(inputs);
+        self.needs_redraw = false;
         Ok(())
+    }
+
+    fn current_render_inputs(&self) -> Result<RenderInputs, OverlayError> {
+        Ok(RenderInputs {
+            surface_size: self.backend.surface_size()?,
+            cursor: self.backend.cursor_position()?,
+        })
     }
 }
 
-fn build_spotlight_frame(
+pub(crate) fn build_spotlight_frame(
     surface_size: (u16, u16),
     cursor: CursorPosition,
     appearance: &SpotlightAppearance,
 ) -> SpotlightFrame {
     let (width, height) = surface_size;
-    let mut pixels = vec![0_u8; width as usize * height as usize * 4];
+    let rgba_byte = 4; // 4 bytes per pixel in RGBA format
+    let mut pixels = vec![0_u8; width as usize * height as usize * rgba_byte];
 
     for y in 0..height {
         for x in 0..width {
@@ -164,8 +203,8 @@ fn build_spotlight_frame(
             );
             let dim = appearance.dim_alpha * (1.0 - spot);
             let alpha = (255.0 * dim.clamp(0.0, 1.0)) as u8;
-            let offset = ((y as usize * width as usize) + x as usize) * 4;
-            pixels[offset..offset + 4].copy_from_slice(&[0, 0, 0, alpha]);
+            let offset = ((y as usize * width as usize) + x as usize) * rgba_byte;
+            pixels[offset..offset + rgba_byte].copy_from_slice(&[0, 0, 0, alpha]);
         }
     }
 
@@ -256,10 +295,16 @@ mod tests {
             Ok(self.cursor)
         }
 
-        fn redraw(&mut self, frame: &SpotlightFrame) -> Result<(), OverlayError> {
+        fn redraw(
+            &mut self,
+            surface_size: (u16, u16),
+            cursor: CursorPosition,
+            appearance: &SpotlightAppearance,
+        ) -> Result<(), OverlayError> {
             self.calls.push("redraw");
-            assert_eq!(frame.width, self.surface_size.0);
-            assert_eq!(frame.height, self.surface_size.1);
+            assert_eq!(surface_size, self.surface_size);
+            assert_eq!(cursor, self.cursor);
+            assert_eq!(appearance.radius_px, 4);
             Ok(())
         }
     }
@@ -289,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn tick_redraws_again_while_the_spotlight_is_visible() {
+    fn tick_does_not_redraw_when_inputs_stay_the_same() {
         let appearance = SpotlightAppearance {
             radius_px: 4,
             softness_px: 2,
@@ -303,6 +348,27 @@ mod tests {
         let mut runtime = SpotlightOverlayRuntime::new(appearance, backend);
 
         runtime.process_state(SpotlightState::On).unwrap();
+        runtime.tick().unwrap();
+
+        assert_eq!(runtime.backend.calls, vec!["show", "redraw"]);
+    }
+
+    #[test]
+    fn tick_redraws_again_when_the_cursor_moves_while_visible() {
+        let appearance = SpotlightAppearance {
+            radius_px: 4,
+            softness_px: 2,
+            dim_alpha: 0.72,
+        };
+        let backend = FakeBackend {
+            surface_size: (16, 16),
+            cursor: CursorPosition { x: 8, y: 8 },
+            ..Default::default()
+        };
+        let mut runtime = SpotlightOverlayRuntime::new(appearance, backend);
+
+        runtime.process_state(SpotlightState::On).unwrap();
+        runtime.backend.cursor = CursorPosition { x: 9, y: 8 };
         runtime.tick().unwrap();
 
         assert_eq!(runtime.backend.calls, vec!["show", "redraw", "redraw"]);

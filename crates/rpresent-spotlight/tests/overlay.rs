@@ -26,6 +26,7 @@ fn appearance_can_be_built_from_config() {
         radius_px: 300,
         softness_px: 90,
         dim_alpha: 0.8,
+        ..SpotlightConfig::default()
     });
 
     assert_eq!(appearance.radius_px, 300);
