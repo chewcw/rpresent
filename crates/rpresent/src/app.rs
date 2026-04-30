@@ -11,13 +11,8 @@ use rpresent_spotlight::{SpotlightController, SpotlightRuntimeMessage};
 use rpresent_zoom::{ZoomAppearance, ZoomController, ZoomState};
 
 use crate::command::AppCommand;
-use crate::input::InputAction;
+use crate::input::AppEvent;
 use crate::ipc;
-
-pub(crate) enum AppEvent {
-    Command(AppCommand),
-    Input(InputAction),
-}
 
 #[derive(Debug, Parser, Clone, PartialEq, Eq)]
 #[command(
@@ -214,6 +209,8 @@ fn run_daemon(config: Config, _use_qml: bool) -> Result<(), AppError> {
     // X11 input capture (Linux only)
     #[cfg(target_os = "linux")]
     crate::x11_input::spawn(config.shortcuts.clone(), event_tx);
+    #[cfg(not(target_os = "linux"))]
+    let _ = event_tx;
 
     std::thread::spawn(move || {
         let mut spotlight_controller = SpotlightController::new(spotlight_config.enabled_on_start);

@@ -33,6 +33,12 @@ pub enum InputAction {
     SpotlightWheel { delta: f32 },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum AppEvent {
+    Command(crate::command::AppCommand),
+    Input(InputAction),
+}
+
 pub struct InputRouter {
     bindings: InputBindings,
     active_mode: ActiveMode,
