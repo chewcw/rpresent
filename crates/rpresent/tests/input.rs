@@ -8,7 +8,7 @@ fn shortcut_bindings_follow_the_config() {
         spotlight_mode: "Alt+1".to_owned(),
         annotation_mode: "Alt+2".to_owned(),
         zoom_mode: "Alt+3".to_owned(),
-        spotlight_wheel_modifier: "Alt".to_owned(),
+        wheel_modifier: "Alt".to_owned(),
     };
 
     let bindings = InputBindings::from(&config);
@@ -16,7 +16,7 @@ fn shortcut_bindings_follow_the_config() {
     assert_eq!(bindings.spotlight_mode, "Alt+1");
     assert_eq!(bindings.annotation_mode, "Alt+2");
     assert_eq!(bindings.zoom_mode, "Alt+3");
-    assert_eq!(bindings.spotlight_wheel_modifier, "Alt");
+    assert_eq!(bindings.wheel_modifier, "Alt");
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn spotlight_wheel_accepts_control_as_configured_modifier() {
         spotlight_mode: "Ctrl+1".to_owned(),
         annotation_mode: "Ctrl+2".to_owned(),
         zoom_mode: "Ctrl+3".to_owned(),
-        spotlight_wheel_modifier: "Control".to_owned(), // configured as "Control", not "Ctrl"
+        wheel_modifier: "Control".to_owned(), // configured as "Control", not "Ctrl"
     };
     let bindings = InputBindings::from(&config);
     let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);

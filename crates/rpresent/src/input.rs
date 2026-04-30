@@ -14,7 +14,7 @@ pub struct InputBindings {
     pub spotlight_mode: String,
     pub annotation_mode: String,
     pub zoom_mode: String,
-    pub spotlight_wheel_modifier: String,
+    pub wheel_modifier: String,
 }
 
 impl From<&ShortcutConfig> for InputBindings {
@@ -23,7 +23,7 @@ impl From<&ShortcutConfig> for InputBindings {
             spotlight_mode: config.spotlight_mode.clone(),
             annotation_mode: config.annotation_mode.clone(),
             zoom_mode: config.zoom_mode.clone(),
-            spotlight_wheel_modifier: config.spotlight_wheel_modifier.clone(),
+            wheel_modifier: config.wheel_modifier.clone(),
         }
     }
 }
@@ -78,7 +78,8 @@ impl InputRouter {
 
     pub fn handle_wheel(&self, modifier: &str, delta: f32, cursor_x: i16, cursor_y: i16) -> Option<InputAction> {
         let active_modifier = normalize_modifier(modifier);
-        let configured_modifier = normalize_modifier(&self.bindings.spotlight_wheel_modifier);
+        // wheel_modifier governs both spotlight and zoom wheel resize/zoom
+        let configured_modifier = normalize_modifier(&self.bindings.wheel_modifier);
 
         if self.active_mode == ActiveMode::Spotlight && active_modifier == configured_modifier {
             Some(InputAction::SpotlightWheel { delta })

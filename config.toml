@@ -27,7 +27,7 @@ stroke_width_px = 6
 history_depth = 64
 
 [zoom]
-enabled_on_start = false
+enabled_on_start = true
 follow_cursor = true
 initial_scale = 2.0
 min_scale = 1.0
@@ -40,4 +40,4 @@ capture_target = "active-monitor"
 spotlight_mode = "Ctrl+1"
 annotation_mode = "Ctrl+2"
 zoom_mode = "Ctrl+3"
-spotlight_wheel_modifier = "Ctrl"
+wheel_modifier = "Ctrl"
