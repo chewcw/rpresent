@@ -125,6 +125,68 @@
 
 
 
+
+### Task 3.3: Restore Task 2 Architecture for Maximum Performance (~80-90% Recovery)
+
+**Rationale:** After Task 3.2 analysis, the most effective performance recovery is to eliminate the continuous render loop entirely. Task 2's on-demand architecture means rasterization only happens when callers actually request it (or when window events trigger redraws). Task 3 added an unconditional polling tick loop that rasterizes every frame regardless of whether the window is visible or the cursor moved. Task 3.3 restores Task 2's lightweight model while keeping X11 transport separation.
+
+**Key Difference from Task 3.2:**
+- **Task 3.2 approach**: Keep polling tick loop, add change detection + frame caching → rasterize only when state changes
+- **Task 3.3 approach**: Eliminate polling entirely, pass (cursor, config) to backend, let backend decide when/how to render → zero rasterization when no input
+
+**Architecture Change:**
+```
+Task 2 (on-demand):
+	overlay.rs:build_projecteur_frame(size, cursor, config) → SpotlightFrame
+	(caller decides frequency)
+
+Task 3 (polling, broken):
+	SpotlightOverlayRuntime::tick() → unconditional build_projecteur_frame()
+	(rasterizes every tick regardless of changes)
+
+Task 3.3 (on-demand transport):
+	SpotlightOverlayRuntime::tick(cursor, config) 
+		→ backend.redraw(cursor, config)  [pass raw parameters, not pre-rasterized frame]
+		→ backend decides: render only if needed
+	(backend controls rasterization frequency)
+```
+
+**Approach:**
+
+1. **Remove pre-rasterization from tick()**: Instead of `build_projecteur_frame()` in `SpotlightOverlayRuntime::tick()`, pass cursor position and config directly to backend
+2. **Backend handles rendering**: Let `X11SpotlightOverlay::redraw(cursor, config)` decide rendering strategy:
+	 - On state change (cursor moved, config changed): Rasterize via `build_projecteur_frame()`
+	 - On static state: Skip rasterization, reuse cached frame or composite previous buffer
+	 - On surface resize: Invalidate cache, force rasterization on next redraw
+3. **Eliminate unconditional rasterization**: No per-tick rasterization unless state actually changed
+
+**Subtasks:**
+- [ ] 3.3.1: Modify `SpotlightOverlayRuntime::tick()` signature to pass `cursor` and `config` instead of pre-built frame
+- [ ] 3.3.2: Modify `SpotlightOverlayBackend::redraw()` signature to accept `cursor: CursorPosition, config: &SpotlightConfig` instead of pre-rasterized frame
+- [ ] 3.3.3: Implement state-change detection in `X11SpotlightOverlay::redraw()`:
+	- Compare (cursor, config) hash with last hash
+	- Only call `build_projecteur_frame()` if changed
+	- Reuse cached `SpotlightFrame` otherwise
+- [ ] 3.3.4: Update overlay.rs and controller.rs to match new signatures (pass cursor + config, not frame)
+- [ ] 3.3.5: Verify all 36 tests pass with new architecture
+- [ ] 3.3.6: Benchmark: Measure CPU usage under static cursor, moving cursor, rapid movement (compare vs Task 3.2)
+- [ ] 3.3.7: Document performance gains in PERFORMANCE_ANALYSIS.md
+- [ ] 3.3.8: Commit with message "task 3.3: restore on-demand architecture for maximum performance recovery"
+
+**Expected Performance:**
+- **Static cursor**: ~0% CPU (no rasterization, no upload)
+- **Moving cursor**: CPU spike only when cursor position changes (not on every tick)
+- **Rapid movement**: CPU proportional to state-change frequency, not event frequency
+- **Expected recovery**: 80-90% of original Task 2 performance (on-demand baseline)
+
+**Backward Compatibility:**
+- Public API of `SpotlightOverlayRuntime` remains unchanged (tick still takes same params)
+- Behavior semantically identical (same visual output)
+- Internal architecture changes only (caller → backend delegation of rasterization)
+
+**Alternative to Task 3.2:** This is the "fastest recovery" option if frame caching (Task 3.2) doesn't fully resolve performance issues. Task 3.3 eliminates the root cause (continuous polling) rather than adding mitigation (caching).
+
+
 ### Task 4: Lock in parity and performance
 
 **Files:**
