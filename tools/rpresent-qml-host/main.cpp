@@ -7,6 +7,7 @@
 #include <QJsonObject>
 #include <QThread>
 #include <QTextStream>
+#include <QIODevice>
 #include <QDebug>
 
 class OverlayState : public QObject
