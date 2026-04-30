@@ -55,6 +55,7 @@ protected:
     {
         QTextStream in(stdin, QIODevice::ReadOnly);
         QString line;
+        bool quit = false;
         while (in.readLineInto(&line)) {
             if (line.trimmed().isEmpty())
                 continue;
@@ -81,13 +82,16 @@ protected:
                 QMetaObject::invokeMethod(m_state, "applyVisibility",
                     Qt::QueuedConnection, Q_ARG(bool, true));
             } else if (type == QLatin1String("quit")) {
+                quit = true;
                 QMetaObject::invokeMethod(m_state, "quitRequested",
                     Qt::QueuedConnection);
                 break;
             }
         }
-        // stdin closed (Rust process died or sent Quit) - signal quit
-        QMetaObject::invokeMethod(m_state, "quitRequested", Qt::QueuedConnection);
+        // Emit quit on EOF only if not already signalled by explicit quit message.
+        if (!quit) {
+            QMetaObject::invokeMethod(m_state, "quitRequested", Qt::QueuedConnection);
+        }
     }
 
 private:
