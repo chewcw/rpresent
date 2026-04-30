@@ -84,6 +84,27 @@ cargo run -p rpresent -- config init --config ~/.config/rpresent/config.toml
 
 `config init` writes the default config and will not overwrite an existing file.
 
+## Zoom
+
+When the daemon starts without a command it enters an idle loop — no overlay appears until a shortcut or IPC command triggers one.
+
+**Activate zoom mode:**
+- Press `Ctrl+3` to toggle zoom mode on/off.
+- Or send a command directly: `cargo run -p rpresent -- zoom=on` / `zoom=off`.
+
+**Change zoom level:**
+While in zoom mode, hold `Ctrl` and scroll the mouse wheel to increase or decrease the zoom scale.
+
+**Reset zoom:**
+```bash
+cargo run -p rpresent -- zoom=reset
+```
+Restores the default scale and re-centers the magnified view.
+
+**Known limitations:**
+- Linux/X11 only; Wayland is not supported.
+- An ARGB32-capable compositor must be running (e.g., picom, compton, KWin, Mutter) for overlay transparency to render correctly.
+
 ## Notes
 
 The top-level command parser accepts these routed commands:
