@@ -302,7 +302,7 @@ pub fn run_overlay(
 #[cfg(all(target_os = "linux", feature = "qml"))]
 pub fn run_overlay_qml(
     config: rpresent_config::SpotlightConfig,
-    rx: Receiver<SpotlightState>,
+    rx: Receiver<SpotlightRuntimeMessage>,
 ) -> Result<(), OverlayError> {
     use std::sync::mpsc::RecvTimeoutError;
     use std::time::Duration;
@@ -313,9 +313,9 @@ pub fn run_overlay_qml(
     let mut visible = false;
 
     loop {
-        let next_state = if visible {
+        let next_msg = if visible {
             match rx.recv_timeout(Duration::from_millis(16)) {
-                Ok(state) => Some(state),
+                Ok(msg) => Some(msg),
                 Err(RecvTimeoutError::Timeout) => {
                     runtime.tick()?;
                     None
@@ -324,15 +324,16 @@ pub fn run_overlay_qml(
             }
         } else {
             match rx.recv() {
-                Ok(state) => Some(state),
+                Ok(msg) => Some(msg),
                 Err(_) => break,
             }
         };
 
-        if let Some(state) = next_state {
-            let next_visible = matches!(state, SpotlightState::On);
-            runtime.process_state(state)?;
-            visible = next_visible;
+        if let Some(msg) = next_msg {
+            if let SpotlightRuntimeMessage::Visibility(ref state) = msg {
+                visible = matches!(state, SpotlightState::On);
+            }
+            runtime.process_message(msg)?;
         }
     }
 
