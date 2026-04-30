@@ -65,3 +65,16 @@ mod ipc_message {
         );
     }
 }
+
+#[cfg(feature = "qml")]
+mod spawn {
+    use rpresent_spotlight::QmlSpotlightOverlay;
+
+    /// Requires `rpresent-qml-host` to be in PATH.  Run manually after building the Qt host.
+    #[test]
+    #[ignore]
+    fn can_create_and_drop() {
+        let _overlay = QmlSpotlightOverlay::new().expect("QML overlay creation should succeed");
+        // Drop sends Quit and joins child — test passes if no panic.
+    }
+}
