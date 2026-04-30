@@ -187,23 +187,43 @@ Tick → Check if cursor/config changed → If yes, build_projecteur_frame() →
 
 ---
 
+## Approved Requirement Change
+
+The original port plan constrained X11 to be transport-only. That requirement has now been explicitly relaxed:
+
+- Previous rule: X11 must stay transport-only; visuals must come from Rust rasterization.
+- Approved rule: X11 may own server-side compositing for supported spotlight visuals, with Rust rasterization kept as a fallback for unsupported or fidelity-critical cases.
+
+This change matters because the best-performing known commit, `54ace59`, uses XRender radial composition on the X server for the hot path. The current software-first design cannot realistically recover that performance level while still requiring every moving frame to be synthesized in client memory.
+
+## Selected Fix Direction
+
+The chosen remediation is no longer “keep optimizing software upload.” It is:
+
+1. Restore the `54ace59`-style server-side XRender radial fast path for the supported/default spotlight subset.
+2. Keep the current `render.rs` Projecteur renderer as a software fallback for unsupported or fidelity-critical visuals.
+3. Preserve the current parameter-driven runtime boundary so backend selection happens in `x11.rs`, not in the app loop.
+4. Validate each stage against both `54ace59` and current `HEAD`, so the target is actual recovered behavior rather than theoretical improvement.
+
+The practical implication is that Task 3.1 becomes the primary fix path, while Task 3.2 and Task 3.3 remain secondary mitigations around the slower software route.
+
+---
+
 ## Recommended Next Steps
 
-1. **Immediate (Quick Win)**: Implement cursor position delta detection
-   - Only rasterize when cursor moves > threshold
-   - Reduces rasterization from every-tick to infrequent
-   - Est. 40-50% improvement
+1. **Primary fix**: Restore the `54ace59` XRender fast path as a first-class backend strategy.
+   - Reintroduce the explicit backend split in `x11.rs`
+   - Keep server-side radial composition for the supported/default spotlight subset
+   - Keep software upload for unsupported or fidelity-critical cases
 
-2. **Medium-term (Architecture Fix)**: Restore parameter-passing backend
-   - Revert overlay.rs to pass (cursor, config) instead of frame
-   - Let backend choose rendering strategy
-   - Restore XRender GPU path as primary
-   - Est. 80-90% improvement toward Task 2 baseline
+2. **Secondary fix**: Retain lightweight runtime delegation.
+   - Keep `overlay.rs` passing render inputs into the backend
+   - Do not reintroduce unconditional client-side frame building in the runtime loop
 
-3. **Long-term (Polish)**: Criterion benchmarks
-   - Measure Task 2 vs current vs optimized version
-   - Establish performance regression tests
-   - Prevent future regressions
+3. **Validation gate**: Benchmark and manually compare `54ace59`, current `HEAD`, and the restored fast path.
+   - Measure CPU while moving the cursor at 1920x1080 and 3840x2160
+   - Record whether the restored path materially matches the known-good commit
+   - Only then decide whether more software-side tuning is still needed
 
 ---
 
@@ -218,4 +238,4 @@ Tick → Check if cursor/config changed → If yes, build_projecteur_frame() →
 | GPU utilization | Medium | Low | Underutilized |
 | Remote X11 friendly | Yes | No | High bandwidth |
 
-**Conclusion**: The performance regression is primarily caused by switching from GPU-accelerated gradient synthesis to per-frame CPU rasterization. Task 3.1 and 3.2 attempted to optimize the wrong layers (GPU routing + upload caching) without addressing the root bottleneck: unconditional full-frame CPU rasterization every 16ms.
+**Conclusion**: The performance regression is primarily caused by switching from GPU-accelerated gradient synthesis to per-frame CPU rasterization. The approved requirement change means the correct fix is to restore the proven server-side XRender hot path for supported visuals and keep the Projecteur software renderer as a fallback, rather than continuing to optimize around unconditional client-side frame synthesis.

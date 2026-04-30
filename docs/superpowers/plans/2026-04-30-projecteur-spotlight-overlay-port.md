@@ -4,7 +4,7 @@
 
 **Goal:** Port Projecteur's spotlight overlay renderer into Rust with one-to-one visual behavior for the shade, shape cutout, border ring, and center dot, while keeping device input, command parsing, Qt/QML, and zoom out of scope.
 
-**Architecture:** Build a pure Rust frame compositor that resolves the current scene into a premultiplied RGBA buffer and hands that buffer to the X11 transport layer. Use `tiny-skia` for antialiased vector mask rasterization, because Projecteur's visuals are path-based shapes rather than a radial falloff. Cache shape paths, scale factors, and scratch pixmaps so redraws reuse memory instead of rebuilding full-screen frames from scratch. Keep `x11.rs` focused on window lifecycle, cursor query, and image upload only. Introduce Projecteur-style render settings in `rpresent_config` so the renderer receives the same shape, rotation, border, dot, and shade inputs the QML scene used.
+**Architecture:** Build a pure Rust frame compositor that resolves the current scene into a premultiplied RGBA buffer when full Projecteur fidelity is required, but allow `x11.rs` to synthesize supported spotlight visuals server-side when that materially improves latency. Use `tiny-skia` for antialiased vector mask rasterization, because Projecteur's visuals are path-based shapes rather than a radial falloff. Cache shape paths, scale factors, and scratch pixmaps so redraws reuse memory instead of rebuilding full-screen frames from scratch. Keep the runtime boundary parameter-driven so the backend can choose between XRender composition and software upload per config. Introduce Projecteur-style render settings in `rpresent_config` so the renderer receives the same shape, rotation, border, dot, and shade inputs the QML scene used.
 
 **Tech Stack:** Rust 2024, `tiny-skia`, `x11rb`, `serde`, `toml`, `tracing`, and `criterion`.
 
@@ -23,7 +23,7 @@
 - Do not port Qt/QML or the preferences UI; the renderer should stay in Rust/X11 unless a later fidelity gap proves we need Qt/QML integration.
 - Do not add repeated initialization loops or fallback retries; keep the renderer cache warm and rebuild only when the scene or surface size changes.
 - Do not port zoom in this pass; it already belongs to a separate module in this workspace.
-- Do keep the X11 boundary thin; visuals must come from Rust rasterization, not from XRender gradients.
+- X11 may own server-side compositing for supported spotlight visuals, with Rust rasterization kept as a fallback for unsupported or fidelity-critical cases.
 - Keep multi-monitor overlay placement out of this plan unless we explicitly decide the rendering port needs active-monitor routing; if it becomes necessary, implement it in the X11/window-placement layer rather than by adopting Qt/QML.
 
 ## Implementation Plan
@@ -65,14 +65,14 @@
 - [x] Run `cargo test -p rpresent-spotlight --test render` → 9/9 pass.
 - [ ] Commit the renderer before changing X11 transport.
 
-### Task 3: Keep X11 as transport only
+### Task 3: Keep X11 transport-first, with bounded server-side composition
 
 **Files:**
 - Modify: `crates/rpresent-spotlight/src/x11.rs`
 - Modify: `crates/rpresent-spotlight/src/overlay.rs`
 - Modify: `crates/rpresent-spotlight/tests/overlay.rs`
 
-- [x] Replace the current gradient-generation path with the Rust renderer so X11 never owns the visual semantics.
+- [x] Replace the current always-on gradient-generation path with the Rust renderer for full-fidelity Projecteur visuals, while keeping room for a later server-side fast path.
 - [x] Keep the existing x11rb window setup, visual selection, and cursor query logic, but make redraw consume the already-built RGBA buffer.
 - [x] If an XRender fast path stays, use it only to present the pre-rasterized buffer; do not keep `create_gradient_picture` or any semantic substitute on the X11 side.
 - [x] Reuse a persistent client-side image buffer or pixmap wrapper so the upload path does not reallocate on every tick.
@@ -82,7 +82,9 @@
 
 ### Task 3.1: Re-introduce XRender compositing fast path (primary)
 
-**Rationale:** Task 3 removed the server-side XRender compositing branch and made every visible tick upload a full pre-rasterized frame through `PutImage`. At 1080p/4K this can saturate CPU, memory bandwidth, and X11 socket throughput. Re-introducing an XRender path is the first remediation because it restores the previously fast execution model for supported visuals.
+**Rationale:** Task 3 removed the server-side XRender compositing branch and made every visible tick upload a full pre-rasterized frame through `PutImage`. At 1080p/4K this can saturate CPU, memory bandwidth, and X11 socket throughput. Re-introducing an XRender path is the first remediation because commit `54ace59` has been confirmed as the best-performing known implementation, and it kept the common spotlight path on the X server.
+
+**Approved Requirement Change (2026-04-30):** X11 may own server-side compositing for supported spotlight visuals, with Rust rasterization kept as a fallback for unsupported or fidelity-critical cases.
 
 **Files:**
 - Modify: `crates/rpresent-spotlight/src/x11.rs`
@@ -91,8 +93,9 @@
 - Modify: `crates/rpresent-spotlight/tests/controller.rs` (only if behavior assertions need redraw-path awareness)
 
 - [ ] Add backend capability detection in `x11.rs` for XRender direct format support and keep a software upload fallback for unsupported environments.
-- [ ] Restore an explicit backend split (for example: `RenderComposite` and `ImageUpload`) without reintroducing semantic ownership of spotlight visuals on the X11 side.
+- [ ] Restore an explicit backend split (for example: `RenderRadial` and `SoftwareUpload`) and allow semantic ownership on the X11 side only for the supported fast-path visuals.
 - [ ] In the XRender-capable backend, avoid full-frame `put_image` per tick; use XRender primitives/composition on server-side buffers and keep client-side bytes out of the hot path wherever possible.
+- [ ] Limit the initial XRender fast path to the exact subset that matches `54ace59` performance characteristics; use the existing Projecteur renderer as the fallback for shapes or decorations that need higher fidelity.
 - [ ] Keep `SpotlightOverlayRuntime` behavior unchanged (`show`/`hide`, tick cadence, cursor polling), so only transport internals differ by backend.
 - [ ] Add/adjust tests that verify backend selection and ensure both render and software branches preserve existing visible-state behavior.
 - [ ] Manually verify latency and CPU for spotlight-on cursor movement at 1920x1080 and 3840x2160 against Task 3 baseline.
