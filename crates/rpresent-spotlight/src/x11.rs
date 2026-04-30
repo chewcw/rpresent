@@ -244,12 +244,19 @@ fn select_render_strategy(config: &rpresent_config::SpotlightConfig) -> RenderSt
     }
 }
 
+struct DotRenderCache {
+    key: DotCacheKey,
+    pixmap: u32,
+    picture: Picture,
+}
+
 pub(crate) struct X11SpotlightOverlay {
     connection: RustConnection,
     screen_num: usize,
     window: Window,
     surface_size: (u16, u16),
     backend: BackendKind,
+    dot_cache: Option<DotRenderCache>,
 }
 
 impl X11SpotlightOverlay {
@@ -347,6 +354,7 @@ impl X11SpotlightOverlay {
             window,
             surface_size: (spec.width, spec.height),
             backend,
+            dot_cache: None,
         })
     }
 
@@ -363,6 +371,19 @@ impl X11SpotlightOverlay {
             .map_err(runtime_error)
     }
 
+}
+
+fn free_dot_cache(connection: &RustConnection, cache: DotRenderCache) {
+    let _ = connection.render_free_picture(cache.picture);
+    let _ = connection.free_pixmap(cache.pixmap);
+}
+
+impl Drop for X11SpotlightOverlay {
+    fn drop(&mut self) {
+        if let Some(cache) = self.dot_cache.take() {
+            free_dot_cache(&self.connection, cache);
+        }
+    }
 }
 
 impl SpotlightOverlayBackend for X11SpotlightOverlay {
