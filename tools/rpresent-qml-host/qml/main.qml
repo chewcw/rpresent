@@ -3,7 +3,7 @@ import QtQuick.Window 2.15
 
 Window {
     id: root
-    flags: Qt.FramelessWindowHint | Qt.WindowTransparentForInput | Qt.WindowStaysOnTopHint | Qt.Tool
+    flags: Qt.FramelessWindowHint | Qt.WindowTransparentForInput | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.X11BypassWindowManagerHint
     color: "transparent"
     x: 0; y: 0
     width:  overlay.state["surface_w"] || 1920
