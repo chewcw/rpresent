@@ -239,3 +239,33 @@ The practical implication is that Task 3.1 becomes the primary fix path, while T
 | Remote X11 friendly | Yes | No | High bandwidth |
 
 **Conclusion**: The performance regression is primarily caused by switching from GPU-accelerated gradient synthesis to per-frame CPU rasterization. The approved requirement change means the correct fix is to restore the proven server-side XRender hot path for supported visuals and keep the Projecteur software renderer as a fallback, rather than continuing to optimize around unconditional client-side frame synthesis.
+
+## XRender Circle Dot Validation
+
+- Baseline commit (rectangle dot): `12229a2`
+- Candidate commit (circle dot): `ddc05cd` (includes follow-up safety fix after `a713c2e`)
+- Automated validation in this environment:
+  - `cargo test -p rpresent-spotlight`: PASS
+  - `cargo test`: PASS
+- Known warnings:
+  - `RenderStrategy` and `select_render_strategy` are currently dead-code in `x11.rs`.
+
+### Manual X11 Validation (pending on interactive desktop)
+
+These checks cannot be executed in this non-interactive CI-like terminal session and must be run on your X11 desktop:
+
+1. Visual correctness
+   - `show_center_dot = false` => no center dot
+   - `show_center_dot = true`, `dot_size_px = 8` => visible circular dot (not rectangular)
+   - `dot_color = "#ff0000"`, `dot_opacity = 1.0` => opaque red circle
+   - `dot_size_px = 2` and `24` => scale behaves as expected
+2. Performance sanity
+   - Compare cursor-motion smoothness and CPU for 10s against baseline `12229a2`
+   - Scenarios: 1920x1080 and 3840x2160
+   - Acceptance: no obvious stutter regression; CPU remains within normal run-to-run noise
+
+### Notes
+
+- Circle-dot fast path uses a cached tiny ARGB pixmap/picture and composites it each frame with XRender.
+- Cache rebuild only occurs when dot config key changes (`show_center_dot`, `dot_size_px`, `dot_color`, `dot_opacity`).
+- Follow-up fix `ddc05cd` closes X11 resource leaks on cache-upload error paths.
