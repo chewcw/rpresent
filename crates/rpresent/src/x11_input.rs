@@ -24,22 +24,50 @@ fn run_input_loop(
     use std::collections::HashMap;
     use x11rb::connection::Connection as _;
     use x11rb::protocol::Event;
-    use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConnectionExt as _, EventMask};
+    use x11rb::protocol::xproto::{ButtonIndex, ConnectionExt as _, EventMask, GrabMode, ModMask};
 
     use crate::input::{ActiveMode, InputBindings, InputRouter};
 
     let (conn, screen_num) = x11rb::connect(None)?;
     let root = conn.setup().roots[screen_num].root;
 
-    conn.change_window_attributes(
-        root,
-        &ChangeWindowAttributesAux::new()
-            .event_mask(EventMask::KEY_PRESS | EventMask::KEY_RELEASE | EventMask::BUTTON_PRESS),
-    )?
-    .check()?;
-    conn.flush()?;
-
+    // Build the keycode map first so we can set up passive key grabs.
     let keycode_map: HashMap<u8, &'static str> = build_keycode_map(&conn);
+
+    // Passive grab Ctrl+1/2/3 on the root window for global shortcut capture.
+    // ChangeWindowAttributes with KEY_PRESS does NOT capture events over other windows;
+    // GrabKey is required for global hotkey delivery.
+    for &keycode in keycode_map.keys() {
+        conn.grab_key(
+            false,
+            root,
+            ModMask::CONTROL,
+            keycode,
+            GrabMode::ASYNC,
+            GrabMode::ASYNC,
+        )?
+        .check()?;
+    }
+
+    // Passive grab Ctrl+wheel (buttons 4 and 5) globally on the root window.
+    // ChangeWindowAttributes with BUTTON_PRESS only fires when the pointer is over the root
+    // background; GrabButton is required to intercept wheel events over any window.
+    for button in [ButtonIndex::M4, ButtonIndex::M5] {
+        conn.grab_button(
+            false,
+            root,
+            EventMask::BUTTON_PRESS,
+            GrabMode::ASYNC,
+            GrabMode::ASYNC,
+            0u32, // confine_to: NONE
+            0u32, // cursor: NONE
+            button,
+            ModMask::CONTROL,
+        )?
+        .check()?;
+    }
+
+    conn.flush()?;
     let bindings = InputBindings::from(&shortcuts);
     let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);
 
