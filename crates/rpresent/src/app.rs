@@ -7,7 +7,7 @@ use rpresent_annotation::{AnnotationAppearance, AnnotationController, Annotation
 use rpresent_config::{
     Config, default_config_path, load_or_default_from_path, write_default_config,
 };
-use rpresent_spotlight::{SpotlightController, SpotlightState};
+use rpresent_spotlight::{SpotlightController, SpotlightRuntimeMessage};
 use rpresent_zoom::{ZoomAppearance, ZoomController, ZoomState};
 
 use crate::command::AppCommand;
@@ -179,7 +179,7 @@ fn run_daemon(config: Config, _use_qml: bool) -> Result<(), AppError> {
     tracing::debug!(socket_name = %config.app.socket_name, "starting daemon runtime");
 
     let (app_tx, app_rx) = mpsc::channel();
-    let (spotlight_tx, spotlight_rx) = mpsc::channel::<SpotlightState>();
+    let (spotlight_tx, spotlight_rx) = mpsc::channel::<SpotlightRuntimeMessage>();
     let (annotation_tx, annotation_rx) = mpsc::channel::<AnnotationState>();
     let (zoom_tx, zoom_rx) = crossbeam_channel::unbounded::<ZoomState>();
     let socket_path = ipc::socket_path_for(&config.app.socket_name)?;
@@ -206,7 +206,7 @@ fn run_daemon(config: Config, _use_qml: bool) -> Result<(), AppError> {
         );
         let mut zoom_controller = ZoomController::from_config(zoom_config);
 
-        let _ = spotlight_tx.send(spotlight_controller.state());
+        let _ = spotlight_tx.send(SpotlightRuntimeMessage::Visibility(spotlight_controller.state()));
         let _ = annotation_tx.send(annotation_controller.state());
         let _ = zoom_tx.send(zoom_controller.state());
 
@@ -214,7 +214,7 @@ fn run_daemon(config: Config, _use_qml: bool) -> Result<(), AppError> {
             match command {
                 AppCommand::Spotlight(command) => {
                     if spotlight_controller.apply(command) {
-                        let _ = spotlight_tx.send(spotlight_controller.state());
+                        let _ = spotlight_tx.send(SpotlightRuntimeMessage::Visibility(spotlight_controller.state()));
                     }
                 }
                 AppCommand::Annotation(command) => {
