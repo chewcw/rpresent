@@ -128,6 +128,29 @@ fn alpha_to_u16(alpha: f32) -> u16 {
     (alpha.clamp(0.0, 1.0) * u16::MAX as f32).round() as u16
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DotCacheKey {
+    size_px: u16,
+    color_rgb: (u8, u8, u8),
+    alpha_u16: u16,
+}
+
+fn dot_cache_key(config: &SpotlightConfig) -> Option<DotCacheKey> {
+    if !config.show_center_dot {
+        return None;
+    }
+
+    let size_px = config.dot_size_px.max(1).min(u16::MAX as u32) as u16;
+    let color_rgb = parse_hex_rgb(&config.dot_color).unwrap_or((255, 255, 255));
+    let alpha_u16 = alpha_to_u16(config.dot_opacity);
+
+    Some(DotCacheKey {
+        size_px,
+        color_rgb,
+        alpha_u16,
+    })
+}
+
 fn parse_hex_rgb(color: &str) -> Option<(u8, u8, u8)> {
     let hex = color.strip_prefix('#')?;
     if hex.len() != 6 {
@@ -729,5 +752,33 @@ mod tests {
         assert_eq!(appearance.radius_px, 300);
         assert_eq!(appearance.softness_px, 90);
         assert!((appearance.dim_alpha - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn dot_cache_key_changes_when_visual_inputs_change() {
+        let mut a = rpresent_config::SpotlightConfig::default();
+        a.show_center_dot = true;
+        a.dot_size_px = 8;
+        a.dot_color = "#ffffff".to_owned();
+        a.dot_opacity = 0.8;
+
+        let mut b = a.clone();
+        b.dot_size_px = 9;
+        assert_ne!(dot_cache_key(&a), dot_cache_key(&b));
+
+        b = a.clone();
+        b.dot_color = "#ff0000".to_owned();
+        assert_ne!(dot_cache_key(&a), dot_cache_key(&b));
+
+        b = a.clone();
+        b.dot_opacity = 0.5;
+        assert_ne!(dot_cache_key(&a), dot_cache_key(&b));
+    }
+
+    #[test]
+    fn dot_cache_key_none_when_dot_is_hidden() {
+        let mut c = rpresent_config::SpotlightConfig::default();
+        c.show_center_dot = false;
+        assert_eq!(dot_cache_key(&c), None);
     }
 }
