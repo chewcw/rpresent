@@ -412,6 +412,12 @@ fn upload_dot_cache(
     depth: u8,
     key: DotCacheKey,
 ) -> Result<DotRenderCache, OverlayError> {
+    if depth != 32 {
+        return Err(runtime_error(format!(
+            "dot cache requires 32-bit depth, got {depth}"
+        )));
+    }
+
     let sz = key.size_px;
     let pixels = build_circle_dot_bgra(sz, key.color_rgb, key.alpha_u16);
 
@@ -445,12 +451,25 @@ fn upload_dot_cache(
         .map_err(runtime_error)?;
 
     // Temporary GC to upload image data.
-    let gc = connection.generate_id().map_err(runtime_error)?;
-    connection
-        .create_gc(gc, pixmap, &CreateGCAux::default().graphics_exposures(0))
-        .map_err(runtime_error)?;
-    let mut image =
-        Image::allocate_native(sz, sz, depth, connection.setup()).map_err(runtime_error)?;
+    let gc = match connection.generate_id() {
+        Ok(id) => id,
+        Err(error) => {
+            let _ = connection.free_pixmap(pixmap);
+            return Err(runtime_error(error));
+        }
+    };
+    if let Err(error) = connection.create_gc(gc, pixmap, &CreateGCAux::default().graphics_exposures(0)) {
+        let _ = connection.free_pixmap(pixmap);
+        return Err(runtime_error(error));
+    }
+    let mut image = match Image::allocate_native(sz, sz, depth, connection.setup()) {
+        Ok(img) => img,
+        Err(error) => {
+            let _ = connection.free_gc(gc);
+            let _ = connection.free_pixmap(pixmap);
+            return Err(runtime_error(error));
+        }
+    };
     if image.data().len() != pixels.len() {
         let _ = connection.free_gc(gc);
         let _ = connection.free_pixmap(pixmap);
@@ -461,13 +480,24 @@ fn upload_dot_cache(
         )));
     }
     image.data_mut().copy_from_slice(&pixels);
-    let _ = image.put(connection, pixmap, gc, 0, 0).map_err(runtime_error)?;
+    if let Err(error) = image.put(connection, pixmap, gc, 0, 0) {
+        let _ = connection.free_gc(gc);
+        let _ = connection.free_pixmap(pixmap);
+        return Err(runtime_error(error));
+    }
     let _ = connection.free_gc(gc);
 
-    let picture = connection.generate_id().map_err(runtime_error)?;
-    connection
-        .render_create_picture(picture, pixmap, pictformat, &CreatePictureAux::default())
-        .map_err(runtime_error)?;
+    let picture = match connection.generate_id() {
+        Ok(id) => id,
+        Err(error) => {
+            let _ = connection.free_pixmap(pixmap);
+            return Err(runtime_error(error));
+        }
+    };
+    if let Err(error) = connection.render_create_picture(picture, pixmap, pictformat, &CreatePictureAux::default()) {
+        let _ = connection.free_pixmap(pixmap);
+        return Err(runtime_error(error));
+    }
 
     Ok(DotRenderCache { key, pixmap, picture })
 }
@@ -480,7 +510,7 @@ fn ensure_dot_cache(
     depth: u8,
     dot_cache: &mut Option<DotRenderCache>,
     config: &SpotlightConfig,
-) -> Result<Option<Picture>, OverlayError> {
+) -> Result<Option<(Picture, DotCacheKey)>, OverlayError> {
     let key = match dot_cache_key(config) {
         None => {
             if let Some(old) = dot_cache.take() {
@@ -493,7 +523,7 @@ fn ensure_dot_cache(
 
     if let Some(ref cache) = *dot_cache {
         if cache.key == key {
-            return Ok(Some(cache.picture));
+            return Ok(Some((cache.picture, cache.key)));
         }
     }
 
@@ -504,7 +534,7 @@ fn ensure_dot_cache(
     let new_cache = upload_dot_cache(connection, window, depth, key)?;
     let picture = new_cache.picture;
     *dot_cache = Some(new_cache);
-    Ok(Some(picture))
+    Ok(Some((picture, key)))
 }
 
 impl Drop for X11SpotlightOverlay {
@@ -738,8 +768,7 @@ fn redraw_render(
     .map_err(runtime_error)?;
 
     // Composite circle dot if enabled.
-    if let Some(dot_picture) = ensure_dot_cache(connection, window, depth, dot_cache, config)? {
-        let key = dot_cache.as_ref().unwrap().key;
+    if let Some((dot_picture, key)) = ensure_dot_cache(connection, window, depth, dot_cache, config)? {
         let half = (key.size_px as i32) / 2;
         let dst_x = (cursor.x as i32 - half).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         let dst_y = (cursor.y as i32 - half).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
