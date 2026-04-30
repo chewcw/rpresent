@@ -3,6 +3,9 @@ pub mod command;
 pub mod controller;
 pub mod overlay;
 
+#[cfg(target_os = "linux")]
+pub(crate) mod x11;
+
 pub use capture::{CaptureError, CapturedFrame, FrameSource, ZoomCapture};
 pub use command::{CommandParseError, ZoomCommand};
 pub use controller::{ZoomController, ZoomState};

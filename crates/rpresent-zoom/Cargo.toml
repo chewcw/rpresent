@@ -7,8 +7,5 @@ edition = "2024"
 rpresent-config = { path = "../rpresent-config" }
 tracing = { workspace = true }
 thiserror = "2"
-xcap = "0.4"
-winit = "0.30"
-wgpu = "0.20"
-bytemuck = { version = "1", features = ["derive"] }
 crossbeam-channel = "0.5"
+x11rb = { version = "0.13", features = ["render", "image"] }
