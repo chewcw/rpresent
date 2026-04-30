@@ -62,27 +62,26 @@ fn run_input_loop(
                     if let Err(error) = cookie.check() {
                         tracing::warn!(
                             keycode,
-                            ?modifiers,
-                            ?error,
-                            "failed to grab global key shortcut"
+                            "failed to grab global key shortcut: {error}"
                         );
                     }
                 }
                 Err(error) => {
                     tracing::warn!(
                         keycode,
-                        ?modifiers,
-                        ?error,
-                        "failed to request global key shortcut grab"
+                        "failed to request global key shortcut grab: {error}"
                     );
                 }
             }
         }
     }
 
-    // Passive grab Ctrl+wheel (buttons 4 and 5) globally on the root window.
-    // ChangeWindowAttributes with BUTTON_PRESS only fires when the pointer is over the root
-    // background; GrabButton is required to intercept wheel events over any window.
+    // Passive grab wheel buttons (4 and 5) globally on the root window.
+    // We grab each lock-modifier combination explicitly so Ctrl+wheel is intercepted
+    // regardless of CapsLock / NumLock state.
+    // With owner_events=false and pointer_mode=ASYNC, the ButtonPress is delivered ONLY to
+    // us and is NOT forwarded to the window beneath the pointer — this ensures the
+    // application under the spotlight cannot also receive the scroll event.
     let wheel_grab_modifiers = [
         ModMask::CONTROL,
         ModMask::CONTROL | ModMask::LOCK,
@@ -108,27 +107,18 @@ fn run_input_loop(
             ) {
                 Ok(cookie) => {
                     if let Err(error) = cookie.check() {
-                        tracing::warn!(
-                            ?button,
-                            ?modifiers,
-                            ?error,
-                            "failed to grab global wheel shortcut"
-                        );
+                        tracing::warn!(?button, ?modifiers, "wheel grab failed: {error}");
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(
-                        ?button,
-                        ?modifiers,
-                        ?error,
-                        "failed to request global wheel shortcut grab"
-                    );
+                    tracing::warn!(?button, ?modifiers, "wheel grab request failed: {error}");
                 }
             }
         }
     }
 
     conn.flush()?;
+    tracing::debug!("x11_input: passive grabs registered, entering event loop");
     let bindings = InputBindings::from(&shortcuts);
     let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);
 
@@ -139,12 +129,18 @@ fn run_input_loop(
                 if ev.detail == BUTTON_WHEEL_UP || ev.detail == BUTTON_WHEEL_DOWN =>
             {
                 let modifier = modifier_from_state(ev.state);
+                tracing::trace!(
+                    detail = ev.detail,
+                    modifier,
+                    "x11_input: wheel ButtonPress received"
+                );
                 let delta = if ev.detail == BUTTON_WHEEL_UP {
                     1.0_f32
                 } else {
                     -1.0_f32
                 };
                 if let Some(action) = router.handle_wheel(modifier, delta) {
+                    tracing::debug!(delta, "x11_input: dispatching SpotlightWheel");
                     let _ = tx.send(crate::input::AppEvent::Input(action));
                 }
             }
