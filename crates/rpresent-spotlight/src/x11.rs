@@ -223,11 +223,7 @@ fn create_gradient_picture<'a>(
 }
 
 enum BackendKind {
-    Render {
-        window_picture: Picture,
-        gc: Gcontext,
-        depth: u8,
-    },
+    Render { window_picture: Picture, depth: u8 },
     Software { gc: Gcontext, depth: u8 },
 }
 
@@ -240,9 +236,8 @@ enum RenderStrategy {
 fn select_render_strategy(config: &rpresent_config::SpotlightConfig) -> RenderStrategy {
     let is_circle = matches!(config.shape, rpresent_config::SpotShape::Circle);
     let rotated = config.spot_rotation_deg != 0.0;
-    let needs_border = config.show_border;
 
-    if is_circle && !rotated && !needs_border {
+    if is_circle && !rotated {
         RenderStrategy::XrenderRadial
     } else {
         RenderStrategy::SoftwareFrame
@@ -617,45 +612,32 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
         cursor: CursorPosition,
         config: &SpotlightConfig,
     ) -> Result<(), OverlayError> {
-        let strategy = select_render_strategy(config);
-        if !matches!(strategy, RenderStrategy::XrenderRadial) {
-            if let Some(cache) = self.dot_cache.take() {
-                free_dot_cache(&self.connection, cache);
-            }
-        }
-
-        let result = match (&self.backend, strategy) {
-            (
-                BackendKind::Render {
-                    window_picture,
-                    gc: _,
-                    depth,
-                },
-                RenderStrategy::XrenderRadial,
-            ) => {
+        let result = match self.backend {
+            BackendKind::Render { window_picture, depth } => {
                 let appearance = legacy_appearance(config);
                 redraw_render(
                     &self.connection,
                     self.window,
-                    *window_picture,
+                    window_picture,
                     self.surface_size,
                     cursor,
                     &appearance,
                     config,
                     &mut self.dot_cache,
-                    *depth,
+                    depth,
                 )
             }
-            (BackendKind::Render { gc, depth, .. }, RenderStrategy::SoftwareFrame)
-            | (BackendKind::Software { gc, depth }, _) => redraw_software(
-                &self.connection,
-                self.window,
-                *gc,
-                *depth,
-                self.surface_size,
-                cursor,
-                config,
-            ),
+            BackendKind::Software { gc, depth } => {
+                redraw_software(
+                    &self.connection,
+                    self.window,
+                    gc,
+                    depth,
+                    self.surface_size,
+                    cursor,
+                    config,
+                )
+            }
         };
         result.inspect_err(|error| {
             tracing::error!(window = self.window, ?error, "failed to redraw spotlight overlay");
@@ -688,11 +670,9 @@ fn create_backend(
                     &CreatePictureAux::default(),
                 ) {
                     Ok(window_picture) => {
-                        let gc = create_software_gc(connection, window)?;
                         tracing::debug!(window, pictformat, "using XRender spotlight backend");
                         Ok(BackendKind::Render {
                             window_picture: window_picture.into_picture(),
-                            gc,
                             depth,
                         })
                     }
@@ -731,12 +711,6 @@ fn create_software_backend(
     window: Window,
     depth: u8,
 ) -> Result<BackendKind, OverlayError> {
-    let gc = create_software_gc(connection, window)?;
-
-    Ok(BackendKind::Software { gc, depth })
-}
-
-fn create_software_gc(connection: &RustConnection, window: Window) -> Result<Gcontext, OverlayError> {
     let gc = connection
         .generate_id()
         .inspect_err(|error| {
@@ -758,7 +732,7 @@ fn create_software_gc(connection: &RustConnection, window: Window) -> Result<Gco
         })
         .map_err(runtime_error)?;
 
-    Ok(gc)
+    Ok(BackendKind::Software { gc, depth })
 }
 
 fn redraw_render(
@@ -890,10 +864,9 @@ mod tests {
 
     #[test]
     fn default_circle_prefers_xrender_radial() {
-        let config = rpresent_config::SpotlightConfig {
-            show_border: false,
-            ..rpresent_config::SpotlightConfig::default()
-        };
+        // Default config has show_border=true, show_center_dot=true — XRender fires anyway
+        // and silently omits those features (same as 54ace59 behavior).
+        let config = rpresent_config::SpotlightConfig::default();
         assert!(matches!(
             select_render_strategy(&config),
             RenderStrategy::XrenderRadial
@@ -914,15 +887,6 @@ mod tests {
     fn non_circle_shape_falls_back_to_software() {
         let mut config = rpresent_config::SpotlightConfig::default();
         config.shape = rpresent_config::SpotShape::Square { corner_radius_pct: 0 };
-        assert!(matches!(
-            select_render_strategy(&config),
-            RenderStrategy::SoftwareFrame
-        ));
-    }
-
-    #[test]
-    fn border_falls_back_to_software() {
-        let config = rpresent_config::SpotlightConfig::default();
         assert!(matches!(
             select_render_strategy(&config),
             RenderStrategy::SoftwareFrame
