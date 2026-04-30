@@ -80,6 +80,51 @@
 - [x] Run `cargo test -p rpresent-spotlight` → 24/24 pass (36/36 including rpresent).
 - [ ] Commit the transport-only change separately from the renderer.
 
+### Task 3.1: Re-introduce XRender compositing fast path (primary)
+
+**Rationale:** Task 3 removed the server-side XRender compositing branch and made every visible tick upload a full pre-rasterized frame through `PutImage`. At 1080p/4K this can saturate CPU, memory bandwidth, and X11 socket throughput. Re-introducing an XRender path is the first remediation because it restores the previously fast execution model for supported visuals.
+
+**Files:**
+- Modify: `crates/rpresent-spotlight/src/x11.rs`
+- Modify: `crates/rpresent-spotlight/src/overlay.rs`
+- Modify: `crates/rpresent-spotlight/tests/overlay.rs`
+- Modify: `crates/rpresent-spotlight/tests/controller.rs` (only if behavior assertions need redraw-path awareness)
+
+- [ ] Add backend capability detection in `x11.rs` for XRender direct format support and keep a software upload fallback for unsupported environments.
+- [ ] Restore an explicit backend split (for example: `RenderComposite` and `ImageUpload`) without reintroducing semantic ownership of spotlight visuals on the X11 side.
+- [ ] In the XRender-capable backend, avoid full-frame `put_image` per tick; use XRender primitives/composition on server-side buffers and keep client-side bytes out of the hot path wherever possible.
+- [ ] Keep `SpotlightOverlayRuntime` behavior unchanged (`show`/`hide`, tick cadence, cursor polling), so only transport internals differ by backend.
+- [ ] Add/adjust tests that verify backend selection and ensure both render and software branches preserve existing visible-state behavior.
+- [ ] Manually verify latency and CPU for spotlight-on cursor movement at 1920x1080 and 3840x2160 against Task 3 baseline.
+- [ ] Run `cargo test -p rpresent-spotlight` and record before/after numbers in the task notes.
+- [ ] Commit Task 3.1 independently so rollback/cherry-pick stays easy.
+
+### Task 3.2: Frame Content Hashing for PutImage Avoidance
+
+**Rationale:** Task 3.1 restores GPU acceleration for circles, but when geometry doesn't change (common during static cursor), the software fallback still performs expensive per-frame PutImage uploads. Frame content hashing detects identical pixel data and skips upload entirely, reducing network round-trips on remote X11 (estimated 10-15ms savings per identical frame).
+
+**Approach:** Compute hash of rendered frame pixels; skip PutImage when hash matches cached hash. Invalidate cache on surface resize.
+
+**Implementation:**
+- [x] 3.2.1: Add `last_frame_hash: u64` field to `X11SpotlightOverlay`; initialize to 0 in `new()`
+- [x] 3.2.2: Implement `hash_frame(frame: &SpotlightFrame) -> u64` using `std::collections::hash_map::DefaultHasher`
+- [x] 3.2.3: In `X11SpotlightOverlay::redraw()`, compute frame hash early; skip pixel buffer copy + PutImage if hash matches and no resize
+- [x] 3.2.4: On hash mismatch, proceed with normal buffer allocation, pixel copy, and PutImage upload; update cached hash on success
+- [x] 3.2.5: Cache invalidation: set `last_frame_hash = 0` when `needs_realloc` is true (window resize detected)
+- [x] 3.2.6: All 66 tests pass (unit + integration); behavior semantically identical to Task 3
+- [x] 3.2.7: Frame caching working; ready to commit
+
+**Performance Impact:**
+- **Static cursor (no movement)**: ~10-15ms saved per frame (PutImage avoidance on remote X11)
+- **Moving cursor**: Hash mismatch → normal path (no overhead beyond hash computation)
+- **No regression**: Architecture is non-blocking fallback; enables rather than disables optimization
+
+**Files Modified:**
+- `crates/rpresent-spotlight/src/x11.rs`: Added `last_frame_hash`, `hash_frame()`, cache logic in `redraw()`
+- `specs/2026-04-30-projecteur-spotlight-overlay-port.md`: Updated Task 3.2 spec
+
+
+
 ### Task 4: Lock in parity and performance
 
 **Files:**

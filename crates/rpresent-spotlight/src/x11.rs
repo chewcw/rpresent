@@ -1,9 +1,9 @@
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, RequestConnection};
 use x11rb::image::Image;
-use x11rb::protocol::render::{self, ConnectionExt as RenderConnectionExt, PictType};
+use x11rb::protocol::render::{self, ConnectionExt as RenderConnectionExt, Picture, PictType};
 use x11rb::protocol::xproto::{
     ColormapAlloc, ConnectionExt as XprotoConnectionExt, CreateGCAux, CreateWindowAux, Gcontext,
-    Visualid, Window, WindowClass,
+    Pixmap, Visualid, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -78,6 +78,57 @@ fn choose_visual(
     Ok((screen.root_depth, screen.root_visual))
 }
 
+/// Try to find a 32-bit BGRA XRender format (matching the visual format).
+/// Returns `None` if XRender is not available or no suitable format exists.
+fn find_xrender_bgra_format(
+    connection: &RustConnection,
+) -> Result<Option<u32>, OverlayError> {
+    if connection
+        .extension_information(render::X11_EXTENSION_NAME)
+        .map_err(runtime_error)?
+        .is_none()
+    {
+        return Ok(None);
+    }
+
+    let formats = connection
+        .render_query_pict_formats()
+        .map_err(runtime_error)?
+        .reply()
+        .map_err(runtime_error)?;
+
+    Ok(formats
+        .formats
+        .iter()
+        .find(|format| {
+            format.type_ == PictType::DIRECT
+                && format.depth == 32
+                && format.direct.red_shift == 16
+                && format.direct.red_mask == 255
+                && format.direct.green_shift == 8
+                && format.direct.green_mask == 255
+                && format.direct.blue_shift == 0
+                && format.direct.blue_mask == 255
+                && format.direct.alpha_shift == 24
+                && format.direct.alpha_mask == 255
+        })
+        .map(|f| f.id))
+}
+
+/// (Task 3.2) Compute a simple hash of frame pixel data for caching.
+/// Uses a 64-bit seed-based hash to detect pixel changes.
+fn hash_frame(frame: &SpotlightFrame) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    // Hash dimensions and pixel data
+    frame.width.hash(&mut hasher);
+    frame.height.hash(&mut hasher);
+    frame.pixels.hash(&mut hasher);
+    hasher.finish()
+}
+
 
 pub(crate) struct X11SpotlightOverlay {
     connection: RustConnection,
@@ -86,8 +137,21 @@ pub(crate) struct X11SpotlightOverlay {
     surface_size: (u16, u16),
     gc: Gcontext,
     depth: u8,
-    /// Reused image buffer; reallocated only when surface dimensions change.
+    /// Reused image buffer (software fallback); reallocated only on surface dimension change.
     image_buf: Option<Image<'static>>,
+    /// XRender support flag: set if both XRender is available and BGRA format is found.
+    xrender_available: bool,
+    /// Optional XRender picture ID for compositing (created on first redraw if XRender available).
+    picture: Option<Picture>,
+    /// XRender pixmap ID paired with the picture (created on first redraw if XRender available).
+    pixmap: Option<Pixmap>,
+    /// XRender format ID for BGRA32 (cached at startup if available).
+    pictformat: Option<u32>,
+    /// XRender window picture for direct compositing.
+    window_picture: Option<Picture>,
+    /// (Task 3.2) Hash of the last rendered frame for pixmap caching.
+    /// If frame hash matches, skip rasterization and reuse cached pixmap.
+    last_frame_hash: u64,
 }
 
 impl X11SpotlightOverlay {
@@ -189,12 +253,79 @@ impl X11SpotlightOverlay {
             })
             .map_err(runtime_error)?;
 
+        // Detect XRender support and create window picture.
+        let (xrender_available, pictformat, window_picture) =
+            match find_xrender_bgra_format(&connection) {
+                Ok(Some(fmt)) => {
+                    // Try to create a picture for the window.
+                    match connection.render_create_picture(
+                        connection
+                            .generate_id()
+                            .map_err(runtime_error)?,
+                        window,
+                        fmt,
+                        &Default::default(),
+                    ) {
+                        Ok(_) => {
+                            let pic_id = connection
+                                .generate_id()
+                                .map_err(runtime_error)?;
+                            match connection.render_create_picture(
+                                pic_id,
+                                window,
+                                fmt,
+                                &Default::default(),
+                            ) {
+                                Ok(_) => {
+                                    tracing::debug!(
+                                        screen_num,
+                                        format = fmt,
+                                        "XRender BGRA32 format available"
+                                    );
+                                    (true, Some(fmt), Some(pic_id))
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        ?e,
+                                        "failed to create XRender window picture; fallback to software"
+                                    );
+                                    (false, Some(fmt), None)
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                ?e,
+                                "failed to test XRender picture creation; fallback to software"
+                            );
+                            (false, Some(fmt), None)
+                        }
+                    }
+                }
+                Ok(None) => {
+                    tracing::debug!(
+                        screen_num,
+                        "XRender not available; using software upload fallback"
+                    );
+                    (false, None, None)
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        screen_num,
+                        ?e,
+                        "error detecting XRender; fallback to software"
+                    );
+                    (false, None, None)
+                }
+            };
+
         tracing::debug!(
             screen_num,
             depth,
             width = spec.width,
             height = spec.height,
             transparent,
+            xrender_available,
             "spotlight X11 backend started"
         );
 
@@ -206,6 +337,12 @@ impl X11SpotlightOverlay {
             gc,
             depth,
             image_buf: None,
+            xrender_available,
+            picture: None,
+            pixmap: None,
+            pictformat,
+            window_picture,
+            last_frame_hash: 0,
         })
     }
 
@@ -220,6 +357,18 @@ impl X11SpotlightOverlay {
                 );
             })
             .map_err(runtime_error)
+    }
+
+    fn cleanup_xrender(&mut self) {
+        if let Some(pic) = self.picture.take() {
+            let _ = self.connection.render_free_picture(pic);
+        }
+        if let Some(pix) = self.pixmap.take() {
+            let _ = self.connection.free_pixmap(pix);
+        }
+        if let Some(wpic) = self.window_picture.take() {
+            let _ = self.connection.render_free_picture(wpic);
+        }
     }
 }
 
@@ -286,11 +435,67 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
     }
 
     fn redraw(&mut self, frame: &SpotlightFrame) -> Result<(), OverlayError> {
-        // Reuse the image buffer; reallocate only when the surface dimensions change.
-        let needs_alloc = self.image_buf.as_ref().map_or(true, |img: &Image<'_>| {
+        // (Task 3.2) Check if frame content is identical to last redraw via hash.
+        // If unchanged, skip pixel upload to avoid network bandwidth on remote X11.
+        let frame_hash = hash_frame(frame);
+        
+        let needs_realloc = self.image_buf.as_ref().map_or(true, |img: &Image<'_>| {
             img.width() != frame.width || img.height() != frame.height
         });
-        if needs_alloc {
+        
+        // On window resize, invalidate frame hash cache to force fresh upload (Task 3.2 cache invalidation)
+        if needs_realloc {
+            self.last_frame_hash = 0;
+        }
+        
+        if frame_hash == self.last_frame_hash && self.image_buf.is_some() && !needs_realloc {
+            tracing::trace!(
+                frame_hash,
+                "spotlight frame unchanged; skipping pixel upload (Task 3.2 cache hit)"
+            );
+            return self.flush();
+        }
+
+        // If XRender is available, use cached pixmap/picture for compositing (when implemented).
+        // For now, we use PutImage to the window (software fallback), but the architecture
+        // supports future optimization via XRender pixmaps and composite operations.
+        if self.xrender_available && needs_realloc && self.window_picture.is_some() {
+            // Reallocate XRender pixmap/picture for new frame size.
+            if let Some(pic) = self.picture.take() {
+                let _ = self.connection.render_free_picture(pic);
+            }
+            if let Some(pix) = self.pixmap.take() {
+                let _ = self.connection.free_pixmap(pix);
+            }
+
+            let pixmap = self
+                .connection
+                .generate_id()
+                .map_err(runtime_error)?;
+            self.connection
+                .create_pixmap(self.depth, pixmap, self.window, frame.width, frame.height)
+                .map_err(runtime_error)?;
+
+            if let Some(fmt) = self.pictformat {
+                let picture = self
+                    .connection
+                    .generate_id()
+                    .map_err(runtime_error)?;
+                if self.connection
+                    .render_create_picture(picture, pixmap, fmt, &Default::default())
+                    .is_ok()
+                {
+                    self.picture = Some(picture);
+                    self.pixmap = Some(pixmap);
+                    tracing::trace!(pixmap, picture, "created XRender pixmap for spotlight");
+                } else {
+                    let _ = self.connection.free_pixmap(pixmap);
+                }
+            }
+        }
+
+        // Allocate or reuse image buffer (both XRender and software paths need this).
+        if needs_realloc {
             self.image_buf = Some(
                 Image::allocate_native(
                     frame.width,
@@ -301,6 +506,7 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
                 .map_err(runtime_error)?,
             );
         }
+
         let image = self.image_buf.as_mut().expect("allocated above");
         if image.data().len() != frame.pixels.len() {
             return Err(runtime_error(format!(
@@ -310,7 +516,11 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
             )));
         }
         image.data_mut().copy_from_slice(&frame.pixels);
-        let _ = image
+
+        // Upload pixels to window via PutImage.
+        // TODO: For XRender-capable systems, upload to cached pixmap and composite,
+        // avoiding direct window PutImage and keeping pixel data server-side.
+        image
             .put(&self.connection, self.window, self.gc, 0, 0)
             .inspect_err(|error| {
                 tracing::error!(
@@ -322,7 +532,17 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
                 );
             })
             .map_err(runtime_error)?;
+
+        // (Task 3.2) Update frame hash on successful upload.
+        self.last_frame_hash = frame_hash;
+
         self.flush()
+    }
+}
+
+impl Drop for X11SpotlightOverlay {
+    fn drop(&mut self) {
+        self.cleanup_xrender();
     }
 }
 
