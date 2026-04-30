@@ -75,34 +75,43 @@ pub fn run_overlay(
     appearance: ZoomAppearance,
     rx: Receiver<ZoomState>,
 ) -> Result<(), OverlayError> {
+    use crate::x11::X11ZoomOverlay;
+
     tracing::debug!(?appearance, "starting zoom overlay");
 
-    let mut last_state: Option<ZoomState> = None;
-    let mut warned_not_rendering = false;
+    let mut backend = X11ZoomOverlay::new().inspect_err(|e| {
+        tracing::error!(?e, "failed to initialise zoom X11 backend");
+    })?;
 
-    for state in rx {
-        if last_state.as_ref() != Some(&state) {
-            tracing::debug!(?state, "zoom state changed");
-            last_state = Some(state.clone());
+    loop {
+        // Block until we get at least one state update.
+        let state = match rx.recv() {
+            Ok(s) => s,
+            Err(_) => {
+                tracing::debug!("zoom overlay channel disconnected, exiting");
+                break;
+            }
+        };
+
+        // Drain any queued updates; use only the latest.
+        let mut latest = state;
+        while let Ok(newer) = rx.try_recv() {
+            latest = newer;
         }
 
-        if state.enabled && !warned_not_rendering {
-            tracing::warn!(
-                "zoom overlay backend is not implemented yet; zoom state updates are running but no visual zoom is rendered"
-            );
-            warned_not_rendering = true;
-        }
+        tracing::debug!(?latest, "zoom state update");
 
-        let rect = zoom_sample_rect(1920, 1080, &state);
-        tracing::trace!(
-            left = rect.left,
-            top = rect.top,
-            width = rect.width,
-            height = rect.height,
-            "zoom sample rectangle"
-        );
+        if latest.enabled {
+            backend.show()?;
+            backend.render(&latest, &appearance)?;
+        } else {
+            backend.hide()?;
+        }
     }
 
+    // Clean up: hide the overlay before dropping the backend.
+    let _ = backend.hide();
+    tracing::debug!("zoom overlay exiting");
     Ok(())
 }
 
