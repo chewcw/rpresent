@@ -40,7 +40,11 @@ impl<S> ZoomCapture<S> {
 impl<S: FrameSource> ZoomCapture<S> {
     pub fn next_frame(&mut self) -> Result<CapturedFrame, CaptureError> {
         self.source.capture_frame().inspect_err(|error| {
-            tracing::error!(backend = std::any::type_name::<S>(), ?error, "failed to capture zoom frame");
+            tracing::error!(
+                backend = std::any::type_name::<S>(),
+                ?error,
+                "failed to capture zoom frame"
+            );
         })
     }
 }

@@ -62,8 +62,7 @@ fn add_shape(pb: &mut PathBuilder, shape: SpotShape, cx: f32, cy: f32, radius: f
     }
     match shape {
         SpotShape::Circle => {
-            let Some(rect) =
-                Rect::from_xywh(cx - radius, cy - radius, radius * 2.0, radius * 2.0)
+            let Some(rect) = Rect::from_xywh(cx - radius, cy - radius, radius * 2.0, radius * 2.0)
             else {
                 return false;
             };
@@ -73,7 +72,10 @@ fn add_shape(pb: &mut PathBuilder, shape: SpotShape, cx: f32, cy: f32, radius: f
             let cr = (radius * corner_radius_pct as f32 / 100.0).min(radius);
             add_rounded_rect(pb, cx - radius, cy - radius, radius * 2.0, radius * 2.0, cr);
         }
-        SpotShape::Star { points, inner_radius_pct } => {
+        SpotShape::Star {
+            points,
+            inner_radius_pct,
+        } => {
             if points < 3 {
                 return false;
             }
@@ -99,7 +101,14 @@ fn add_rounded_rect(pb: &mut PathBuilder, x: f32, y: f32, w: f32, h: f32, r: f32
     pb.line_to(x + w - r, y);
     pb.cubic_to(x + w - r + kr, y, x + w, y + r - kr, x + w, y + r);
     pb.line_to(x + w, y + h - r);
-    pb.cubic_to(x + w, y + h - r + kr, x + w - r + kr, y + h, x + w - r, y + h);
+    pb.cubic_to(
+        x + w,
+        y + h - r + kr,
+        x + w - r + kr,
+        y + h,
+        x + w - r,
+        y + h,
+    );
     pb.line_to(x + r, y + h);
     pb.cubic_to(x + r - kr, y + h, x, y + h - r + kr, x, y + h - r);
     pb.line_to(x, y + r);
@@ -172,12 +181,14 @@ pub fn build_projecteur_frame(
 
         // Cut the transparent spotlight hole at the outer shape.
         let mut pb = PathBuilder::new();
-        if add_shape(&mut pb, config.shape, cx, cy, radius) {
-            if let Some(path) = pb.finish() {
-                let mut paint = Paint::default();
-                paint.blend_mode = BlendMode::Clear;
-                pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
-            }
+        if add_shape(&mut pb, config.shape, cx, cy, radius)
+            && let Some(path) = pb.finish()
+        {
+            let paint = Paint {
+                blend_mode: BlendMode::Clear,
+                ..Paint::default()
+            };
+            pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
         }
     }
 
@@ -188,15 +199,17 @@ pub fn build_projecteur_frame(
         // Two concentric sub-paths + EvenOdd fill rule = ring between them.
         let has_outer = add_shape(&mut pb, config.shape, cx, cy, radius);
         let has_inner = add_shape(&mut pb, config.shape, cx, cy, inner_r);
-        if has_outer && has_inner {
-            if let Some(path) = pb.finish() {
-                let (br, bg, bb) = parse_hex(&config.border_color);
-                let a = (config.border_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-                let mut paint = Paint::default();
-                paint.shader = Shader::SolidColor(Color::from_rgba8(br, bg, bb, a));
-                paint.anti_alias = true;
-                pixmap.fill_path(&path, &paint, FillRule::EvenOdd, transform, None);
-            }
+        if has_outer && has_inner
+            && let Some(path) = pb.finish()
+        {
+            let (br, bg, bb) = parse_hex(&config.border_color);
+            let a = (config.border_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let paint = Paint {
+                shader: Shader::SolidColor(Color::from_rgba8(br, bg, bb, a)),
+                anti_alias: true,
+                ..Paint::default()
+            };
+            pixmap.fill_path(&path, &paint, FillRule::EvenOdd, transform, None);
         }
     }
 
@@ -209,10 +222,18 @@ pub fn build_projecteur_frame(
             if let Some(path) = pb.finish() {
                 let (dr, dg, db) = parse_hex(&config.dot_color);
                 let a = (config.dot_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-                let mut paint = Paint::default();
-                paint.shader = Shader::SolidColor(Color::from_rgba8(dr, dg, db, a));
-                paint.anti_alias = true;
-                pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+                let paint = Paint {
+                    shader: Shader::SolidColor(Color::from_rgba8(dr, dg, db, a)),
+                    anti_alias: true,
+                    ..Paint::default()
+                };
+                pixmap.fill_path(
+                    &path,
+                    &paint,
+                    FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
             }
         }
     }
@@ -223,5 +244,9 @@ pub fn build_projecteur_frame(
         chunk.swap(0, 2); // [R, G, B, A] → [B, G, R, A]
     }
 
-    SpotlightFrame { width, height, pixels: bgra }
+    SpotlightFrame {
+        width,
+        height,
+        pixels: bgra,
+    }
 }

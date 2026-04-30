@@ -77,7 +77,12 @@ impl SpotlightFrame {
     /// Return the raw `[B, G, R, A]` bytes at pixel `(x, y)`.
     pub fn bgra_at(&self, x: u16, y: u16) -> [u8; 4] {
         let i = ((y as usize * self.width as usize) + x as usize) * 4;
-        [self.pixels[i], self.pixels[i + 1], self.pixels[i + 2], self.pixels[i + 3]]
+        [
+            self.pixels[i],
+            self.pixels[i + 1],
+            self.pixels[i + 2],
+            self.pixels[i + 3],
+        ]
     }
 }
 
@@ -119,7 +124,10 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
     }
 
     #[cfg(test)]
-    pub(crate) fn run(&mut self, rx: Receiver<SpotlightRuntimeMessage>) -> Result<(), OverlayError> {
+    pub(crate) fn run(
+        &mut self,
+        rx: Receiver<SpotlightRuntimeMessage>,
+    ) -> Result<(), OverlayError> {
         for msg in rx {
             self.process_message(msg)?;
         }
@@ -344,8 +352,10 @@ mod tests {
         let mut runtime =
             SpotlightOverlayRuntime::new(rpresent_config::SpotlightConfig::default(), backend);
 
-        tx.send(SpotlightRuntimeMessage::Visibility(SpotlightState::On)).unwrap();
-        tx.send(SpotlightRuntimeMessage::Visibility(SpotlightState::Off)).unwrap();
+        tx.send(SpotlightRuntimeMessage::Visibility(SpotlightState::On))
+            .unwrap();
+        tx.send(SpotlightRuntimeMessage::Visibility(SpotlightState::Off))
+            .unwrap();
         drop(tx);
 
         runtime.run(rx).unwrap();
@@ -394,8 +404,10 @@ mod tests {
             ..Default::default()
         };
 
-        let mut config = rpresent_config::SpotlightConfig::default();
-        config.radius_px = 100;
+        let config = rpresent_config::SpotlightConfig {
+            radius_px: 100,
+            ..rpresent_config::SpotlightConfig::default()
+        };
 
         let mut runtime = SpotlightOverlayRuntime::new(config, backend);
         runtime

@@ -154,7 +154,10 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
 
 #[tracing::instrument(level = "debug", skip(cli))]
 pub fn run_config_init(cli: ConfigInitCli) -> Result<PathBuf, AppError> {
-    tracing::debug!(config_override = cli.config.is_some(), "writing default config");
+    tracing::debug!(
+        config_override = cli.config.is_some(),
+        "writing default config"
+    );
 
     let config_path = match cli.config {
         Some(path) => path,
@@ -211,7 +214,9 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
         );
         let mut zoom_controller = ZoomController::from_config(zoom_config);
 
-        let _ = spotlight_tx.send(SpotlightRuntimeMessage::Visibility(spotlight_controller.state()));
+        let _ = spotlight_tx.send(SpotlightRuntimeMessage::Visibility(
+            spotlight_controller.state(),
+        ));
         let _ = annotation_tx.send(annotation_controller.state());
         let _ = zoom_tx.send(zoom_controller.state());
 
@@ -219,7 +224,9 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
             match event {
                 AppEvent::Command(AppCommand::Spotlight(command)) => {
                     if spotlight_controller.apply(command) {
-                        let _ = spotlight_tx.send(SpotlightRuntimeMessage::Visibility(spotlight_controller.state()));
+                        let _ = spotlight_tx.send(SpotlightRuntimeMessage::Visibility(
+                            spotlight_controller.state(),
+                        ));
                     }
                 }
                 AppEvent::Command(AppCommand::Annotation(command)) => {
@@ -239,9 +246,8 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
         }
     });
 
-    let spotlight_handle = std::thread::spawn(move || {
-        rpresent_spotlight::run_overlay(spotlight_config, spotlight_rx)
-    });
+    let spotlight_handle =
+        std::thread::spawn(move || rpresent_spotlight::run_overlay(spotlight_config, spotlight_rx));
     let annotation_handle = std::thread::spawn(move || {
         rpresent_annotation::run_overlay(annotation_appearance, annotation_rx)
     });

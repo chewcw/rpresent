@@ -3,7 +3,7 @@ help:
     @echo "  run-spotlight - Start the spotlight application and toggle it on"
 
 run-daemon:
-    RUST_LOG=trace cargo run --package rpresent -- --config ./config.toml &
+    RUST_LOG=debug cargo run --package rpresent -- --config ./config.toml &
 
 run-spotlight: run-daemon
-    RUST_LOG=trace cargo run --package rpresent -- spot=toggle
+    RUST_LOG=debug cargo run --package rpresent -- spot=toggle &

@@ -2,7 +2,7 @@
 socket_name = "rpresent.sock"
 
 [spotlight]
-enabled_on_start = true
+enabled_on_start = false
 show_spot_shade = false
 spot_size_pct = 10
 spot_rotation_deg = 0.0
