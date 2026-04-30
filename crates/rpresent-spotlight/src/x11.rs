@@ -6,7 +6,7 @@ use x11rb::protocol::render::{
 };
 use x11rb::protocol::xproto::{
     ColormapAlloc, ConnectionExt as XprotoConnectionExt, CreateGCAux, CreateWindowAux, Gcontext,
-    Visualid, Window, WindowClass,
+    Rectangle, Visualid, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -126,6 +126,17 @@ fn fixed_from_u32(value: u32) -> Fixed {
 
 fn alpha_to_u16(alpha: f32) -> u16 {
     (alpha.clamp(0.0, 1.0) * u16::MAX as f32).round() as u16
+}
+
+fn parse_hex_rgb(color: &str) -> Option<(u8, u8, u8)> {
+    let hex = color.strip_prefix('#')?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some((r, g, b))
 }
 
 fn legacy_appearance(config: &rpresent_config::SpotlightConfig) -> crate::overlay::SpotlightAppearance {
@@ -408,6 +419,7 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
                     self.surface_size,
                     cursor,
                     &appearance,
+                    config,
                 )
             }
             BackendKind::Software { gc, depth } => {
@@ -524,6 +536,7 @@ fn redraw_render(
     surface_size: (u16, u16),
     cursor: CursorPosition,
     appearance: &crate::overlay::SpotlightAppearance,
+    config: &SpotlightConfig,
 ) -> Result<(), OverlayError> {
     let gradient = create_gradient_picture(connection, cursor, appearance)?;
     let _ = render::composite(
@@ -545,6 +558,39 @@ fn redraw_render(
         tracing::error!(window, ?error, "failed to composite spotlight overlay");
     })
     .map_err(runtime_error)?;
+
+    if config.show_center_dot {
+        let dot_size = config.dot_size_px.max(1);
+        let half = (dot_size / 2) as i32;
+        let x = (cursor.x as i32 - half).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let y = (cursor.y as i32 - half).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let rect = Rectangle {
+            x,
+            y,
+            width: dot_size.min(u16::MAX as u32) as u16,
+            height: dot_size.min(u16::MAX as u32) as u16,
+        };
+
+        let (r, g, b) = parse_hex_rgb(&config.dot_color).unwrap_or((255, 255, 255));
+        let color = Color {
+            red: u16::from(r) * 257,
+            green: u16::from(g) * 257,
+            blue: u16::from(b) * 257,
+            alpha: alpha_to_u16(config.dot_opacity),
+        };
+
+        let _ = render::fill_rectangles(
+            connection,
+            PictOp::OVER,
+            window_picture,
+            color,
+            &[rect],
+        )
+        .inspect_err(|error| {
+            tracing::error!(window, ?error, "failed to draw spotlight center-dot rectangle");
+        })
+        .map_err(runtime_error)?;
+    }
 
     Ok(())
 }
