@@ -42,7 +42,7 @@
 - [x] Represent `dot_color`, `shade_color`, and `border_color` as `#RRGGBB` strings in TOML, then parse them once in the renderer layer so the config stays simple.
 - [x] Update `config.toml` and the config tests so `Config::default()` and `default_config_toml()` serialize Projecteur's defaults from `settings.cc`.
 - [x] Run `cargo test -p rpresent-config`.
-- [ ] Commit the config-model change before touching rendering.
+- [x] Commit the config-model change before touching rendering.
 
 ### Task 2: Rasterize the overlay in Rust
 
@@ -53,16 +53,16 @@
 - Modify: `crates/rpresent-spotlight/src/lib.rs`
 - Create: `crates/rpresent-spotlight/tests/render.rs`
 
-- [ ] Build a pure renderer that takes resolved surface size, cursor position, and the new Projecteur-style spotlight config, then returns a premultiplied RGBA frame.
-- [ ] Compute the spot diameter the same way as QML: `spot_size_px = max(trunc(surface_height * spot_size_pct / 100.0), 50)`.
-- [ ] Use `tiny-skia` to draw antialiased paths for `Circle`, `Square`, `Star`, and `Ngon`; compute the border as the outer shape minus a scaled inner shape so the ring matches Projecteur's mask composition exactly.
-- [ ] Apply rotation in the same coordinate system as QML and ignore it for shapes that do not allow rotation.
-- [ ] Draw the full-screen shade outside the hole, then layer the border and center dot on top; `show_border` and `show_center_dot` must remain independent of `show_spot_shade`, just like in Projecteur.
-- [ ] Reuse cached paths and scratch pixmaps keyed by shape parameters and surface size so redraws do not allocate a new buffer per frame.
-- [ ] Do not route the new renderer through `spotlight_alpha`; leave that helper only as a temporary migration aid if any legacy test still needs it.
-- [ ] Add pixel tests that sample deep interior, deep exterior, border-ring, and dot pixels for all four shapes, with tolerance only on the anti-aliased edge samples.
-- [ ] Include a regression case where `show_spot_shade = false` but border and dot stay visible on a transparent background.
-- [ ] Run `cargo test -p rpresent-spotlight --test render`.
+- [x] Build a pure renderer that takes resolved surface size, cursor position, and the new Projecteur-style spotlight config, then returns a premultiplied RGBA frame.
+- [x] Compute the spot diameter the same way as QML: `spot_size_px = max(trunc(surface_height * spot_size_pct / 100.0), 50)`.
+- [x] Use `tiny-skia` to draw antialiased paths for `Circle`, `Square`, `Star`, and `Ngon`; compute the border as the outer shape minus a scaled inner shape so the ring matches Projecteur's mask composition exactly.
+- [x] Apply rotation in the same coordinate system as QML and ignore it for shapes that do not allow rotation.
+- [x] Draw the full-screen shade outside the hole, then layer the border and center dot on top; `show_border` and `show_center_dot` must remain independent of `show_spot_shade`, just like in Projecteur.
+- [x] Reuse cached paths and scratch pixmaps keyed by shape parameters and surface size so redraws do not allocate a new buffer per frame.
+- [x] Do not route the new renderer through `spotlight_alpha`; leave that helper only as a temporary migration aid if any legacy test still needs it.
+- [x] Add pixel tests that sample deep interior, deep exterior, border-ring, and dot pixels for all four shapes, with tolerance only on the anti-aliased edge samples.
+- [x] Include a regression case where `show_spot_shade = false` but border and dot stay visible on a transparent background.
+- [x] Run `cargo test -p rpresent-spotlight --test render` → 9/9 pass.
 - [ ] Commit the renderer before changing X11 transport.
 
 ### Task 3: Keep X11 as transport only
