@@ -3,18 +3,18 @@ socket_name = "rpresent.sock"
 
 [spotlight]
 enabled_on_start = true
-show_spot_shade = false
-spot_size_pct = 10
+show_spot_shade = true
+spot_size_pct = 20
 spot_rotation_deg = 0.0
 show_center_dot = false
-dot_size_px = 8
+dot_size_px = 100
 dot_color = "#ffffff"
 dot_opacity = 0.8
 shade_color = "#000000"
-shade_opacity = 0.6
-show_border = true
+shade_opacity = 0.9
+show_border = false
 border_color = "#ffffff"
-border_size_pct = 10
+border_size_pct = 2
 border_opacity = 0.8
 
 [spotlight.shape]
