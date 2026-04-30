@@ -72,12 +72,12 @@
 - Modify: `crates/rpresent-spotlight/src/overlay.rs`
 - Modify: `crates/rpresent-spotlight/tests/overlay.rs`
 
-- [ ] Replace the current gradient-generation path with the Rust renderer so X11 never owns the visual semantics.
-- [ ] Keep the existing `x11rb` window setup, visual selection, and cursor query logic, but make redraw consume the already-built RGBA buffer.
-- [ ] If an XRender fast path stays, use it only to present the pre-rasterized buffer; do not keep `create_gradient_picture` or any semantic substitute on the X11 side.
-- [ ] Reuse a persistent client-side image buffer or pixmap wrapper so the upload path does not reallocate on every tick.
-- [ ] Preserve the current show/hide runtime behavior and the state-transition tests; only the frame construction changes.
-- [ ] Run `cargo test -p rpresent-spotlight`.
+- [x] Replace the current gradient-generation path with the Rust renderer so X11 never owns the visual semantics.
+- [x] Keep the existing x11rb window setup, visual selection, and cursor query logic, but make redraw consume the already-built RGBA buffer.
+- [x] If an XRender fast path stays, use it only to present the pre-rasterized buffer; do not keep `create_gradient_picture` or any semantic substitute on the X11 side.
+- [x] Reuse a persistent client-side image buffer or pixmap wrapper so the upload path does not reallocate on every tick.
+- [x] Preserve the current show/hide runtime behavior and the state-transition tests; only the frame construction changes.
+- [x] Run `cargo test -p rpresent-spotlight` → 24/24 pass (36/36 including rpresent).
 - [ ] Commit the transport-only change separately from the renderer.
 
 ### Task 4: Lock in parity and performance

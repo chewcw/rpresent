@@ -86,16 +86,11 @@ pub(crate) trait SpotlightOverlayBackend {
     fn hide(&mut self) -> Result<(), OverlayError>;
     fn surface_size(&self) -> Result<(u16, u16), OverlayError>;
     fn cursor_position(&self) -> Result<CursorPosition, OverlayError>;
-    fn redraw(
-        &mut self,
-        surface_size: (u16, u16),
-        cursor: CursorPosition,
-        appearance: &SpotlightAppearance,
-    ) -> Result<(), OverlayError>;
+    fn redraw(&mut self, frame: &SpotlightFrame) -> Result<(), OverlayError>;
 }
 
 pub(crate) struct SpotlightOverlayRuntime<B> {
-    appearance: SpotlightAppearance,
+    config: rpresent_config::SpotlightConfig,
     backend: B,
     visible: bool,
     last_render_inputs: Option<RenderInputs>,
@@ -103,9 +98,9 @@ pub(crate) struct SpotlightOverlayRuntime<B> {
 }
 
 impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
-    pub(crate) fn new(appearance: SpotlightAppearance, backend: B) -> Self {
+    pub(crate) fn new(config: rpresent_config::SpotlightConfig, backend: B) -> Self {
         Self {
-            appearance,
+            config,
             backend,
             visible: false,
             last_render_inputs: None,
@@ -167,8 +162,12 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
         }
 
         tracing::trace!(?inputs, "spotlight overlay redraw tick");
-        self.backend
-            .redraw(inputs.surface_size, inputs.cursor, &self.appearance)?;
+        let frame = crate::render::build_projecteur_frame(
+            inputs.surface_size,
+            inputs.cursor,
+            &self.config,
+        );
+        self.backend.redraw(&frame)?;
         self.last_render_inputs = Some(inputs);
         self.needs_redraw = false;
         Ok(())
@@ -217,15 +216,15 @@ pub(crate) fn build_spotlight_frame(
 
 #[cfg(target_os = "linux")]
 pub fn run_overlay(
-    appearance: SpotlightAppearance,
+    config: rpresent_config::SpotlightConfig,
     rx: Receiver<SpotlightState>,
 ) -> Result<(), OverlayError> {
     use std::sync::mpsc::RecvTimeoutError;
     use std::time::Duration;
 
-    tracing::debug!(?appearance, "starting spotlight overlay");
+    tracing::debug!("starting spotlight overlay");
     let backend = crate::x11::X11SpotlightOverlay::new()?;
-    let mut runtime = SpotlightOverlayRuntime::new(appearance, backend);
+    let mut runtime = SpotlightOverlayRuntime::new(config, backend);
     let mut visible = false;
 
     loop {
@@ -257,7 +256,7 @@ pub fn run_overlay(
 
 #[cfg(not(target_os = "linux"))]
 pub fn run_overlay(
-    _appearance: SpotlightAppearance,
+    _config: rpresent_config::SpotlightConfig,
     _rx: Receiver<SpotlightState>,
 ) -> Result<(), OverlayError> {
     Err(OverlayError::UnsupportedPlatform)
@@ -295,34 +294,22 @@ mod tests {
             Ok(self.cursor)
         }
 
-        fn redraw(
-            &mut self,
-            surface_size: (u16, u16),
-            cursor: CursorPosition,
-            appearance: &SpotlightAppearance,
-        ) -> Result<(), OverlayError> {
+        fn redraw(&mut self, _frame: &SpotlightFrame) -> Result<(), OverlayError> {
             self.calls.push("redraw");
-            assert_eq!(surface_size, self.surface_size);
-            assert_eq!(cursor, self.cursor);
-            assert_eq!(appearance.radius_px, 4);
             Ok(())
         }
     }
 
     #[test]
     fn runtime_shows_redraws_and_hides_on_state_changes() {
-        let appearance = SpotlightAppearance {
-            radius_px: 4,
-            softness_px: 2,
-            dim_alpha: 0.72,
-        };
         let (tx, rx) = mpsc::channel();
         let backend = FakeBackend {
             surface_size: (16, 16),
             cursor: CursorPosition { x: 8, y: 8 },
             ..Default::default()
         };
-        let mut runtime = SpotlightOverlayRuntime::new(appearance, backend);
+        let mut runtime =
+            SpotlightOverlayRuntime::new(rpresent_config::SpotlightConfig::default(), backend);
 
         tx.send(SpotlightState::On).unwrap();
         tx.send(SpotlightState::Off).unwrap();
@@ -335,17 +322,13 @@ mod tests {
 
     #[test]
     fn tick_does_not_redraw_when_inputs_stay_the_same() {
-        let appearance = SpotlightAppearance {
-            radius_px: 4,
-            softness_px: 2,
-            dim_alpha: 0.72,
-        };
         let backend = FakeBackend {
             surface_size: (16, 16),
             cursor: CursorPosition { x: 8, y: 8 },
             ..Default::default()
         };
-        let mut runtime = SpotlightOverlayRuntime::new(appearance, backend);
+        let mut runtime =
+            SpotlightOverlayRuntime::new(rpresent_config::SpotlightConfig::default(), backend);
 
         runtime.process_state(SpotlightState::On).unwrap();
         runtime.tick().unwrap();
@@ -355,17 +338,13 @@ mod tests {
 
     #[test]
     fn tick_redraws_again_when_the_cursor_moves_while_visible() {
-        let appearance = SpotlightAppearance {
-            radius_px: 4,
-            softness_px: 2,
-            dim_alpha: 0.72,
-        };
         let backend = FakeBackend {
             surface_size: (16, 16),
             cursor: CursorPosition { x: 8, y: 8 },
             ..Default::default()
         };
-        let mut runtime = SpotlightOverlayRuntime::new(appearance, backend);
+        let mut runtime =
+            SpotlightOverlayRuntime::new(rpresent_config::SpotlightConfig::default(), backend);
 
         runtime.process_state(SpotlightState::On).unwrap();
         runtime.backend.cursor = CursorPosition { x: 9, y: 8 };
