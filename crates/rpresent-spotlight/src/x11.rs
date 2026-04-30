@@ -6,7 +6,7 @@ use x11rb::protocol::render::{
 };
 use x11rb::protocol::xproto::{
     ColormapAlloc, ConnectionExt as XprotoConnectionExt, CreateGCAux, CreateWindowAux, Gcontext,
-    Rectangle, Visualid, Window, WindowClass,
+    Visualid, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -223,7 +223,7 @@ fn create_gradient_picture<'a>(
 }
 
 enum BackendKind {
-    Render { window_picture: Picture },
+    Render { window_picture: Picture, depth: u8 },
     Software { gc: Gcontext, depth: u8 },
 }
 
@@ -378,6 +378,135 @@ fn free_dot_cache(connection: &RustConnection, cache: DotRenderCache) {
     let _ = connection.free_pixmap(cache.pixmap);
 }
 
+/// Build premultiplied BGRA bytes for a filled circle inside a `size_px × size_px` square.
+fn build_circle_dot_bgra(size_px: u16, rgb: (u8, u8, u8), alpha_u16: u16) -> Vec<u8> {
+    let w = size_px as usize;
+    let h = size_px as usize;
+    let mut out = vec![0u8; w * h * 4];
+    let cx = (size_px as f32 - 1.0) * 0.5;
+    let cy = (size_px as f32 - 1.0) * 0.5;
+    let r = size_px as f32 * 0.5;
+    let max_a = (alpha_u16 as f32 / u16::MAX as f32).clamp(0.0, 1.0);
+    for y in 0..h {
+        for x in 0..w {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            if dx * dx + dy * dy <= r * r {
+                let i = (y * w + x) * 4;
+                let a8 = (max_a * 255.0).round() as u8;
+                // premultiplied BGRA
+                out[i] = ((rgb.2 as u16 * a8 as u16) / 255) as u8;
+                out[i + 1] = ((rgb.1 as u16 * a8 as u16) / 255) as u8;
+                out[i + 2] = ((rgb.0 as u16 * a8 as u16) / 255) as u8;
+                out[i + 3] = a8;
+            }
+        }
+    }
+    out
+}
+
+/// Create a pixmap + picture for the given dot key, uploading circle pixels.
+fn upload_dot_cache(
+    connection: &RustConnection,
+    window: Window,
+    depth: u8,
+    key: DotCacheKey,
+) -> Result<DotRenderCache, OverlayError> {
+    let sz = key.size_px;
+    let pixels = build_circle_dot_bgra(sz, key.color_rgb, key.alpha_u16);
+
+    // Locate ARGB32 pictformat.
+    let formats = connection
+        .render_query_pict_formats()
+        .map_err(runtime_error)?
+        .reply()
+        .map_err(runtime_error)?;
+    let pictformat = formats
+        .formats
+        .iter()
+        .find(|f| {
+            f.type_ == PictType::DIRECT
+                && f.depth == 32
+                && f.direct.red_shift == 16
+                && f.direct.red_mask == 255
+                && f.direct.green_shift == 8
+                && f.direct.green_mask == 255
+                && f.direct.blue_shift == 0
+                && f.direct.blue_mask == 255
+                && f.direct.alpha_shift == 24
+                && f.direct.alpha_mask == 255
+        })
+        .map(|f| f.id)
+        .ok_or_else(|| runtime_error("ARGB32 pictformat not found for dot cache"))?;
+
+    let pixmap = connection.generate_id().map_err(runtime_error)?;
+    connection
+        .create_pixmap(depth, pixmap, window, sz, sz)
+        .map_err(runtime_error)?;
+
+    // Temporary GC to upload image data.
+    let gc = connection.generate_id().map_err(runtime_error)?;
+    connection
+        .create_gc(gc, pixmap, &CreateGCAux::default().graphics_exposures(0))
+        .map_err(runtime_error)?;
+    let mut image =
+        Image::allocate_native(sz, sz, depth, connection.setup()).map_err(runtime_error)?;
+    if image.data().len() != pixels.len() {
+        let _ = connection.free_gc(gc);
+        let _ = connection.free_pixmap(pixmap);
+        return Err(runtime_error(format!(
+            "dot cache image size mismatch: image {} bytes, pixels {} bytes",
+            image.data().len(),
+            pixels.len()
+        )));
+    }
+    image.data_mut().copy_from_slice(&pixels);
+    let _ = image.put(connection, pixmap, gc, 0, 0).map_err(runtime_error)?;
+    let _ = connection.free_gc(gc);
+
+    let picture = connection.generate_id().map_err(runtime_error)?;
+    connection
+        .render_create_picture(picture, pixmap, pictformat, &CreatePictureAux::default())
+        .map_err(runtime_error)?;
+
+    Ok(DotRenderCache { key, pixmap, picture })
+}
+
+/// Return the cached dot picture, rebuilding it when the key changes.
+/// Returns None when the dot is disabled.
+fn ensure_dot_cache(
+    connection: &RustConnection,
+    window: Window,
+    depth: u8,
+    dot_cache: &mut Option<DotRenderCache>,
+    config: &SpotlightConfig,
+) -> Result<Option<Picture>, OverlayError> {
+    let key = match dot_cache_key(config) {
+        None => {
+            if let Some(old) = dot_cache.take() {
+                free_dot_cache(connection, old);
+            }
+            return Ok(None);
+        }
+        Some(k) => k,
+    };
+
+    if let Some(ref cache) = *dot_cache {
+        if cache.key == key {
+            return Ok(Some(cache.picture));
+        }
+    }
+
+    // Key changed — free old cache then rebuild.
+    if let Some(old) = dot_cache.take() {
+        free_dot_cache(connection, old);
+    }
+    let new_cache = upload_dot_cache(connection, window, depth, key)?;
+    let picture = new_cache.picture;
+    *dot_cache = Some(new_cache);
+    Ok(Some(picture))
+}
+
 impl Drop for X11SpotlightOverlay {
     fn drop(&mut self) {
         if let Some(cache) = self.dot_cache.take() {
@@ -454,7 +583,7 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
         config: &SpotlightConfig,
     ) -> Result<(), OverlayError> {
         let result = match self.backend {
-            BackendKind::Render { window_picture } => {
+            BackendKind::Render { window_picture, depth } => {
                 let appearance = legacy_appearance(config);
                 redraw_render(
                     &self.connection,
@@ -464,6 +593,8 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
                     cursor,
                     &appearance,
                     config,
+                    &mut self.dot_cache,
+                    depth,
                 )
             }
             BackendKind::Software { gc, depth } => {
@@ -512,6 +643,7 @@ fn create_backend(
                         tracing::debug!(window, pictformat, "using XRender spotlight backend");
                         Ok(BackendKind::Render {
                             window_picture: window_picture.into_picture(),
+                            depth,
                         })
                     }
                     Err(error) => {
@@ -581,6 +713,8 @@ fn redraw_render(
     cursor: CursorPosition,
     appearance: &crate::overlay::SpotlightAppearance,
     config: &SpotlightConfig,
+    dot_cache: &mut Option<DotRenderCache>,
+    depth: u8,
 ) -> Result<(), OverlayError> {
     let gradient = create_gradient_picture(connection, cursor, appearance)?;
     let _ = render::composite(
@@ -603,35 +737,29 @@ fn redraw_render(
     })
     .map_err(runtime_error)?;
 
-    if config.show_center_dot {
-        let dot_size = config.dot_size_px.max(1);
-        let half = (dot_size / 2) as i32;
-        let x = (cursor.x as i32 - half).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-        let y = (cursor.y as i32 - half).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-        let rect = Rectangle {
-            x,
-            y,
-            width: dot_size.min(u16::MAX as u32) as u16,
-            height: dot_size.min(u16::MAX as u32) as u16,
-        };
-
-        let (r, g, b) = parse_hex_rgb(&config.dot_color).unwrap_or((255, 255, 255));
-        let color = Color {
-            red: u16::from(r) * 257,
-            green: u16::from(g) * 257,
-            blue: u16::from(b) * 257,
-            alpha: alpha_to_u16(config.dot_opacity),
-        };
-
-        let _ = render::fill_rectangles(
+    // Composite circle dot if enabled.
+    if let Some(dot_picture) = ensure_dot_cache(connection, window, depth, dot_cache, config)? {
+        let key = dot_cache.as_ref().unwrap().key;
+        let half = (key.size_px as i32) / 2;
+        let dst_x = (cursor.x as i32 - half).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let dst_y = (cursor.y as i32 - half).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let _ = render::composite(
             connection,
             PictOp::OVER,
+            dot_picture,
+            x11rb::NONE,
             window_picture,
-            color,
-            &[rect],
+            0,
+            0,
+            0,
+            0,
+            dst_x,
+            dst_y,
+            key.size_px,
+            key.size_px,
         )
         .inspect_err(|error| {
-            tracing::error!(window, ?error, "failed to draw spotlight center-dot rectangle");
+            tracing::error!(window, ?error, "failed to composite spotlight center dot");
         })
         .map_err(runtime_error)?;
     }
