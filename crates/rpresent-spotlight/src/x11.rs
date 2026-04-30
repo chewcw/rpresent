@@ -1,6 +1,9 @@
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::image::Image;
-use x11rb::protocol::render::{self, ConnectionExt as RenderConnectionExt, Picture, PictType};
+use x11rb::protocol::render::{
+    self, ChangePictureAux, Color, ConnectionExt as RenderConnectionExt, CreatePictureAux,
+    Fixed, PictOp, PictType, Picture, PictureWrapper, Pictformat, Pointfix, Repeat,
+};
 use x11rb::protocol::xproto::{
     ColormapAlloc, ConnectionExt as XprotoConnectionExt, CreateGCAux, CreateWindowAux, Gcontext,
     Pixmap, Visualid, Window, WindowClass,
@@ -114,6 +117,112 @@ fn find_xrender_bgra_format(
                 && format.direct.alpha_mask == 255
         })
         .map(|f| f.id))
+}
+
+fn find_visual_format(
+    reply: &render::QueryPictFormatsReply,
+    screen_num: usize,
+    visual_id: Visualid,
+) -> Option<Pictformat> {
+    let screen_formats = reply.screens.get(screen_num)?;
+    let visual_format = screen_formats
+        .depths
+        .iter()
+        .flat_map(|depth| depth.visuals.iter())
+        .find(|visual| visual.visual == visual_id)?;
+    let format = reply
+        .formats
+        .iter()
+        .find(|format| format.id == visual_format.format)?;
+
+    if format.type_ == PictType::DIRECT
+        && format.depth == 32
+        && format.direct.red_shift == 16
+        && format.direct.red_mask == 255
+        && format.direct.green_shift == 8
+        && format.direct.green_mask == 255
+        && format.direct.blue_shift == 0
+        && format.direct.blue_mask == 255
+        && format.direct.alpha_shift == 24
+        && format.direct.alpha_mask == 255
+    {
+        Some(format.id)
+    } else {
+        None
+    }
+}
+
+fn fixed_from_i16(value: i16) -> Fixed {
+    i32::from(value) << 16
+}
+
+fn fixed_from_u32(value: u32) -> Fixed {
+    let clamped = value.min((i32::MAX >> 16) as u32);
+    (clamped as i32) << 16
+}
+
+fn alpha_to_u16(alpha: f32) -> u16 {
+    (alpha.clamp(0.0, 1.0) * u16::MAX as f32).round() as u16
+}
+
+fn legacy_appearance(config: &rpresent_config::SpotlightConfig) -> crate::overlay::SpotlightAppearance {
+    crate::overlay::SpotlightAppearance {
+        radius_px: config.radius_px,
+        softness_px: config.softness_px,
+        dim_alpha: config.dim_alpha,
+    }
+}
+
+fn create_gradient_picture<'a>(
+    connection: &'a RustConnection,
+    cursor: CursorPosition,
+    appearance: &crate::overlay::SpotlightAppearance,
+) -> Result<PictureWrapper<&'a RustConnection>, OverlayError> {
+    let inner = Pointfix {
+        x: fixed_from_i16(cursor.x),
+        y: fixed_from_i16(cursor.y),
+    };
+    let outer = inner;
+    let inner_radius = fixed_from_u32(appearance.radius_px);
+    let outer_radius = fixed_from_u32(appearance.radius_px.saturating_add(appearance.softness_px));
+    let stops: [Fixed; 2] = [0, 1 << 16];
+    let colors = [
+        Color {
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: 0,
+        },
+        Color {
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: alpha_to_u16(appearance.dim_alpha),
+        },
+    ];
+
+    let gradient = PictureWrapper::create_radial_gradient(
+        connection,
+        inner,
+        outer,
+        inner_radius,
+        outer_radius,
+        &stops,
+        &colors,
+    )
+    .map_err(runtime_error)?;
+
+    connection
+        .render_change_picture(
+            gradient.picture(),
+            &ChangePictureAux::new().repeat(Repeat::PAD),
+        )
+        .inspect_err(|error| {
+            tracing::error!(cursor = ?cursor, ?error, "failed to pad spotlight gradient");
+        })
+        .map_err(runtime_error)?;
+
+    Ok(gradient)
 }
 
 /// (Task 3.2) Compute a simple hash of frame pixel data for caching.
@@ -637,5 +746,44 @@ mod tests {
             select_render_strategy(&config),
             RenderStrategy::SoftwareFrame
         ));
+    }
+
+    #[test]
+    fn alpha_to_u16_scales_correctly() {
+        assert_eq!(alpha_to_u16(0.0), 0);
+        assert_eq!(alpha_to_u16(1.0), u16::MAX);
+        // Midpoint: 0.5 * 65535 = 32767.5 → rounds to 32768
+        assert_eq!(alpha_to_u16(0.5), 32768);
+    }
+
+    #[test]
+    fn fixed_from_i16_shifts_left_16() {
+        assert_eq!(fixed_from_i16(1), 1 << 16);
+        assert_eq!(fixed_from_i16(0), 0);
+    }
+
+    #[test]
+    fn fixed_from_u32_clamps_large_values() {
+        // i32::MAX >> 16 = 32767
+        let max_safe: u32 = (i32::MAX >> 16) as u32;
+        assert_eq!(fixed_from_u32(max_safe), (max_safe as i32) << 16);
+        // Values above max should be clamped
+        assert_eq!(fixed_from_u32(max_safe + 1), (max_safe as i32) << 16);
+    }
+
+    #[test]
+    fn legacy_appearance_maps_config_fields() {
+        let config = rpresent_config::SpotlightConfig {
+            radius_px: 300,
+            softness_px: 90,
+            dim_alpha: 0.8,
+            ..rpresent_config::SpotlightConfig::default()
+        };
+
+        let appearance = legacy_appearance(&config);
+
+        assert_eq!(appearance.radius_px, 300);
+        assert_eq!(appearance.softness_px, 90);
+        assert!((appearance.dim_alpha - 0.8).abs() < f32::EPSILON);
     }
 }
