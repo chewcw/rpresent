@@ -103,7 +103,7 @@ pub fn run_overlay(
 
         if latest.enabled {
             backend.show()?;
-            backend.render(&latest, &appearance)?;
+            backend.render(&latest)?;
         } else {
             backend.hide()?;
         }
