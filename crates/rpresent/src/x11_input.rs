@@ -23,8 +23,8 @@ fn run_input_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::collections::HashMap;
     use x11rb::connection::Connection as _;
-    use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConnectionExt as _, EventMask};
     use x11rb::protocol::Event;
+    use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConnectionExt as _, EventMask};
 
     use crate::input::{ActiveMode, InputBindings, InputRouter};
 
@@ -33,9 +33,8 @@ fn run_input_loop(
 
     conn.change_window_attributes(
         root,
-        &ChangeWindowAttributesAux::new().event_mask(
-            EventMask::KEY_PRESS | EventMask::KEY_RELEASE | EventMask::BUTTON_PRESS,
-        ),
+        &ChangeWindowAttributesAux::new()
+            .event_mask(EventMask::KEY_PRESS | EventMask::KEY_RELEASE | EventMask::BUTTON_PRESS),
     )?
     .check()?;
     conn.flush()?;
@@ -61,10 +60,10 @@ fn run_input_loop(
                 }
             }
             Event::KeyPress(ev) => {
-                if let Some(shortcut) = shortcut_from_keypress(ev.detail, ev.state, &keycode_map) {
-                    if let Some(cmd) = router.handle_key(&shortcut) {
-                        let _ = tx.send(crate::input::AppEvent::Command(cmd));
-                    }
+                if let Some(shortcut) = shortcut_from_keypress(ev.detail, ev.state, &keycode_map)
+                    && let Some(cmd) = router.handle_key(&shortcut)
+                {
+                    let _ = tx.send(crate::input::AppEvent::Command(cmd));
                 }
             }
             _ => {}
@@ -83,24 +82,24 @@ fn build_keycode_map(
     let count = max_keycode - min_keycode + 1;
 
     let mut map = std::collections::HashMap::new();
-    if let Ok(cookie) = connection.get_keyboard_mapping(min_keycode, count) {
-        if let Ok(reply) = cookie.reply() {
-            let keysyms_per_keycode = reply.keysyms_per_keycode as usize;
-            for (i, chunk) in reply.keysyms.chunks(keysyms_per_keycode).enumerate() {
-                let keycode = min_keycode + i as u8;
-                // Only index the first (unshifted) keysym
-                let keysym = match chunk.first().copied() {
-                    Some(k) => k,
-                    None => continue,
-                };
-                let digit = match keysym {
-                    0x0031 => "1",
-                    0x0032 => "2",
-                    0x0033 => "3",
-                    _ => continue,
-                };
-                map.insert(keycode, digit);
-            }
+    if let Ok(cookie) = connection.get_keyboard_mapping(min_keycode, count)
+        && let Ok(reply) = cookie.reply()
+    {
+        let keysyms_per_keycode = reply.keysyms_per_keycode as usize;
+        for (i, chunk) in reply.keysyms.chunks(keysyms_per_keycode).enumerate() {
+            let keycode = min_keycode + i as u8;
+            // Only index the first (unshifted) keysym
+            let keysym = match chunk.first().copied() {
+                Some(k) => k,
+                None => continue,
+            };
+            let digit = match keysym {
+                0x0031 => "1",
+                0x0032 => "2",
+                0x0033 => "3",
+                _ => continue,
+            };
+            map.insert(keycode, digit);
         }
     }
     map

@@ -20,7 +20,7 @@ install-qml-host: build-qml-host
     @echo "Installed to ~/.local/bin/rpresent-qml-host"
 
 run-daemon:
-    RUST_LOG=trace cargo run --package rpresent -- --config ./config.toml &
+    RUST_LOG=debug cargo run --package rpresent -- --config ./config.toml &
 
 run-spotlight: run-daemon
-    RUST_LOG=trace cargo run --package rpresent -- spot=toggle
+    RUST_LOG=debug cargo run --package rpresent -- spot=toggle &

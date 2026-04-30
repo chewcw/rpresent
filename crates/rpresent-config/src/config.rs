@@ -26,24 +26,20 @@ pub struct AppConfig {
     pub socket_name: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AnnotationTool {
+    #[default]
     Pen,
     Line,
     Eraser,
 }
 
-impl Default for AnnotationTool {
-    fn default() -> Self {
-        Self::Pen
-    }
-}
-
 /// Shape of the spotlight cutout, mirroring Projecteur's shape variants.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SpotShape {
+    #[default]
     Circle,
     Square {
         #[serde(default = "default_corner_radius_pct")]
@@ -59,12 +55,6 @@ pub enum SpotShape {
         #[serde(default = "default_ngon_sides")]
         sides: u32,
     },
-}
-
-impl Default for SpotShape {
-    fn default() -> Self {
-        Self::Circle
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

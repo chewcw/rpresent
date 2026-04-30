@@ -80,3 +80,21 @@ fn spotlight_wheel_is_blocked_outside_spotlight_mode_even_with_ctrl() {
     assert!(router.handle_key("Ctrl+2").is_some());
     assert_eq!(router.handle_wheel("Control", 1.0), None);
 }
+
+#[test]
+fn spotlight_wheel_accepts_control_as_configured_modifier() {
+    let config = ShortcutConfig {
+        spotlight_mode: "Ctrl+1".to_owned(),
+        annotation_mode: "Ctrl+2".to_owned(),
+        zoom_mode: "Ctrl+3".to_owned(),
+        spotlight_wheel_modifier: "Control".to_owned(), // configured as "Control", not "Ctrl"
+    };
+    let bindings = InputBindings::from(&config);
+    let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);
+
+    assert!(router.handle_key("Ctrl+1").is_some());
+    assert_eq!(
+        router.handle_wheel("Ctrl", 1.0),
+        Some(InputAction::SpotlightWheel { delta: 1.0 })
+    );
+}

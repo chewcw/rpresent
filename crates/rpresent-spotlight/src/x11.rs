@@ -1,8 +1,8 @@
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::image::Image;
 use x11rb::protocol::render::{
-    self, ChangePictureAux, Color, ConnectionExt as RenderConnectionExt, CreatePictureAux,
-    Fixed, PictOp, PictType, Picture, PictureWrapper, Pictformat, Pointfix, Repeat,
+    self, ChangePictureAux, Color, ConnectionExt as RenderConnectionExt, CreatePictureAux, Fixed,
+    PictOp, PictType, Pictformat, Picture, PictureWrapper, Pointfix, Repeat,
 };
 use x11rb::protocol::xproto::{
     ColormapAlloc, ConnectionExt as XprotoConnectionExt, CreateGCAux, CreateWindowAux, Gcontext,
@@ -66,16 +66,14 @@ fn choose_visual(
                 && format.direct.blue_mask == 255
                 && format.direct.alpha_shift == 24
                 && format.direct.alpha_mask == 255
+        }) && let Some(visual) = formats.screens.get(screen_num).and_then(|screen_formats| {
+            screen_formats
+                .depths
+                .iter()
+                .flat_map(|depth| depth.visuals.iter())
+                .find(|visual| visual.format == format.id)
         }) {
-            if let Some(visual) = formats.screens.get(screen_num).and_then(|screen_formats| {
-                screen_formats
-                    .depths
-                    .iter()
-                    .flat_map(|depth| depth.visuals.iter())
-                    .find(|visual| visual.format == format.id)
-            }) {
-                return Ok((format.depth, visual.visual));
-            }
+            return Ok((format.depth, visual.visual));
         }
     }
 
@@ -162,7 +160,9 @@ fn parse_hex_rgb(color: &str) -> Option<(u8, u8, u8)> {
     Some((r, g, b))
 }
 
-fn legacy_appearance(config: &rpresent_config::SpotlightConfig) -> crate::overlay::SpotlightAppearance {
+fn legacy_appearance(
+    config: &rpresent_config::SpotlightConfig,
+) -> crate::overlay::SpotlightAppearance {
     crate::overlay::SpotlightAppearance {
         radius_px: config.radius_px,
         softness_px: config.softness_px,
@@ -223,8 +223,15 @@ fn create_gradient_picture<'a>(
 }
 
 enum BackendKind {
-    Render { window_picture: Picture, gc: Gcontext, depth: u8 },
-    Software { gc: Gcontext, depth: u8 },
+    Render {
+        window_picture: Picture,
+        gc: Gcontext,
+        depth: u8,
+    },
+    Software {
+        gc: Gcontext,
+        depth: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -379,7 +386,6 @@ impl X11SpotlightOverlay {
             })
             .map_err(runtime_error)
     }
-
 }
 
 fn free_dot_cache(connection: &RustConnection, cache: DotRenderCache) {
@@ -467,7 +473,9 @@ fn upload_dot_cache(
             return Err(runtime_error(error));
         }
     };
-    if let Err(error) = connection.create_gc(gc, pixmap, &CreateGCAux::default().graphics_exposures(0)) {
+    if let Err(error) =
+        connection.create_gc(gc, pixmap, &CreateGCAux::default().graphics_exposures(0))
+    {
         let _ = connection.free_pixmap(pixmap);
         return Err(runtime_error(error));
     }
@@ -503,12 +511,18 @@ fn upload_dot_cache(
             return Err(runtime_error(error));
         }
     };
-    if let Err(error) = connection.render_create_picture(picture, pixmap, pictformat, &CreatePictureAux::default()) {
+    if let Err(error) =
+        connection.render_create_picture(picture, pixmap, pictformat, &CreatePictureAux::default())
+    {
         let _ = connection.free_pixmap(pixmap);
         return Err(runtime_error(error));
     }
 
-    Ok(DotRenderCache { key, pixmap, picture })
+    Ok(DotRenderCache {
+        key,
+        pixmap,
+        picture,
+    })
 }
 
 /// Return the cached dot picture, rebuilding it when the key changes.
@@ -530,10 +544,10 @@ fn ensure_dot_cache(
         Some(k) => k,
     };
 
-    if let Some(ref cache) = *dot_cache {
-        if cache.key == key {
-            return Ok(Some((cache.picture, cache.key)));
-        }
+    if let Some(ref cache) = *dot_cache
+        && cache.key == key
+    {
+        return Ok(Some((cache.picture, cache.key)));
     }
 
     // Key changed — free old cache then rebuild.
@@ -626,7 +640,14 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
     ) -> Result<(), OverlayError> {
         let strategy = select_render_strategy(config);
         let result = match (strategy, &self.backend) {
-            (RenderStrategy::XrenderRadial, &BackendKind::Render { window_picture, depth, .. }) => {
+            (
+                RenderStrategy::XrenderRadial,
+                &BackendKind::Render {
+                    window_picture,
+                    depth,
+                    ..
+                },
+            ) => {
                 let appearance = legacy_appearance(config);
                 redraw_render(
                     &self.connection,
@@ -641,21 +662,23 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
                 )
             }
             (RenderStrategy::SoftwareFrame, &BackendKind::Render { gc, depth, .. })
-            | (_, &BackendKind::Software { gc, depth }) => {
-                redraw_software(
-                    &self.connection,
-                    self.window,
-                    gc,
-                    depth,
-                    self.surface_size,
-                    cursor,
-                    config,
-                    &mut self.software_frame_buffer,
-                )
-            }
+            | (_, &BackendKind::Software { gc, depth }) => redraw_software(
+                &self.connection,
+                self.window,
+                gc,
+                depth,
+                self.surface_size,
+                cursor,
+                config,
+                &mut self.software_frame_buffer,
+            ),
         };
         result.inspect_err(|error| {
-            tracing::error!(window = self.window, ?error, "failed to redraw spotlight overlay");
+            tracing::error!(
+                window = self.window,
+                ?error,
+                "failed to redraw spotlight overlay"
+            );
         })?;
         self.flush()
     }
@@ -755,6 +778,7 @@ fn create_software_backend(
     Ok(BackendKind::Software { gc, depth })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn redraw_render(
     connection: &RustConnection,
     window: Window,
@@ -788,7 +812,9 @@ fn redraw_render(
     .map_err(runtime_error)?;
 
     // Composite circle dot if enabled.
-    if let Some((dot_picture, key)) = ensure_dot_cache(connection, window, depth, dot_cache, config)? {
+    if let Some((dot_picture, key)) =
+        ensure_dot_cache(connection, window, depth, dot_cache, config)?
+    {
         let half = (key.size_px as i32) / 2;
         let dst_x = (cursor.x as i32 - half).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         let dst_y = (cursor.y as i32 - half).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
@@ -816,6 +842,7 @@ fn redraw_render(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn redraw_software(
     connection: &RustConnection,
     window: Window,
@@ -927,8 +954,10 @@ mod tests {
 
     #[test]
     fn rotated_circle_falls_back_to_software() {
-        let mut config = rpresent_config::SpotlightConfig::default();
-        config.spot_rotation_deg = 45.0;
+        let config = rpresent_config::SpotlightConfig {
+            spot_rotation_deg: 45.0,
+            ..rpresent_config::SpotlightConfig::default()
+        };
         assert!(matches!(
             select_render_strategy(&config),
             RenderStrategy::SoftwareFrame
@@ -937,8 +966,12 @@ mod tests {
 
     #[test]
     fn non_circle_shape_falls_back_to_software() {
-        let mut config = rpresent_config::SpotlightConfig::default();
-        config.shape = rpresent_config::SpotShape::Square { corner_radius_pct: 0 };
+        let config = rpresent_config::SpotlightConfig {
+            shape: rpresent_config::SpotShape::Square {
+                corner_radius_pct: 0,
+            },
+            ..rpresent_config::SpotlightConfig::default()
+        };
         assert!(matches!(
             select_render_strategy(&config),
             RenderStrategy::SoftwareFrame
@@ -986,11 +1019,13 @@ mod tests {
 
     #[test]
     fn dot_cache_key_changes_when_visual_inputs_change() {
-        let mut a = rpresent_config::SpotlightConfig::default();
-        a.show_center_dot = true;
-        a.dot_size_px = 8;
-        a.dot_color = "#ffffff".to_owned();
-        a.dot_opacity = 0.8;
+        let a = rpresent_config::SpotlightConfig {
+            show_center_dot: true,
+            dot_size_px: 8,
+            dot_color: "#ffffff".to_owned(),
+            dot_opacity: 0.8,
+            ..rpresent_config::SpotlightConfig::default()
+        };
 
         let mut b = a.clone();
         b.dot_size_px = 9;
@@ -1007,8 +1042,10 @@ mod tests {
 
     #[test]
     fn dot_cache_key_none_when_dot_is_hidden() {
-        let mut c = rpresent_config::SpotlightConfig::default();
-        c.show_center_dot = false;
+        let c = rpresent_config::SpotlightConfig {
+            show_center_dot: false,
+            ..rpresent_config::SpotlightConfig::default()
+        };
         assert_eq!(dot_cache_key(&c), None);
     }
 }

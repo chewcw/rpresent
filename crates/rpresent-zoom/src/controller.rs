@@ -54,7 +54,9 @@ impl ZoomController {
         let previous_scale = self.state.scale;
         self.state.pivot = pivot;
         let changed = self.set_scale(self.state.scale * (1.0 + delta * self.scroll_speed));
-        if previous_pivot != self.state.pivot || (previous_scale - self.state.scale).abs() > f32::EPSILON {
+        if previous_pivot != self.state.pivot
+            || (previous_scale - self.state.scale).abs() > f32::EPSILON
+        {
             tracing::trace!(
                 from_pivot = ?previous_pivot,
                 to_pivot = ?self.state.pivot,
@@ -82,7 +84,9 @@ impl ZoomController {
         let previous_scale = self.state.scale;
         self.state.scale = self.initial_scale;
         self.state.pivot = (0.0, 0.0);
-        if previous_pivot != self.state.pivot || (previous_scale - self.state.scale).abs() > f32::EPSILON {
+        if previous_pivot != self.state.pivot
+            || (previous_scale - self.state.scale).abs() > f32::EPSILON
+        {
             tracing::debug!(
                 from_pivot = ?previous_pivot,
                 to_pivot = ?self.state.pivot,

@@ -13,7 +13,10 @@ pub use qml_backend::{IpcMessage, QmlSpotlightOverlay};
 
 pub use command::{CommandParseError, SpotlightCommand};
 pub use controller::{SpotlightController, SpotlightState};
-pub use overlay::{CursorPosition, OverlayError, SpotlightAppearance, SpotlightFrame, SpotlightRuntimeMessage, run_overlay, spotlight_alpha};
+pub use overlay::{
+    CursorPosition, OverlayError, SpotlightAppearance, SpotlightFrame, SpotlightRuntimeMessage,
+    run_overlay, spotlight_alpha,
+};
 #[cfg(all(target_os = "linux", feature = "qml"))]
 pub use overlay::run_overlay_qml;
 pub use render::build_projecteur_frame;
