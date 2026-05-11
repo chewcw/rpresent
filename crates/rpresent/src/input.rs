@@ -32,6 +32,9 @@ impl From<&ShortcutConfig> for InputBindings {
 pub enum InputAction {
     SpotlightWheel { delta: f32 },
     ZoomWheel { delta: f32, cursor_x: i16, cursor_y: i16 },
+    ZoomDragStart { cursor_x: i16, cursor_y: i16 },
+    ZoomDragMove { cursor_x: i16, cursor_y: i16 },
+    ZoomDragEnd,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,6 +88,30 @@ impl InputRouter {
             Some(InputAction::SpotlightWheel { delta })
         } else if self.active_mode == ActiveMode::Zoom && active_modifier == configured_modifier {
             Some(InputAction::ZoomWheel { delta, cursor_x, cursor_y })
+        } else {
+            None
+        }
+    }
+
+    pub fn handle_drag_start(&self, cursor_x: i16, cursor_y: i16) -> Option<InputAction> {
+        if self.active_mode == ActiveMode::Zoom {
+            Some(InputAction::ZoomDragStart { cursor_x, cursor_y })
+        } else {
+            None
+        }
+    }
+
+    pub fn handle_drag_move(&self, cursor_x: i16, cursor_y: i16) -> Option<InputAction> {
+        if self.active_mode == ActiveMode::Zoom {
+            Some(InputAction::ZoomDragMove { cursor_x, cursor_y })
+        } else {
+            None
+        }
+    }
+
+    pub fn handle_drag_end(&self) -> Option<InputAction> {
+        if self.active_mode == ActiveMode::Zoom {
+            Some(InputAction::ZoomDragEnd)
         } else {
             None
         }

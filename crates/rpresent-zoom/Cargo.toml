@@ -9,3 +9,4 @@ tracing = { workspace = true }
 thiserror = "2"
 crossbeam-channel = "0.5"
 x11rb = { version = "0.13", features = ["render", "image"] }
+tiny-skia = "0.11"

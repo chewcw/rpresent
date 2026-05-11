@@ -3,6 +3,8 @@
 const BUTTON_WHEEL_UP: u8 = 4;
 #[cfg(target_os = "linux")]
 const BUTTON_WHEEL_DOWN: u8 = 5;
+#[cfg(target_os = "linux")]
+const BUTTON_LEFT: u8 = 1;
 
 #[cfg(target_os = "linux")]
 pub(crate) fn spawn(
@@ -128,9 +130,32 @@ fn run_input_loop(
         }
     }
 
+    // Capture Button1 drag lifecycle so zoom mode can pan via MotionNotify events.
+    match conn.grab_button(
+        true,
+        root,
+        EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+        GrabMode::ASYNC,
+        GrabMode::ASYNC,
+        0u32,
+        0u32,
+        ButtonIndex::M1,
+        ModMask::ANY,
+    ) {
+        Ok(cookie) => {
+            if let Err(error) = cookie.check() {
+                tracing::warn!(?error, "failed to grab global Button1 drag events");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(?error, "failed to request global Button1 drag grab");
+        }
+    }
+
     conn.flush()?;
     let bindings = InputBindings::from(&shortcuts);
     let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);
+    let mut drag_active = false;
 
     loop {
         let event = conn.wait_for_event()?;
@@ -146,6 +171,27 @@ fn run_input_loop(
                 };
                 if let Some(action) = router.handle_wheel(modifier, delta, ev.root_x, ev.root_y) {
                     let _ = tx.send(crate::input::AppEvent::Input(action));
+                }
+            }
+            Event::ButtonPress(ev) if ev.detail == BUTTON_LEFT => {
+                if let Some(action) = router.handle_drag_start(ev.root_x, ev.root_y) {
+                    drag_active = true;
+                    let _ = tx.send(crate::input::AppEvent::Input(action));
+                }
+            }
+            Event::MotionNotify(ev) => {
+                if drag_active
+                    && let Some(action) = router.handle_drag_move(ev.root_x, ev.root_y)
+                {
+                    let _ = tx.send(crate::input::AppEvent::Input(action));
+                }
+            }
+            Event::ButtonRelease(ev) if ev.detail == BUTTON_LEFT => {
+                if drag_active {
+                    drag_active = false;
+                    if let Some(action) = router.handle_drag_end() {
+                        let _ = tx.send(crate::input::AppEvent::Input(action));
+                    }
                 }
             }
             Event::KeyPress(ev) => {

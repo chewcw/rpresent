@@ -63,6 +63,7 @@ fn parses_module_sections_and_applies_defaults() {
     assert_eq!(config.zoom.initial_scale, 2.5);
     assert_eq!(config.zoom.min_scale, 1.0);
     assert_eq!(config.zoom.max_scale, 6.0);
+    assert_eq!(config.zoom.scale_friction, 5.0);
     assert_eq!(config.zoom.capture_target, "active-monitor");
     assert_eq!(config.shortcuts.spotlight_mode, "Ctrl+1");
     assert_eq!(config.shortcuts.annotation_mode, "Ctrl+2");
@@ -111,6 +112,7 @@ fn default_config_file_is_written_with_all_sections() {
     assert!(contents.contains("spot_size_pct = 30"));
     assert!(contents.contains("shade_color = \"#000000\""));
     assert!(contents.contains("border_size_pct = 10"));
+    assert!(contents.contains("scale_friction = 5.0"));
 }
 
 #[test]

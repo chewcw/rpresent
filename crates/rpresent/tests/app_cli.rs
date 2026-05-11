@@ -79,14 +79,14 @@ fn parses_config_init_entrypoint() {
 #[test]
 fn zoom_command_sends_state_to_overlay_channel() {
     use crossbeam_channel::unbounded;
-    use rpresent_zoom::{ZoomCommand, ZoomController};
+    use rpresent_zoom::{ZoomCommand, ZoomController, ZoomRuntimeMessage};
 
     let (tx, rx) = unbounded();
     let mut controller = ZoomController::from_config(rpresent_zoom::ZoomConfig::default());
 
-    controller.apply(ZoomCommand::On);
-    tx.send(controller.state()).unwrap();
+    let message = controller.apply(ZoomCommand::On).unwrap();
+    tx.send(message).unwrap();
 
-    let state = rx.recv().unwrap();
-    assert!(state.enabled);
+    let message = rx.recv().unwrap();
+    assert_eq!(message, ZoomRuntimeMessage::SetEnabled(true));
 }

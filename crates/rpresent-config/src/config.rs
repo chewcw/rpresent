@@ -193,6 +193,8 @@ pub struct ZoomConfig {
     pub scroll_speed: f32,
     #[serde(default = "default_pan_friction")]
     pub pan_friction: f32,
+    #[serde(default = "default_scale_friction")]
+    pub scale_friction: f32,
     #[serde(default = "default_capture_target")]
     pub capture_target: String,
 }
@@ -220,6 +222,7 @@ impl Default for ZoomConfig {
             max_scale: default_max_scale(),
             scroll_speed: default_scroll_speed(),
             pan_friction: default_pan_friction(),
+            scale_friction: default_scale_friction(),
             capture_target: default_capture_target(),
         }
     }
@@ -419,6 +422,10 @@ fn default_scroll_speed() -> f32 {
 
 fn default_pan_friction() -> f32 {
     0.82
+}
+
+fn default_scale_friction() -> f32 {
+    5.0
 }
 
 fn default_capture_target() -> String {

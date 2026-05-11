@@ -140,3 +140,36 @@ fn annotation_mode_emits_nothing_on_wheel() {
     assert!(router.handle_key("Ctrl+2").is_some());
     assert_eq!(router.handle_wheel("Ctrl", 1.0, 0, 0), None);
 }
+
+#[test]
+fn zoom_mode_emits_drag_lifecycle_actions() {
+    let bindings = InputBindings::from(&ShortcutConfig::default());
+    let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);
+
+    assert!(router.handle_key("Ctrl+3").is_some());
+    assert_eq!(
+        router.handle_drag_start(10, 20),
+        Some(InputAction::ZoomDragStart {
+            cursor_x: 10,
+            cursor_y: 20,
+        })
+    );
+    assert_eq!(
+        router.handle_drag_move(15, 25),
+        Some(InputAction::ZoomDragMove {
+            cursor_x: 15,
+            cursor_y: 25,
+        })
+    );
+    assert_eq!(router.handle_drag_end(), Some(InputAction::ZoomDragEnd));
+}
+
+#[test]
+fn drag_actions_are_ignored_outside_zoom_mode() {
+    let bindings = InputBindings::from(&ShortcutConfig::default());
+    let router = InputRouter::new(bindings, ActiveMode::Spotlight);
+
+    assert_eq!(router.handle_drag_start(0, 0), None);
+    assert_eq!(router.handle_drag_move(0, 0), None);
+    assert_eq!(router.handle_drag_end(), None);
+}

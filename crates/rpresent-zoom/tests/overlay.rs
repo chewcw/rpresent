@@ -1,4 +1,4 @@
-use rpresent_zoom::{ZoomAppearance, ZoomConfig, ZoomState, zoom_sample_rect};
+use rpresent_zoom::{ZoomAppearance, ZoomConfig, zoom_sample_rect};
 
 #[test]
 fn overlay_defaults_match_the_mvp() {
@@ -8,20 +8,13 @@ fn overlay_defaults_match_the_mvp() {
     assert_eq!(appearance.max_scale, 6.0);
     assert_eq!(appearance.scroll_speed, 0.25);
     assert_eq!(appearance.pan_friction, 0.82);
+    assert_eq!(appearance.scale_friction, 5.0);
     assert!(appearance.follow_cursor);
 }
 
 #[test]
 fn sample_rect_tracks_scale_and_clamps_to_bounds() {
-    let state = ZoomState {
-        enabled: true,
-        scale: 2.0,
-        pivot: (100.0, 100.0),
-        follow_cursor: true,
-        capture_target: String::from("active-monitor"),
-    };
-
-    let rect = zoom_sample_rect(1920, 1080, &state);
+    let rect = zoom_sample_rect(1920, 1080, 2.0, (100.0, 100.0));
     assert_eq!(rect.width, 960.0);
     assert_eq!(rect.height, 540.0);
     assert_eq!(rect.left, 0.0);
@@ -36,6 +29,7 @@ fn zoom_appearance_from_config_matches_fields() {
         max_scale: 8.0,
         scroll_speed: 0.5,
         pan_friction: 0.9,
+        scale_friction: 6.0,
         follow_cursor: false,
         ..ZoomConfig::default()
     };
@@ -45,19 +39,13 @@ fn zoom_appearance_from_config_matches_fields() {
     assert_eq!(appearance.max_scale, 8.0);
     assert_eq!(appearance.scroll_speed, 0.5);
     assert_eq!(appearance.pan_friction, 0.9);
+    assert_eq!(appearance.scale_friction, 6.0);
     assert!(!appearance.follow_cursor);
 }
 
 #[test]
 fn sample_rect_clamps_pivot_to_bounds() {
-    let state = ZoomState {
-        enabled: true,
-        scale: 2.0,
-        pivot: (99999.0, 99999.0),
-        follow_cursor: false,
-        capture_target: String::from("active-monitor"),
-    };
-    let rect = zoom_sample_rect(1920, 1080, &state);
+    let rect = zoom_sample_rect(1920, 1080, 2.0, (99999.0, 99999.0));
     // At scale 2, width=960, height=540; max_left=960, max_top=540
     assert_eq!(rect.left, 960.0);
     assert_eq!(rect.top, 540.0);

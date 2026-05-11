@@ -8,7 +8,7 @@ use rpresent_config::{
     Config, default_config_path, load_or_default_from_path, write_default_config,
 };
 use rpresent_spotlight::{SpotlightController, SpotlightRuntimeMessage};
-use rpresent_zoom::{ZoomAppearance, ZoomController, ZoomState};
+use rpresent_zoom::{ZoomAppearance, ZoomController, ZoomRuntimeMessage};
 
 use crate::command::AppCommand;
 use crate::input::AppEvent;
@@ -176,7 +176,7 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
     let (event_tx, event_rx) = mpsc::channel::<AppEvent>();
     let (spotlight_tx, spotlight_rx) = mpsc::channel::<SpotlightRuntimeMessage>();
     let (annotation_tx, annotation_rx) = mpsc::channel::<AnnotationState>();
-    let (zoom_tx, zoom_rx) = crossbeam_channel::unbounded::<ZoomState>();
+    let (zoom_tx, zoom_rx) = crossbeam_channel::unbounded::<ZoomRuntimeMessage>();
     let socket_path = ipc::socket_path_for(&config.app.socket_name)?;
 
     let spotlight_config = config.spotlight.clone();
@@ -218,7 +218,9 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
             spotlight_controller.state(),
         ));
         let _ = annotation_tx.send(annotation_controller.state());
-        let _ = zoom_tx.send(zoom_controller.state());
+        for message in zoom_controller.initial_messages() {
+            let _ = zoom_tx.send(message);
+        }
 
         for event in event_rx {
             match event {
@@ -235,16 +237,31 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
                     }
                 }
                 AppEvent::Command(AppCommand::Zoom(command)) => {
-                    if zoom_controller.apply(command) {
-                        let _ = zoom_tx.send(zoom_controller.state());
+                    if let Some(message) = zoom_controller.apply(command) {
+                        let _ = zoom_tx.send(message);
                     }
                 }
                 AppEvent::Input(crate::input::InputAction::SpotlightWheel { delta }) => {
                     let _ = spotlight_tx.send(SpotlightRuntimeMessage::ResizeBy(delta * 12.0));
                 }
                 AppEvent::Input(crate::input::InputAction::ZoomWheel { delta, cursor_x, cursor_y }) => {
-                    if zoom_controller.zoom_by_scroll(delta, (cursor_x as f32, cursor_y as f32)) {
-                        let _ = zoom_tx.send(zoom_controller.state());
+                    if let Some(message) = zoom_controller.zoom_by_scroll(delta, (cursor_x as f32, cursor_y as f32)) {
+                        let _ = zoom_tx.send(message);
+                    }
+                }
+                AppEvent::Input(crate::input::InputAction::ZoomDragStart { cursor_x, cursor_y }) => {
+                    if let Some(message) = zoom_controller.drag_start((cursor_x as f32, cursor_y as f32)) {
+                        let _ = zoom_tx.send(message);
+                    }
+                }
+                AppEvent::Input(crate::input::InputAction::ZoomDragMove { cursor_x, cursor_y }) => {
+                    if let Some(message) = zoom_controller.drag_move((cursor_x as f32, cursor_y as f32)) {
+                        let _ = zoom_tx.send(message);
+                    }
+                }
+                AppEvent::Input(crate::input::InputAction::ZoomDragEnd) => {
+                    if let Some(message) = zoom_controller.drag_end() {
+                        let _ = zoom_tx.send(message);
                     }
                 }
             }
