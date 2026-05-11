@@ -1,6 +1,7 @@
 use rpresent_config::SpotlightConfig;
 use serde::Serialize;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::ConnectionExt;
@@ -29,6 +30,23 @@ fn runtime_error(e: impl std::fmt::Display) -> OverlayError {
     OverlayError::Runtime(e.to_string())
 }
 
+/// Generate candidates for `rpresent-qml-host` executable discovery.
+/// Returns colocated paths first (in the same directory as main_exe),
+/// followed by a PATH fallback.
+pub fn qml_host_candidates(main_exe: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    // Check colocated path first
+    if let Some(dir) = main_exe.parent() {
+        candidates.push(dir.join("rpresent-qml-host"));
+    }
+
+    // Fall back to searching in PATH
+    candidates.push(PathBuf::from("rpresent-qml-host"));
+
+    candidates
+}
+
 pub struct QmlSpotlightOverlay {
     connection: RustConnection,
     screen_num: usize,
@@ -43,16 +61,36 @@ impl QmlSpotlightOverlay {
         let screen = &connection.setup().roots[screen_num];
         let surface_size = (screen.width_in_pixels, screen.height_in_pixels);
 
-        let mut child = Command::new("rpresent-qml-host")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| {
-                OverlayError::Runtime(format!(
-                    "failed to spawn rpresent-qml-host: {e}; ensure it is in PATH"
-                ))
-            })?;
+        let main_exe = std::env::current_exe().map_err(|e| {
+            OverlayError::Runtime(format!("failed to determine current executable path: {e}"))
+        })?;
+        let candidates = qml_host_candidates(&main_exe);
+
+        let mut last_error = String::new();
+        let mut child = None;
+
+        for candidate in candidates {
+            match Command::new(&candidate)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+            {
+                Ok(c) => {
+                    child = Some(c);
+                    break;
+                }
+                Err(e) => {
+                    last_error = format!("tried {}: {}", candidate.display(), e);
+                }
+            }
+        }
+
+        let mut child = child.ok_or_else(|| {
+            OverlayError::Runtime(format!(
+                "failed to spawn rpresent-qml-host; {last_error}"
+            ))
+        })?;
 
         let stdin = child
             .stdin

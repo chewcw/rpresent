@@ -4,12 +4,13 @@
 
 ## Workspace Layout
 
-This repository is a Rust workspace with five crates:
+This repository is a Rust workspace with six crates:
 
 - `crates/rpresent-config` - shared TOML config loading, defaults, and config-file writing
 - `crates/rpresent-spotlight` - spotlight state and overlay rendering
 - `crates/rpresent-annotation` - drawing tools and stroke history
 - `crates/rpresent-zoom` - live capture and magnified rendering
+- `crates/rpresent-qml-host` - Cargo wrapper and native build pipeline for the Qt QML host
 - `crates/rpresent` - CLI, IPC, shortcut routing, and runtime composition
 
 ## Requirements
@@ -45,6 +46,30 @@ Format the code:
 ```bash
 cargo fmt
 ```
+
+## Optional: QML Rendering Support
+
+The spotlight overlay includes optional QML rendering support for advanced visual effects.
+
+### System Dependencies
+
+To build with QML support, install the Qt 6 development libraries:
+
+```bash
+sudo apt install qt6-base-dev qt6-declarative-dev
+```
+
+(Qt 5 fallback: `libqt5core5a` and `libqt5qml5` may work on systems with Qt 5 only, though Qt 6 is recommended.)
+
+### Building with QML
+
+```bash
+cargo build --workspace --features qml
+cargo install --path crates/rpresent
+cargo install --path crates/rpresent-qml-host
+```
+
+The `rpresent-qml-host` binary must be installed alongside `rpresent` for QML rendering to function.
 
 ## Run
 

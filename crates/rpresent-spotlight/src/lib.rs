@@ -9,7 +9,7 @@ mod x11;
 #[cfg(feature = "qml")]
 pub(crate) mod qml_backend;
 #[cfg(feature = "qml")]
-pub use qml_backend::{IpcMessage, QmlSpotlightOverlay};
+pub use qml_backend::{IpcMessage, QmlSpotlightOverlay, qml_host_candidates};
 
 pub use command::{CommandParseError, SpotlightCommand};
 pub use controller::{SpotlightController, SpotlightState};

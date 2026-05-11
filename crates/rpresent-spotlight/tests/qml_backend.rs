@@ -67,8 +67,45 @@ mod ipc_message {
 }
 
 #[cfg(feature = "qml")]
+mod qml_host_resolver {
+    use rpresent_spotlight::qml_host_candidates;
+    use std::path::PathBuf;
+
+    #[test]
+    fn qml_host_candidates_checks_colocated_first() {
+        let main_exe = PathBuf::from("/usr/local/bin/rpresent");
+        let candidates = qml_host_candidates(&main_exe);
+
+        assert!(candidates.len() >= 2, "should have at least colocated and PATH fallback");
+        assert_eq!(
+            candidates[0],
+            PathBuf::from("/usr/local/bin/rpresent-qml-host"),
+            "first candidate should be colocated"
+        );
+        assert_eq!(
+            candidates[1],
+            PathBuf::from("rpresent-qml-host"),
+            "second candidate should be PATH fallback"
+        );
+    }
+
+    #[test]
+    fn qml_host_candidates_handles_root_exe() {
+        let main_exe = PathBuf::from("/rpresent");
+        let candidates = qml_host_candidates(&main_exe);
+
+        assert!(candidates.len() >= 2);
+        assert_eq!(
+            candidates[0],
+            PathBuf::from("/rpresent-qml-host"),
+            "should handle root directory"
+        );
+    }
+}
+
+#[cfg(feature = "qml")]
 mod spawn {
-    use rpresent_spotlight::QmlSpotlightOverlay;
+    use rpresent_spotlight::{qml_host_candidates, QmlSpotlightOverlay};
 
     /// Requires `rpresent-qml-host` to be in PATH.  Run manually after building the Qt host.
     #[test]
@@ -77,4 +114,31 @@ mod spawn {
         let _overlay = QmlSpotlightOverlay::new().expect("QML overlay creation should succeed");
         // Drop sends Quit and joins child — test passes if no panic.
     }
+
+    /// Verifies colocated executable discovery and launch.
+    /// Requires `rpresent-qml-host` to be colocated with the rpresent binary.
+    /// Run after building: `cargo build -p rpresent-qml-host` and ensuring
+    /// rpresent-qml-host is in the same directory as the rpresent binary.
+    #[test]
+    #[ignore]
+    fn colocated_qml_host_launch() {
+        let fake_main_exe = std::env::temp_dir()
+            .join(format!("rpresent-qml-backend-smoke-{}", std::process::id()))
+            .join("rpresent");
+        let candidates = qml_host_candidates(&fake_main_exe);
+
+        assert!(
+            candidates.len() >= 2,
+            "expected colocated and PATH fallback candidates"
+        );
+        assert_eq!(
+            candidates[0],
+            fake_main_exe.with_file_name("rpresent-qml-host"),
+            "colocated launch path must be preferred first"
+        );
+
+        let _overlay = QmlSpotlightOverlay::new().expect("QML overlay creation should succeed");
+        // Drop sends Quit and joins child — test passes if no panic.
+    }
 }
+
