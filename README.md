@@ -48,7 +48,19 @@ cargo fmt
 
 ## Optional: QML Rendering Support
 
-The spotlight overlay includes optional QML rendering support for advanced visual effects. To build with QML support:
+The spotlight overlay includes optional QML rendering support for advanced visual effects.
+
+### System Dependencies
+
+To build with QML support, install the Qt 6 development libraries:
+
+```bash
+sudo apt install qt6-base-dev qt6-declarative-dev
+```
+
+(Qt 5 fallback: `libqt5core5a` and `libqt5qml5` may work on systems with Qt 5 only, though Qt 6 is recommended.)
+
+### Building with QML
 
 ```bash
 cargo build --workspace --features qml
