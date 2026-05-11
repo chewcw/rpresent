@@ -67,6 +67,43 @@ mod ipc_message {
 }
 
 #[cfg(feature = "qml")]
+mod qml_host_resolver {
+    use rpresent_spotlight::qml_host_candidates;
+    use std::path::PathBuf;
+
+    #[test]
+    fn qml_host_candidates_checks_colocated_first() {
+        let main_exe = PathBuf::from("/usr/local/bin/rpresent");
+        let candidates = qml_host_candidates(&main_exe);
+
+        assert!(candidates.len() >= 2, "should have at least colocated and PATH fallback");
+        assert_eq!(
+            candidates[0],
+            PathBuf::from("/usr/local/bin/rpresent-qml-host"),
+            "first candidate should be colocated"
+        );
+        assert_eq!(
+            candidates[1],
+            PathBuf::from("rpresent-qml-host"),
+            "second candidate should be PATH fallback"
+        );
+    }
+
+    #[test]
+    fn qml_host_candidates_handles_root_exe() {
+        let main_exe = PathBuf::from("/rpresent");
+        let candidates = qml_host_candidates(&main_exe);
+
+        assert!(candidates.len() >= 2);
+        assert_eq!(
+            candidates[0],
+            PathBuf::from("/rpresent-qml-host"),
+            "should handle root directory"
+        );
+    }
+}
+
+#[cfg(feature = "qml")]
 mod spawn {
     use rpresent_spotlight::QmlSpotlightOverlay;
 
@@ -78,3 +115,4 @@ mod spawn {
         // Drop sends Quit and joins child — test passes if no panic.
     }
 }
+
