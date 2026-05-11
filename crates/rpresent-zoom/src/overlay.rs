@@ -51,6 +51,13 @@ pub struct ZoomRect {
     pub height: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenshotPlacement {
+    pub translate_x: f32,
+    pub translate_y: f32,
+    pub scale: f32,
+}
+
 pub fn zoom_sample_rect(
     frame_width: u32,
     frame_height: u32,
@@ -69,6 +76,22 @@ pub fn zoom_sample_rect(
         top,
         width,
         height,
+    }
+}
+
+pub fn screenshot_placement(
+    screen_width: u32,
+    screen_height: u32,
+    scale: f32,
+    position: (f32, f32),
+) -> ScreenshotPlacement {
+    let center_x = screen_width as f32 * 0.5;
+    let center_y = screen_height as f32 * 0.5;
+
+    ScreenshotPlacement {
+        translate_x: center_x - position.0 * scale,
+        translate_y: center_y - position.1 * scale,
+        scale,
     }
 }
 

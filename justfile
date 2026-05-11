@@ -9,4 +9,4 @@ run-spotlight: run-daemon
     RUST_LOG=debug cargo run --package rpresent -- spot=toggle &
 
 run-zoom: run-daemon
-    RUST_LOG=debug cargo run --package rpresent -- zoom=toggle &
+    @echo "zoom mode starts from config"

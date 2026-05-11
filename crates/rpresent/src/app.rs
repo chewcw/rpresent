@@ -10,8 +10,8 @@ use rpresent_config::{
 use rpresent_spotlight::{SpotlightController, SpotlightRuntimeMessage};
 use rpresent_zoom::{ZoomAppearance, ZoomController, ZoomRuntimeMessage};
 
-use crate::command::AppCommand;
-use crate::input::AppEvent;
+use crate::command::{AppCommand, ZoomCommand};
+use crate::input::{ActiveMode, ActiveModeState, AppEvent};
 use crate::ipc;
 
 #[derive(Debug, Parser, Clone, PartialEq, Eq)]
@@ -184,6 +184,7 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
     let zoom_config = config.zoom.clone();
     let annotation_appearance = AnnotationAppearance::from(annotation_config.clone());
     let zoom_appearance = ZoomAppearance::from(zoom_config.clone());
+    let active_mode = active_mode_for_config(&config);
 
     // Forward IPC commands into unified event channel
     let event_tx_for_ipc = event_tx.clone();
@@ -201,7 +202,7 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
 
     // X11 input capture (Linux only)
     #[cfg(target_os = "linux")]
-    crate::x11_input::spawn(config.shortcuts.clone(), event_tx);
+    crate::x11_input::spawn(config.shortcuts.clone(), active_mode.clone(), event_tx);
     #[cfg(not(target_os = "linux"))]
     let _ = event_tx;
 
@@ -224,23 +225,32 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
 
         for event in event_rx {
             match event {
-                AppEvent::Command(AppCommand::Spotlight(command)) => {
-                    if spotlight_controller.apply(command) {
-                        let _ = spotlight_tx.send(SpotlightRuntimeMessage::Visibility(
-                            spotlight_controller.state(),
-                        ));
+                AppEvent::Command(command) => match command {
+                    AppCommand::Spotlight(command) => {
+                        active_mode.set(ActiveMode::Spotlight);
+
+                        if spotlight_controller.apply(command) {
+                            let _ = spotlight_tx.send(SpotlightRuntimeMessage::Visibility(
+                                spotlight_controller.state(),
+                            ));
+                        }
                     }
-                }
-                AppEvent::Command(AppCommand::Annotation(command)) => {
-                    if annotation_controller.apply(command) {
-                        let _ = annotation_tx.send(annotation_controller.state());
+                    AppCommand::Annotation(command) => {
+                        active_mode.set(ActiveMode::Annotation);
+
+                        if annotation_controller.apply(command) {
+                            let _ = annotation_tx.send(annotation_controller.state());
+                        }
                     }
-                }
-                AppEvent::Command(AppCommand::Zoom(command)) => {
-                    if let Some(message) = zoom_controller.apply(command) {
-                        let _ = zoom_tx.send(message);
+                    AppCommand::Zoom(command) => {
+                        let zoom_message = zoom_controller.apply(command);
+                        update_active_mode_for_zoom_command(&active_mode, command, zoom_message.as_ref());
+
+                        if let Some(message) = zoom_message {
+                            let _ = zoom_tx.send(message);
+                        }
                     }
-                }
+                },
                 AppEvent::Input(crate::input::InputAction::SpotlightWheel { delta }) => {
                     let _ = spotlight_tx.send(SpotlightRuntimeMessage::ResizeBy(delta * 12.0));
                 }
@@ -280,4 +290,128 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
     annotation_handle.join().unwrap()?;
     zoom_handle.join().unwrap()?;
     Ok(())
+}
+
+fn active_mode_for_config(config: &Config) -> ActiveModeState {
+    if config.annotation.enabled_on_start {
+        ActiveModeState::new(ActiveMode::Annotation)
+    } else if config.zoom.enabled_on_start {
+        ActiveModeState::new(ActiveMode::Zoom)
+    } else {
+        ActiveModeState::new(ActiveMode::Spotlight)
+    }
+}
+
+fn update_active_mode_for_zoom_command(
+    active_mode: &ActiveModeState,
+    command: ZoomCommand,
+    message: Option<&ZoomRuntimeMessage>,
+) {
+    match command {
+        ZoomCommand::On => active_mode.set(ActiveMode::Zoom),
+        ZoomCommand::Off => active_mode.set(ActiveMode::Spotlight),
+        ZoomCommand::Toggle => {
+            if let Some(ZoomRuntimeMessage::SetEnabled(enabled)) = message {
+                active_mode.set(if *enabled {
+                    ActiveMode::Zoom
+                } else {
+                    ActiveMode::Spotlight
+                });
+            }
+        }
+        ZoomCommand::Reset => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command::ZoomCommand;
+
+    #[test]
+    fn zoom_enabled_on_start_seeds_zoom_as_the_active_mode() {
+        let config = Config {
+            zoom: rpresent_config::ZoomConfig {
+                enabled_on_start: true,
+                ..rpresent_config::ZoomConfig::default()
+            },
+            ..Config::default()
+        };
+
+        let active_mode = active_mode_for_config(&config);
+
+        assert_eq!(active_mode.get(), ActiveMode::Zoom);
+    }
+
+    #[test]
+    fn annotation_enabled_on_start_seeds_annotation_as_the_active_mode() {
+        let config = Config {
+            annotation: rpresent_config::AnnotationConfig {
+                enabled_on_start: true,
+                ..rpresent_config::AnnotationConfig::default()
+            },
+            zoom: rpresent_config::ZoomConfig {
+                enabled_on_start: false,
+                ..rpresent_config::ZoomConfig::default()
+            },
+            ..Config::default()
+        };
+
+        let active_mode = active_mode_for_config(&config);
+
+        assert_eq!(active_mode.get(), ActiveMode::Annotation);
+    }
+
+    #[test]
+    fn annotation_enabled_on_start_takes_precedence_over_zoom_startup() {
+        let config = Config {
+            annotation: rpresent_config::AnnotationConfig {
+                enabled_on_start: true,
+                ..rpresent_config::AnnotationConfig::default()
+            },
+            zoom: rpresent_config::ZoomConfig {
+                enabled_on_start: true,
+                ..rpresent_config::ZoomConfig::default()
+            },
+            ..Config::default()
+        };
+
+        let active_mode = active_mode_for_config(&config);
+
+        assert_eq!(active_mode.get(), ActiveMode::Annotation);
+    }
+
+    #[test]
+    fn zoom_commands_update_the_active_mode_precisely() {
+        let active_mode = ActiveModeState::new(ActiveMode::Annotation);
+
+        update_active_mode_for_zoom_command(&active_mode, ZoomCommand::On, None);
+        assert_eq!(active_mode.get(), ActiveMode::Zoom);
+
+        update_active_mode_for_zoom_command(&active_mode, ZoomCommand::Off, None);
+        assert_eq!(active_mode.get(), ActiveMode::Spotlight);
+
+        update_active_mode_for_zoom_command(
+            &active_mode,
+            ZoomCommand::Toggle,
+            Some(&ZoomRuntimeMessage::SetEnabled(true)),
+        );
+        assert_eq!(active_mode.get(), ActiveMode::Zoom);
+
+        update_active_mode_for_zoom_command(
+            &active_mode,
+            ZoomCommand::Toggle,
+            Some(&ZoomRuntimeMessage::SetEnabled(false)),
+        );
+        assert_eq!(active_mode.get(), ActiveMode::Spotlight);
+
+        active_mode.set(ActiveMode::Annotation);
+        update_active_mode_for_zoom_command(
+            &active_mode,
+            ZoomCommand::Reset,
+            Some(&ZoomRuntimeMessage::Reset),
+        );
+
+        assert_eq!(active_mode.get(), ActiveMode::Annotation);
+    }
 }

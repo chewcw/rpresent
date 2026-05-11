@@ -1,4 +1,6 @@
-use rpresent_zoom::{ZoomAppearance, ZoomConfig, zoom_sample_rect};
+use rpresent_zoom::{
+    ScreenshotPlacement, ZoomAppearance, ZoomConfig, screenshot_placement,
+};
 
 #[test]
 fn overlay_defaults_match_the_mvp() {
@@ -10,15 +12,6 @@ fn overlay_defaults_match_the_mvp() {
     assert_eq!(appearance.pan_friction, 0.82);
     assert_eq!(appearance.scale_friction, 5.0);
     assert!(appearance.follow_cursor);
-}
-
-#[test]
-fn sample_rect_tracks_scale_and_clamps_to_bounds() {
-    let rect = zoom_sample_rect(1920, 1080, 2.0, (100.0, 100.0));
-    assert_eq!(rect.width, 960.0);
-    assert_eq!(rect.height, 540.0);
-    assert_eq!(rect.left, 0.0);
-    assert_eq!(rect.top, 0.0);
 }
 
 #[test]
@@ -44,11 +37,29 @@ fn zoom_appearance_from_config_matches_fields() {
 }
 
 #[test]
-fn sample_rect_clamps_pivot_to_bounds() {
-    let rect = zoom_sample_rect(1920, 1080, 2.0, (99999.0, 99999.0));
-    // At scale 2, width=960, height=540; max_left=960, max_top=540
-    assert_eq!(rect.left, 960.0);
-    assert_eq!(rect.top, 540.0);
-    assert_eq!(rect.width, 960.0);
-    assert_eq!(rect.height, 540.0);
+fn screenshot_placement_centers_the_frozen_frame_at_1x() {
+    let placement = screenshot_placement(1920, 1080, 1.0, (960.0, 540.0));
+
+    assert_eq!(
+        placement,
+        ScreenshotPlacement {
+            translate_x: 0.0,
+            translate_y: 0.0,
+            scale: 1.0,
+        }
+    );
+}
+
+#[test]
+fn screenshot_placement_preserves_drag_offset_at_1x() {
+    let placement = screenshot_placement(1920, 1080, 1.0, (1000.0, 500.0));
+
+    assert_eq!(
+        placement,
+        ScreenshotPlacement {
+            translate_x: -40.0,
+            translate_y: 40.0,
+            scale: 1.0,
+        }
+    );
 }

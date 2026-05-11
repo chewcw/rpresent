@@ -9,10 +9,11 @@ const BUTTON_LEFT: u8 = 1;
 #[cfg(target_os = "linux")]
 pub(crate) fn spawn(
     shortcuts: rpresent_config::ShortcutConfig,
+    active_mode: crate::input::ActiveModeState,
     tx: std::sync::mpsc::Sender<crate::input::AppEvent>,
 ) {
     std::thread::spawn(move || {
-        if let Err(e) = run_input_loop(shortcuts, tx) {
+        if let Err(e) = run_input_loop(shortcuts, active_mode, tx) {
             tracing::error!(error = %e, "X11 input loop failed");
         }
     });
@@ -21,6 +22,7 @@ pub(crate) fn spawn(
 #[cfg(target_os = "linux")]
 fn run_input_loop(
     shortcuts: rpresent_config::ShortcutConfig,
+    active_mode: crate::input::ActiveModeState,
     tx: std::sync::mpsc::Sender<crate::input::AppEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::collections::HashMap;
@@ -28,7 +30,7 @@ fn run_input_loop(
     use x11rb::protocol::Event;
     use x11rb::protocol::xproto::{ButtonIndex, ConnectionExt as _, EventMask, GrabMode, ModMask};
 
-    use crate::input::{ActiveMode, InputBindings, InputRouter};
+    use crate::input::{InputBindings, InputRouter};
 
     let (conn, screen_num) = x11rb::connect(None)?;
     let root = conn.setup().roots[screen_num].root;
@@ -82,19 +84,10 @@ fn run_input_loop(
         }
     }
 
-    // Passive grab Ctrl+wheel (buttons 4 and 5) globally on the root window.
+    // Passive grab the configured wheel shortcut globally on the root window.
     // ChangeWindowAttributes with BUTTON_PRESS only fires when the pointer is over the root
     // background; GrabButton is required to intercept wheel events over any window.
-    let wheel_grab_modifiers = [
-        ModMask::CONTROL,
-        ModMask::CONTROL | ModMask::LOCK,
-        ModMask::CONTROL | ModMask::M2,
-        ModMask::CONTROL | ModMask::M2 | ModMask::LOCK,
-        ModMask::CONTROL | ModMask::M5,
-        ModMask::CONTROL | ModMask::M5 | ModMask::LOCK,
-        ModMask::CONTROL | ModMask::M2 | ModMask::M5,
-        ModMask::CONTROL | ModMask::M2 | ModMask::M5 | ModMask::LOCK,
-    ];
+    let wheel_grab_modifiers = wheel_grab_modifiers_for_config(&shortcuts.wheel_modifier);
     for button in [ButtonIndex::M4, ButtonIndex::M5] {
         for modifiers in wheel_grab_modifiers {
             match conn.grab_button(
@@ -154,8 +147,16 @@ fn run_input_loop(
 
     conn.flush()?;
     let bindings = InputBindings::from(&shortcuts);
-    let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);
+    let router_active_mode = active_mode.clone();
+    let mut router = InputRouter::new(bindings, router_active_mode);
     let mut drag_active = false;
+
+    let grab_watcher_mode = active_mode.clone();
+    std::thread::spawn(move || {
+        if let Err(error) = run_zoom_wheel_grab_watcher(grab_watcher_mode) {
+            tracing::error!(error = %error, "zoom wheel grab watcher failed");
+        }
+    });
 
     loop {
         let event = conn.wait_for_event()?;
@@ -207,6 +208,178 @@ fn run_input_loop(
 }
 
 #[cfg(target_os = "linux")]
+fn run_zoom_wheel_grab_watcher(
+    active_mode: crate::input::ActiveModeState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use x11rb::connection::Connection as _;
+
+    let (conn, screen_num) = x11rb::connect(None)?;
+    let root = conn.setup().roots[screen_num].root;
+
+    let (mode, mut generation) = active_mode.snapshot();
+    let mut zoom_wheel_grabbed = false;
+    if sync_zoom_wheel_grab(&conn, root, &mut zoom_wheel_grabbed, mode)? {
+        active_mode.mark_applied(generation);
+    }
+    active_mode.enable_sync_wait();
+
+    loop {
+        let (next_mode, next_generation) = active_mode.wait_for_change(generation);
+        if sync_zoom_wheel_grab(&conn, root, &mut zoom_wheel_grabbed, next_mode)? {
+            active_mode.mark_applied(next_generation);
+        }
+        generation = next_generation;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn sync_zoom_wheel_grab(
+    connection: &impl x11rb::connection::Connection,
+    root: x11rb::protocol::xproto::Window,
+    zoom_wheel_grabbed: &mut bool,
+    active_mode: crate::input::ActiveMode,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    use x11rb::protocol::xproto::{ButtonIndex, ConnectionExt as _, EventMask, GrabMode};
+
+    let should_grab = active_mode == crate::input::ActiveMode::Zoom;
+    if should_grab == *zoom_wheel_grabbed {
+        return Ok(true);
+    }
+
+    let mut all_synced = true;
+
+    for button in [ButtonIndex::M4, ButtonIndex::M5] {
+        for modifiers in zoom_wheel_grab_modifiers() {
+            let result = if should_grab {
+                connection.grab_button(
+                    false,
+                    root,
+                    EventMask::BUTTON_PRESS,
+                    GrabMode::ASYNC,
+                    GrabMode::ASYNC,
+                    0u32,
+                    0u32,
+                    button,
+                    modifiers,
+                )
+            } else {
+                connection.ungrab_button(button, root, modifiers)
+            };
+
+            match result {
+                Ok(cookie) => {
+                    if let Err(error) = cookie.check() {
+                        all_synced = false;
+                        tracing::warn!(
+                            ?button,
+                            ?modifiers,
+                            ?error,
+                            "failed to sync zoom wheel shortcut"
+                        );
+                    }
+                }
+                Err(error) => {
+                    all_synced = false;
+                    tracing::warn!(
+                        ?button,
+                        ?modifiers,
+                        ?error,
+                        "failed to sync zoom wheel shortcut"
+                    );
+                }
+            }
+        }
+    }
+
+    connection.flush()?;
+    *zoom_wheel_grabbed = should_grab;
+    Ok(all_synced)
+}
+
+#[cfg(target_os = "linux")]
+fn zoom_wheel_grab_modifiers() -> [x11rb::protocol::xproto::ModMask; 8] {
+    use x11rb::protocol::xproto::ModMask;
+
+    [
+        ModMask::from(0u8),
+        ModMask::LOCK,
+        ModMask::M2,
+        ModMask::M2 | ModMask::LOCK,
+        ModMask::M5,
+        ModMask::M5 | ModMask::LOCK,
+        ModMask::M2 | ModMask::M5,
+        ModMask::M2 | ModMask::M5 | ModMask::LOCK,
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn wheel_grab_modifiers_for_config(
+    wheel_modifier: &str,
+) -> [x11rb::protocol::xproto::ModMask; 8] {
+    use x11rb::protocol::xproto::ModMask;
+
+    let base = match normalize_wheel_modifier(wheel_modifier) {
+        "Ctrl" => ModMask::CONTROL,
+        "Shift" => ModMask::SHIFT,
+        "Alt" => ModMask::M1,
+        "Meta" | "Super" => ModMask::M4,
+        other => {
+            tracing::warn!(modifier = other, "unsupported wheel modifier; defaulting to Control");
+            ModMask::CONTROL
+        }
+    };
+
+    [
+        base,
+        base | ModMask::LOCK,
+        base | ModMask::M2,
+        base | ModMask::M2 | ModMask::LOCK,
+        base | ModMask::M5,
+        base | ModMask::M5 | ModMask::LOCK,
+        base | ModMask::M2 | ModMask::M5,
+        base | ModMask::M2 | ModMask::M5 | ModMask::LOCK,
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn normalize_wheel_modifier(raw: &str) -> &str {
+    match raw {
+        "Control" => "Ctrl",
+        other => other,
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::{modifier_from_state, wheel_grab_modifiers_for_config, zoom_wheel_grab_modifiers};
+    use x11rb::protocol::xproto::{KeyButMask, ModMask};
+
+    #[test]
+    fn zoom_wheel_grab_modifiers_cover_lock_variants() {
+        let modifiers = zoom_wheel_grab_modifiers();
+
+        assert!(modifiers.contains(&ModMask::from(0u8)));
+        assert!(modifiers.contains(&ModMask::LOCK));
+        assert!(modifiers.contains(&(ModMask::M2 | ModMask::LOCK)));
+        assert!(modifiers.contains(&(ModMask::M5 | ModMask::LOCK)));
+    }
+
+    #[test]
+    fn configured_wheel_grab_modifiers_follow_the_modifier_name() {
+        let modifiers = wheel_grab_modifiers_for_config("Alt");
+
+        assert!(modifiers.contains(&ModMask::M1));
+        assert!(modifiers.contains(&(ModMask::M1 | ModMask::LOCK)));
+    }
+
+    #[test]
+    fn modifier_from_state_maps_alt_and_super() {
+        assert_eq!(modifier_from_state(KeyButMask::MOD1), "Alt");
+        assert_eq!(modifier_from_state(KeyButMask::MOD4), "Super");
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn build_keycode_map(
     connection: &impl x11rb::connection::Connection,
 ) -> std::collections::HashMap<u8, &'static str> {
@@ -245,6 +418,10 @@ fn modifier_from_state(state: x11rb::protocol::xproto::KeyButMask) -> &'static s
     use x11rb::protocol::xproto::KeyButMask;
     if state.contains(KeyButMask::CONTROL) {
         "Ctrl"
+    } else if state.contains(KeyButMask::MOD1) {
+        "Alt"
+    } else if state.contains(KeyButMask::MOD4) {
+        "Super"
     } else if state.contains(KeyButMask::SHIFT) {
         "Shift"
     } else {

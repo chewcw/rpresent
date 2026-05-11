@@ -90,16 +90,22 @@ When the daemon starts without a command it enters an idle loop — no overlay a
 
 **Activate zoom mode:**
 - Press `Ctrl+3` to toggle zoom mode on/off.
-- Or send a command directly: `cargo run -p rpresent -- zoom=on` / `zoom=off`.
+- Or send a command directly: `cargo run -p rpresent -- zoom=on` / `zoom=off` / `zoom=toggle`.
+- If `zoom.enabled_on_start = true`, the daemon starts in zoom mode immediately.
 
-**Change zoom level:**
-While in zoom mode, hold `Ctrl` and scroll the mouse wheel to increase or decrease the zoom scale.
+**Zoom behavior:**
+When zoom mode turns on, rpresent captures a fullscreen screenshot of the current X11 desktop and draws it over a black overlay.
+
+While zoom mode is active:
+- Drag with the left mouse button to move the frozen screenshot around.
+- Scroll the mouse wheel to increase or decrease the zoom scale.
+- Spotlight mode still requires the configured wheel modifier.
 
 **Reset zoom:**
 ```bash
 cargo run -p rpresent -- zoom=reset
 ```
-Restores the default scale and re-centers the magnified view.
+Restores the default scale and re-centers the frozen screenshot.
 
 **Known limitations:**
 - Linux/X11 only; Wayland is not supported.

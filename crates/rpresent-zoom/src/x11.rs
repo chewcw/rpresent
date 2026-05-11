@@ -7,12 +7,104 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::rust_connection::RustConnection;
 
+use crate::capture::{CapturedFrame, CaptureError, FrameSource, ZoomCapture};
 use crate::controller::{ZoomRuntimeConfig, ZoomRuntimeMessage};
-use crate::navigation::{Camera, MouseState, NavigationConfig, apply_follow_cursor};
-use crate::overlay::{zoom_sample_rect, OverlayError};
+use crate::navigation::{Camera, MouseState, NavigationConfig};
+use crate::overlay::{OverlayError, screenshot_placement};
+use crate::screenshot::{CaptureMode, ScreenshotState};
 
 fn runtime_error(error: impl std::fmt::Display) -> OverlayError {
     OverlayError::Runtime(error.to_string())
+}
+
+struct X11FrameSource {
+    connection: RustConnection,
+    root: Window,
+    screen_width: u16,
+    screen_height: u16,
+}
+
+impl X11FrameSource {
+    fn new(screen_width: u16, screen_height: u16) -> Result<Self, OverlayError> {
+        tracing::debug!(screen_width, screen_height, "connecting to X11 for zoom screenshot capture");
+
+        let (connection, screen_num) = x11rb::connect(None)
+            .inspect_err(|e| tracing::error!(?e, "failed to connect to X11 for zoom screenshot capture"))
+            .map_err(runtime_error)?;
+
+        let root = connection.setup().roots[screen_num].root;
+
+        Ok(Self {
+            connection,
+            root,
+            screen_width,
+            screen_height,
+        })
+    }
+}
+
+impl FrameSource for X11FrameSource {
+    fn capture_frame(&mut self) -> Result<CapturedFrame, CaptureError> {
+        capture_root_frame(
+            &self.connection,
+            self.root,
+            self.screen_width,
+            self.screen_height,
+        )
+    }
+}
+
+fn capture_root_frame(
+    connection: &impl Connection,
+    root: Window,
+    screen_width: u16,
+    screen_height: u16,
+) -> Result<CapturedFrame, CaptureError> {
+    if screen_height == 0 {
+        return Err(CaptureError::Backend("captured image has zero height".to_owned()));
+    }
+
+    let captured = connection
+        .get_image(
+            ImageFormat::Z_PIXMAP,
+            root,
+            0,
+            0,
+            screen_width,
+            screen_height,
+            !0u32,
+        )
+        .map_err(|error| CaptureError::Backend(error.to_string()))?
+        .reply()
+        .map_err(|error| CaptureError::Backend(error.to_string()))?;
+
+
+    let row_bytes = screen_width as usize * 4;
+    let src_stride = captured.data.len() / screen_height as usize;
+    if src_stride < row_bytes || captured.data.len() < src_stride * screen_height as usize {
+        return Err(CaptureError::Backend(
+            "unexpected XImage row layout for zoom screenshot capture".to_owned(),
+        ));
+    }
+
+    let mut rgba = vec![0u8; row_bytes * screen_height as usize];
+    for row in 0..screen_height as usize {
+        let src_start = row * src_stride;
+        let src_end = src_start + row_bytes;
+        let dst_start = row * row_bytes;
+        let dst_end = dst_start + row_bytes;
+        rgba[dst_start..dst_end].copy_from_slice(&captured.data[src_start..src_end]);
+    }
+
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel[3] = 255;
+    }
+
+    Ok(CapturedFrame::new(
+        screen_width as u32,
+        screen_height as u32,
+        rgba,
+    ))
 }
 
 /// Find an ARGB32 visual via XRender; fall back to root visual.
@@ -65,7 +157,7 @@ fn choose_visual(
 
 pub(crate) struct X11ZoomOverlay {
     connection: RustConnection,
-    root: Window,
+    capture: ZoomCapture<X11FrameSource>,
     window: Window,
     gc: Gcontext,
     depth: u8,
@@ -76,10 +168,10 @@ pub(crate) struct X11ZoomOverlay {
     camera: Camera,
     dragging: bool,
     last_cursor: (f32, f32),
+    capture_state: ScreenshotState,
+    cached_frame: Option<CapturedFrame>,
     /// Reusable upload buffer; allocated once on first render.
     image_buffer: Option<Image<'static>>,
-    /// Reusable source buffer for captured region (RGBA/BGRA bytes).
-    src_storage: Vec<u8>,
     /// Reusable scaled frame pixmap at full screen size.
     scaled_frame: Option<tiny_skia::Pixmap>,
     visible: bool,
@@ -97,6 +189,10 @@ impl X11ZoomOverlay {
         let screen_width = screen.width_in_pixels;
         let screen_height = screen.height_in_pixels;
         let root = screen.root;
+        let capture = ZoomCapture::new(
+            X11FrameSource::new(screen_width, screen_height)
+                .inspect_err(|e| tracing::error!(?e, "failed to create zoom screenshot capture source"))?,
+        );
 
         let (depth, visual_id) = choose_visual(&connection, screen_num)
             .inspect_err(|e| tracing::error!(?e, "failed to choose ARGB32 visual for zoom"))?;
@@ -172,7 +268,6 @@ impl X11ZoomOverlay {
 
         Ok(Self {
             connection,
-            root,
             window,
             gc,
             depth,
@@ -181,10 +276,12 @@ impl X11ZoomOverlay {
             enabled: false,
             runtime,
             camera,
+            capture,
             dragging: false,
             last_cursor: center,
+            capture_state: ScreenshotState::new(CaptureMode::Static),
+            cached_frame: None,
             image_buffer: None,
-            src_storage: Vec::new(),
             scaled_frame: None,
             visible: false,
         })
@@ -214,17 +311,6 @@ impl X11ZoomOverlay {
         Ok(())
     }
 
-    /// Query cursor position on the root window.
-    pub(crate) fn query_pointer(&self) -> Result<(f32, f32), OverlayError> {
-        let reply = self
-            .connection
-            .query_pointer(self.root)
-            .map_err(runtime_error)?
-            .reply()
-            .map_err(runtime_error)?;
-        Ok((reply.root_x as f32, reply.root_y as f32))
-    }
-
     pub(crate) fn apply_message(&mut self, message: ZoomRuntimeMessage) -> Result<(), OverlayError> {
         match message {
             ZoomRuntimeMessage::Configure(runtime) => {
@@ -235,11 +321,18 @@ impl X11ZoomOverlay {
                 self.dragging = false;
             }
             ZoomRuntimeMessage::SetEnabled(enabled) => {
-                self.enabled = enabled;
                 if enabled {
+                    self.capture_state.request_refresh();
+                    if self.capture_state.should_refresh(0.0) {
+                        let frame = self.capture.next_frame().map_err(runtime_error)?;
+                        self.cached_frame = Some(frame);
+                    }
+                    self.enabled = true;
                     self.show()?;
                 } else {
+                    self.enabled = false;
                     self.dragging = false;
+                    self.cached_frame = None;
                     self.hide()?;
                 }
             }
@@ -277,10 +370,6 @@ impl X11ZoomOverlay {
             return Ok(());
         }
 
-        if self.runtime.follow_cursor && let Ok(pointer) = self.query_pointer() {
-            apply_follow_cursor(&mut self.camera, pointer, true, self.dragging);
-        }
-
         let nav_cfg = NavigationConfig {
             min_scale: self.runtime.min_scale,
             max_scale: self.runtime.max_scale,
@@ -297,70 +386,17 @@ impl X11ZoomOverlay {
             (self.screen_width as f32, self.screen_height as f32),
         );
 
-        let min_x = self.screen_width as f32 / (2.0 * self.camera.scale.max(1e-6));
-        let max_x = self.screen_width as f32 - min_x;
-        let min_y = self.screen_height as f32 / (2.0 * self.camera.scale.max(1e-6));
-        let max_y = self.screen_height as f32 - min_y;
-        self.camera.position.0 = self.camera.position.0.clamp(min_x, max_x);
-        self.camera.position.1 = self.camera.position.1.clamp(min_y, max_y);
-
         self.render_current_frame()
     }
 
     fn render_current_frame(&mut self) -> Result<(), OverlayError> {
-        let rect = zoom_sample_rect(
-            self.screen_width as u32,
-            self.screen_height as u32,
-            self.camera.scale,
-            self.camera.position,
-        );
+        let frame = self
+            .cached_frame
+            .as_ref()
+            .ok_or_else(|| OverlayError::Runtime("zoom screenshot is missing".to_owned()))?;
 
-        let src_x = rect.left as i16;
-        let src_y = rect.top as i16;
-        let src_w = (rect.width as u16).max(1);
-        let src_h = (rect.height as u16).max(1);
-
-        tracing::trace!(
-            src_x,
-            src_y,
-            src_w,
-            src_h,
-            scale = self.camera.scale,
-            "capturing zoom source region"
-        );
-
-        // Capture source region from root window (ZPixmap = packed pixels).
-        let captured = self
-            .connection
-            .get_image(
-                ImageFormat::Z_PIXMAP,
-                self.root,
-                src_x,
-                src_y,
-                src_w,
-                src_h,
-                !0u32,
-            )
-            .inspect_err(|e| tracing::error!(?e, "get_image failed for zoom capture"))
-            .map_err(runtime_error)?
-            .reply()
-            .map_err(runtime_error)?;
-
-        let dst_w = self.screen_width as usize;
-        let dst_h = self.screen_height as usize;
-
-        // Stride may include scanline padding; compute per-row byte count.
-        if src_h == 0 {
-            return Err(OverlayError::Runtime("captured image has zero height".to_owned()));
-        }
-        let src_stride = captured.data.len() / src_h as usize;
-        let src_row_bytes = src_w as usize * 4;
-        let src_required = src_stride.saturating_mul(src_h as usize);
-        if src_stride < src_row_bytes || captured.data.len() < src_required {
-            return Err(OverlayError::Runtime(
-                "unexpected XImage row layout for 32-bit zoom path".to_owned(),
-            ));
-        }
+        let src_pixmap = tiny_skia::PixmapRef::from_bytes(&frame.rgba, frame.width, frame.height)
+            .ok_or_else(|| OverlayError::Runtime("failed to create source pixmap".to_owned()))?;
 
         // Allocate upload buffer once (screen size is fixed for the session).
         if self.image_buffer.is_none() {
@@ -380,22 +416,6 @@ impl X11ZoomOverlay {
             self.scaled_frame = Some(pixmap);
         }
 
-        let src_len = src_w as usize * src_h as usize * 4;
-        if self.src_storage.len() != src_len {
-            self.src_storage.resize(src_len, 0);
-        }
-
-        for sy in 0..src_h as usize {
-            let src_row_start = sy * src_stride;
-            let src_row_end = src_row_start + src_row_bytes;
-            let dst_row_start = sy * src_row_bytes;
-            let dst_row_end = dst_row_start + src_row_bytes;
-            self.src_storage[dst_row_start..dst_row_end]
-                .copy_from_slice(&captured.data[src_row_start..src_row_end]);
-        }
-
-        let src_pixmap = tiny_skia::PixmapRef::from_bytes(&self.src_storage, src_w as u32, src_h as u32)
-            .ok_or_else(|| OverlayError::Runtime("failed to create source pixmap".to_owned()))?;
         let dst_pixmap = self
             .scaled_frame
             .as_mut()
@@ -403,36 +423,38 @@ impl X11ZoomOverlay {
 
         let mut paint = tiny_skia::PixmapPaint::default();
         paint.quality = tiny_skia::FilterQuality::Bilinear;
-        let scale_x = self.screen_width as f32 / src_w as f32;
-        let scale_y = self.screen_height as f32 / src_h as f32;
-        dst_pixmap.fill(tiny_skia::Color::from_rgba8(0, 0, 0, 255));
-        dst_pixmap.draw_pixmap(
-            0,
-            0,
-            src_pixmap,
-            &paint,
-            tiny_skia::Transform::from_scale(scale_x, scale_y),
-            None,
+        let placement = screenshot_placement(
+            self.screen_width as u32,
+            self.screen_height as u32,
+            self.camera.scale,
+            self.camera.position,
         );
+        let transform = tiny_skia::Transform::from_scale(placement.scale, placement.scale)
+            .post_translate(placement.translate_x, placement.translate_y);
+
+        dst_pixmap.fill(tiny_skia::Color::from_rgba8(0, 0, 0, 255));
+        dst_pixmap.draw_pixmap(0, 0, src_pixmap, &paint, transform, None);
 
         let dst_pixels = dst_pixmap.data();
         let buffer = self
             .image_buffer
             .as_mut()
             .expect("image buffer was just allocated");
-        // Destination stride may also include padding.
-        let dst_stride = buffer.data().len() / dst_h;
+        let dst_h = self.screen_height as usize;
+        let dst_w = self.screen_width as usize;
         let dst_row_bytes = dst_w * 4;
+        let dst_stride = buffer.data().len() / dst_h;
         if dst_stride < dst_row_bytes {
             return Err(OverlayError::Runtime(
                 "unexpected destination image stride for 32-bit zoom path".to_owned(),
             ));
         }
+
         let buf_data = buffer.data_mut();
-        for dy in 0..dst_h {
-            let src_row_start = dy * dst_row_bytes;
+        for row in 0..dst_h {
+            let src_row_start = row * dst_row_bytes;
             let src_row_end = src_row_start + dst_row_bytes;
-            let dst_row_start = dy * dst_stride;
+            let dst_row_start = row * dst_stride;
             let dst_row_end = dst_row_start + dst_row_bytes;
             buf_data[dst_row_start..dst_row_end]
                 .copy_from_slice(&dst_pixels[src_row_start..src_row_end]);
