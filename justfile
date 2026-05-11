@@ -7,3 +7,6 @@ run-daemon:
 
 run-spotlight: run-daemon
     RUST_LOG=debug cargo run --package rpresent -- spot=toggle &
+
+run-zoom: run-daemon
+    RUST_LOG=debug cargo run --package rpresent -- zoom=toggle &
