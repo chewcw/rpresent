@@ -4,12 +4,13 @@
 
 ## Workspace Layout
 
-This repository is a Rust workspace with five crates:
+This repository is a Rust workspace with six crates:
 
 - `crates/rpresent-config` - shared TOML config loading, defaults, and config-file writing
 - `crates/rpresent-spotlight` - spotlight state and overlay rendering
 - `crates/rpresent-annotation` - drawing tools and stroke history
 - `crates/rpresent-zoom` - live capture and magnified rendering
+- `crates/rpresent-qml-host` - Cargo wrapper and native build pipeline for the Qt QML host
 - `crates/rpresent` - CLI, IPC, shortcut routing, and runtime composition
 
 ## Requirements
