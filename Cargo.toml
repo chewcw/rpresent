@@ -4,6 +4,7 @@ members = [
 	"crates/rpresent-spotlight",
 	"crates/rpresent-annotation",
 	"crates/rpresent-zoom",
+	"crates/rpresent-qml-host",
 	"crates/rpresent",
 ]
 default-members = ["crates/rpresent"]
