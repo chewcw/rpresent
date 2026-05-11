@@ -46,6 +46,18 @@ Format the code:
 cargo fmt
 ```
 
+## Optional: QML Rendering Support
+
+The spotlight overlay includes optional QML rendering support for advanced visual effects. To build with QML support:
+
+```bash
+cargo build --workspace --features qml
+cargo install --path crates/rpresent
+cargo install --path crates/rpresent-qml-host
+```
+
+The `rpresent-qml-host` binary must be installed alongside `rpresent` for QML rendering to function.
+
 ## Run
 
 Show the CLI help:
