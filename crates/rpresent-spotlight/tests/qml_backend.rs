@@ -114,5 +114,16 @@ mod spawn {
         let _overlay = QmlSpotlightOverlay::new().expect("QML overlay creation should succeed");
         // Drop sends Quit and joins child — test passes if no panic.
     }
+
+    /// Verifies colocated executable discovery and launch.
+    /// Requires `rpresent-qml-host` to be colocated with the rpresent binary.
+    /// Run after building: `cargo build -p rpresent-qml-host` and ensuring
+    /// rpresent-qml-host is in the same directory as the rpresent binary.
+    #[test]
+    #[ignore]
+    fn colocated_qml_host_launch() {
+        let _overlay = QmlSpotlightOverlay::new().expect("QML overlay creation should succeed");
+        // Drop sends Quit and joins child — test passes if no panic.
+    }
 }
 
