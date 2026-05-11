@@ -7,6 +7,21 @@ fn run(cmd: &mut Command) {
     assert!(status.success(), "command failed: {cmd:?}");
 }
 
+fn emit_rerun_for_tree(root: &Path) {
+    println!("cargo:rerun-if-changed={}", root.display());
+
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                emit_rerun_for_tree(&path);
+            } else {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+    }
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let workspace_root = manifest_dir.parent().and_then(Path::parent).unwrap().to_path_buf();
@@ -15,10 +30,7 @@ fn main() {
     let build_dir = out_dir.join("qml-host-build");
     let native_out = out_dir.join("rpresent-qml-host-native");
 
-    println!("cargo:rerun-if-changed={}", tool_src.join("CMakeLists.txt").display());
-    println!("cargo:rerun-if-changed={}", tool_src.join("main.cpp").display());
-    println!("cargo:rerun-if-changed={}", tool_src.join("qml.qrc").display());
-    println!("cargo:rerun-if-changed={}", tool_src.join("qml/main.qml").display());
+    emit_rerun_for_tree(&tool_src);
 
     run(Command::new("cmake")
         .arg("-S")
