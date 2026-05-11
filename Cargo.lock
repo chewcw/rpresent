@@ -2148,6 +2148,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpresent-qml-host"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "rpresent-spotlight"
 version = "0.1.0"
 dependencies = [
