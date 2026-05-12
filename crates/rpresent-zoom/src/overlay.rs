@@ -44,39 +44,10 @@ impl From<rpresent_config::ZoomConfig> for ZoomAppearance {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ZoomRect {
-    pub left: f32,
-    pub top: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScreenshotPlacement {
     pub translate_x: f32,
     pub translate_y: f32,
     pub scale: f32,
-}
-
-pub fn zoom_sample_rect(
-    frame_width: u32,
-    frame_height: u32,
-    scale: f32,
-    position: (f32, f32),
-) -> ZoomRect {
-    let width = frame_width as f32 / scale;
-    let height = frame_height as f32 / scale;
-    let max_left = (frame_width as f32 - width).max(0.0);
-    let max_top = (frame_height as f32 - height).max(0.0);
-    let left = (position.0 - width / 2.0).clamp(0.0, max_left);
-    let top = (position.1 - height / 2.0).clamp(0.0, max_top);
-
-    ZoomRect {
-        left,
-        top,
-        width,
-        height,
-    }
 }
 
 pub fn screenshot_placement(

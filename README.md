@@ -94,7 +94,7 @@ When the daemon starts without a command it enters an idle loop — no overlay a
 - If `zoom.enabled_on_start = true`, the daemon starts in zoom mode immediately.
 
 **Zoom behavior:**
-When zoom mode turns on, rpresent captures a fullscreen screenshot of the current X11 desktop and draws it over a black overlay.
+When zoom mode turns on, rpresent captures a fullscreen screenshot of the current X11 desktop once and draws it over a black overlay using GLX/OpenGL.
 
 While zoom mode is active:
 - Drag with the left mouse button to move the frozen screenshot around.
@@ -108,6 +108,7 @@ cargo run -p rpresent -- zoom=reset
 Restores the default scale and re-centers the frozen screenshot.
 
 **Known limitations:**
+- Zoom requires a working X11 session with GLX/OpenGL support and a compositor that can blend the overlay window.
 - Linux/X11 only; Wayland is not supported.
 - An ARGB32-capable compositor must be running (e.g., picom, compton, KWin, Mutter) for overlay transparency to render correctly.
 

@@ -10,3 +10,6 @@ run-spotlight: run-daemon
 
 run-zoom: run-daemon
     @echo "zoom mode starts from config"
+    RUST_LOG=debug cargo run --package rpresent -- zoom=on &
+    sleep 10
+    pkill -SIGUSR1 rpresent
