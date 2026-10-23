@@ -289,6 +289,11 @@ impl X11SpotlightOverlay {
         let spec = overlay_window_spec((screen.width_in_pixels, screen.height_in_pixels));
         let transparent = spec.input_transparent && depth == 32;
 
+        // X11 colormap: a lookup table mapping pixel values to RGB colors.
+        // For our direct-color ARGB visual the color lives inside the pixel
+        // bits themselves (red/green/blue/alpha from choose_visual), so the
+        // colormap is not consulted at draw time. X11 still requires every
+        // window to carry one, so we create it here and attach it below.
         let colormap = connection
             .generate_id()
             .inspect_err(|error| {
@@ -299,6 +304,11 @@ impl X11SpotlightOverlay {
                 );
             })
             .map_err(runtime_error)?;
+        // ColormapAlloc::NONE: create the colormap but pre-allocate no color
+        // cells. Direct-color visuals never ask the server for color slots,
+        // so there is nothing to reserve. This matches the ARGB pixel format
+        // chosen in choose_visual(), where full RGBA is stored directly in
+        // each 32-bit pixel rather than looked up from a table.
         connection
             .create_colormap(ColormapAlloc::NONE, colormap, screen.root, visual_id)
             .inspect_err(|error| {
@@ -320,6 +330,9 @@ impl X11SpotlightOverlay {
                 screen.black_pixel
             })
             .border_pixel(screen.black_pixel)
+            // Bind the colormap to the window so the server knows which
+            // color interpretation applies. For our direct-color visual this
+            // is a formality: the pixel bits already encode full RGBA.
             .colormap(colormap);
 
         connection
