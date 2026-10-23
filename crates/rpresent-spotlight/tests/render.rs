@@ -1,5 +1,5 @@
 use rpresent_config::{SpotShape, SpotlightConfig};
-use rpresent_spotlight::{CursorPosition, build_projecteur_frame};
+use rpresent_spotlight::{CursorPosition, build_projecteur_frame, build_projecteur_frame_rect};
 
 // Surface: 400×300, cursor at centre (200,150), spot_size_pct=40
 //   radius = floor(300 * 40 / 100) = 120 px
@@ -183,4 +183,60 @@ fn frame_dimensions_match_surface_size() {
     assert_eq!(frame.width, W);
     assert_eq!(frame.height, H);
     assert_eq!(frame.pixels.len(), W as usize * H as usize * 4);
+}
+
+// ─────────────────────────── Damage rectangle ────────────────────────────
+
+#[test]
+fn damage_rect_frame_matches_the_same_region_of_the_full_frame() {
+    let mut config = base_config();
+    config.show_center_dot = false;
+    let full = build_projecteur_frame((W, H), CURSOR, &config);
+    let patch = build_projecteur_frame_rect((W, H), (70, 20, 260, 260), CURSOR, &config);
+
+    assert_eq!((patch.width, patch.height), (260, 260));
+    // Patch origin (70,20) puts the cursor at local (130,130); the hole must
+    // still be transparent there.
+    assert_eq!(patch.bgra_at(130, 130)[3], 0);
+
+    for y in 0..260u16 {
+        for x in 0..260u16 {
+            assert_eq!(
+                patch.bgra_at(x, y),
+                full.bgra_at(70 + x, 20 + y),
+                "patch pixel ({x}, {y}) differs from the full frame"
+            );
+        }
+    }
+}
+
+#[test]
+fn damage_rect_outside_the_spotlight_is_filled_with_shade() {
+    let config = base_config();
+    let patch = build_projecteur_frame_rect((W, H), (0, 0, 50, 50), CURSOR, &config);
+    let expected = (0.6_f32 * 255.0).round() as u8;
+
+    for y in 0..50u16 {
+        for x in 0..50u16 {
+            assert_eq!(
+                patch.bgra_at(x, y)[3],
+                expected,
+                "patch pixel ({x}, {y}) must be repainted with the shade colour"
+            );
+        }
+    }
+}
+
+#[test]
+fn damage_rect_outside_the_spotlight_is_transparent_when_the_shade_is_off() {
+    let mut config = base_config();
+    config.show_spot_shade = false;
+    config.show_border = false;
+    let patch = build_projecteur_frame_rect((W, H), (0, 0, 50, 50), CURSOR, &config);
+
+    for y in 0..50u16 {
+        for x in 0..50u16 {
+            assert_eq!(patch.bgra_at(x, y), [0, 0, 0, 0]);
+        }
+    }
 }

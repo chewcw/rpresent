@@ -12,4 +12,4 @@ pub use overlay::{
     CursorPosition, OverlayError, SpotlightFrame, SpotlightRuntimeMessage, run_overlay,
     spotlight_alpha,
 };
-pub use render::build_projecteur_frame;
+pub use render::{build_projecteur_frame, build_projecteur_frame_rect};

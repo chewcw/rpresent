@@ -1,7 +1,7 @@
 //! Pure Rust spotlight frame compositor, mirroring Projecteur's QML overlay pipeline.
 //!
 //! Composition order (identical to Projecteur's QML scene):
-//!  1. Fill the entire surface with the shade colour (if `show_spot_shade`).
+//!  1. Fill the damage rectangle with the shade colour (if `show_spot_shade`).
 //!  2. Cut a transparent hole at the outer spotlight shape (if `show_spot_shade`).
 //!  3. Draw the border ring — outer shape minus inner shape — via EvenOdd fill (if `show_border`).
 //!  4. Draw the centre dot (if `show_center_dot`).
@@ -21,7 +21,7 @@ const MIN_SPOT_RADIUS: f32 = 25.0;
 
 /// Compute spotlight radius from screen height and the percentage setting.
 /// Formula: `max(floor(height * pct / 100), MIN_SPOT_RADIUS)`.
-fn spot_radius_px(surface_height: u16, spot_size_pct: u32) -> f32 {
+pub(crate) fn spot_radius_px(surface_height: u16, spot_size_pct: u32) -> f32 {
     (surface_height as f32 * spot_size_pct as f32 / 100.0)
         .floor()
         .max(MIN_SPOT_RADIUS)
@@ -140,7 +140,7 @@ fn add_ngon(pb: &mut PathBuilder, cx: f32, cy: f32, r: f32, sides: u32) {
 
 // ──────────────────────────────────────────────────── main entry point ──
 
-/// Build a Projecteur-style spotlight frame.
+/// Build a full-surface Projecteur-style spotlight frame.
 ///
 /// The returned [`SpotlightFrame`] stores pixels in **BGRA** premultiplied byte order, matching
 /// the X11 32-bit visual (`blue_shift=0, red_shift=16, alpha_shift=24`).
@@ -150,13 +150,37 @@ pub fn build_projecteur_frame(
     config: &SpotlightConfig,
 ) -> SpotlightFrame {
     let (width, height) = surface_size;
-    let mut pixmap =
-        Pixmap::new(width as u32, height as u32).expect("surface dimensions are non-zero");
+    build_projecteur_frame_rect(surface_size, (0, 0, width, height), cursor, config)
+}
 
-    let cx = cursor.x as f32;
-    let cy = cursor.y as f32;
-    let radius = spot_radius_px(height, config.spot_size_pct);
-    let transform = Transform::identity();
+/// Build the spotlight pixels for `damage_rect` only.
+///
+/// `damage_rect` is `(x, y, width, height)` in surface pixels. The returned frame is exactly
+/// the size of that rectangle, so the caller blits it at `(x, y)`.
+///
+/// Every pixel in the rectangle is rewritten: pixels outside the spotlight receive the shade
+/// colour, or transparent black when `show_spot_shade` is false. That rewrite erases the hole
+/// left at the previous cursor position.
+pub fn build_projecteur_frame_rect(
+    surface_size: (u16, u16),
+    damage_rect: (i16, i16, u16, u16),
+    cursor: CursorPosition,
+    config: &SpotlightConfig,
+) -> SpotlightFrame {
+    let (rect_x, rect_y, width, height) = damage_rect;
+    assert!(
+        width > 0 && height > 0,
+        "damage rectangle must have non-zero dimensions"
+    );
+    let mut pixmap = Pixmap::new(u32::from(width), u32::from(height))
+        .expect("damage rectangle dimensions are non-zero");
+
+    // Build identical paths for full frames and patches. Translating the finished
+    // paths avoids rounding differences from rebuilding curves around a local cursor.
+    let cx = f32::from(cursor.x);
+    let cy = f32::from(cursor.y);
+    let radius = spot_radius_px(surface_size.1, config.spot_size_pct);
+    let transform = Transform::from_translate(-f32::from(rect_x), -f32::from(rect_y));
 
     // ── 1. Shade layer ────────────────────────────────────────────────────
     if config.show_spot_shade {
@@ -213,13 +237,7 @@ pub fn build_projecteur_frame(
                     anti_alias: true,
                     ..Paint::default()
                 };
-                pixmap.fill_path(
-                    &path,
-                    &paint,
-                    FillRule::Winding,
-                    Transform::identity(),
-                    None,
-                );
+                pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
             }
         }
     }
