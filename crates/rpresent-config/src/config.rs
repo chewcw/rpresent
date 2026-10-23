@@ -70,8 +70,6 @@ pub struct SpotlightConfig {
     pub spot_size_pct: u32,
     #[serde(default)]
     pub shape: SpotShape,
-    #[serde(default = "default_spot_rotation_deg")]
-    pub spot_rotation_deg: f32,
     #[serde(default = "default_show_center_dot")]
     pub show_center_dot: bool,
     #[serde(default = "default_dot_size_px")]
@@ -149,7 +147,6 @@ impl Default for SpotlightConfig {
             show_spot_shade: default_show_spot_shade(),
             spot_size_pct: default_spot_size_pct(),
             shape: SpotShape::default(),
-            spot_rotation_deg: default_spot_rotation_deg(),
             show_center_dot: default_show_center_dot(),
             dot_size_px: default_dot_size_px(),
             dot_color: default_dot_color(),
@@ -314,10 +311,6 @@ fn default_show_spot_shade() -> bool {
 
 fn default_spot_size_pct() -> u32 {
     30
-}
-
-fn default_spot_rotation_deg() -> f32 {
-    0.0
 }
 
 fn default_show_center_dot() -> bool {

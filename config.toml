@@ -5,7 +5,6 @@ socket_name = "rpresent.sock"
 enabled_on_start = false
 show_spot_shade = true
 spot_size_pct = 10
-spot_rotation_deg = 0.0
 show_center_dot = true
 dot_size_px = 8
 dot_color = "#ffffff"

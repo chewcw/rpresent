@@ -45,7 +45,6 @@ fn parses_module_sections_and_applies_defaults() {
     assert!(config.spotlight.show_spot_shade);
     assert_eq!(config.spotlight.spot_size_pct, 30);
     assert_eq!(config.spotlight.shape, SpotShape::Circle);
-    assert!((config.spotlight.spot_rotation_deg - 0.0).abs() < f32::EPSILON);
     assert!(config.spotlight.show_center_dot);
     assert_eq!(config.spotlight.dot_size_px, 8);
     assert_eq!(config.spotlight.dot_color, "#ffffff");
@@ -75,6 +74,12 @@ fn parses_module_sections_and_applies_defaults() {
 #[test]
 fn rejects_unknown_keys() {
     let error = load_from_str("[spotlight]\nunknown = 1").unwrap_err();
+    assert!(error.to_string().contains("unknown field"));
+}
+
+#[test]
+fn rotation_is_no_longer_a_spotlight_config_key() {
+    let error = load_from_str("[spotlight]\nspot_rotation_deg = 45.0").unwrap_err();
     assert!(error.to_string().contains("unknown field"));
 }
 

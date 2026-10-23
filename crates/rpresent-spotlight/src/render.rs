@@ -39,21 +39,6 @@ fn parse_hex(hex: &str) -> (u8, u8, u8) {
     (r, g, b)
 }
 
-/// Build a rotation `Transform` around `(cx, cy)` by `angle_deg` degrees.
-fn rotation_around(angle_deg: f32, cx: f32, cy: f32) -> Transform {
-    if angle_deg.abs() < f32::EPSILON {
-        return Transform::identity();
-    }
-    let (sin, cos) = angle_deg.to_radians().sin_cos();
-    // Affine rotation-around-point matrix:
-    //   [ cos  -sin  cx - cx*cos + cy*sin ]
-    //   [ sin   cos  cy - cx*sin - cy*cos ]
-    let tx = cx - cx * cos + cy * sin;
-    let ty = cy - cx * sin - cy * cos;
-    // from_row(sx, ky, kx, sy, tx, ty)
-    Transform::from_row(cos, sin, -sin, cos, tx, ty)
-}
-
 /// Add the outline for `shape` centred at `(cx, cy)` with outer `radius` to `pb`.
 /// Returns `false` and adds nothing if the radius is below the sub-pixel threshold.
 fn add_shape(pb: &mut PathBuilder, shape: SpotShape, cx: f32, cy: f32, radius: f32) -> bool {
@@ -171,7 +156,7 @@ pub fn build_projecteur_frame(
     let cx = cursor.x as f32;
     let cy = cursor.y as f32;
     let radius = spot_radius_px(height, config.spot_size_pct);
-    let transform = rotation_around(config.spot_rotation_deg, cx, cy);
+    let transform = Transform::identity();
 
     // ── 1. Shade layer ────────────────────────────────────────────────────
     if config.show_spot_shade {

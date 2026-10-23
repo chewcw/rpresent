@@ -233,9 +233,8 @@ enum RenderStrategy {
 
 fn select_render_strategy(config: &rpresent_config::SpotlightConfig) -> RenderStrategy {
     let is_circle = matches!(config.shape, rpresent_config::SpotShape::Circle);
-    let rotated = config.spot_rotation_deg != 0.0;
 
-    if is_circle && !rotated {
+    if is_circle {
         RenderStrategy::XrenderRadial
     } else {
         RenderStrategy::SoftwareFrame
@@ -951,18 +950,6 @@ mod tests {
         assert!(matches!(
             select_render_strategy(&config),
             RenderStrategy::XrenderRadial
-        ));
-    }
-
-    #[test]
-    fn rotated_circle_falls_back_to_software() {
-        let config = rpresent_config::SpotlightConfig {
-            spot_rotation_deg: 45.0,
-            ..rpresent_config::SpotlightConfig::default()
-        };
-        assert!(matches!(
-            select_render_strategy(&config),
-            RenderStrategy::SoftwareFrame
         ));
     }
 
