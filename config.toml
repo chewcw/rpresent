@@ -6,16 +6,16 @@ enabled_on_start = false
 show_spot_shade = true
 show_center_dot = true
 dot_size_px = 8
-dot_color = "#ffffff"
+dot_color = "#ff0000"
 dot_opacity = 0.8
 shade_color = "#000000"
-shade_opacity = 1.0
-show_border = true
+shade_opacity = 0.95
+show_border = false
 border_color = "#bada55"
-border_size_pct = 10
-border_opacity = 0.8
+border_size_pct = 2
+border_opacity = 0.3
 wheel_speed = 60.0
-softness_px = 50
+softness_px = 20
 radius_px = 150
 
 [spotlight.shape]
