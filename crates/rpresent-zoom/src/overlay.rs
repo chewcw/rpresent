@@ -1,42 +1,7 @@
 use crossbeam_channel::Receiver;
+use std::sync::Arc;
 
 use crate::controller::ZoomState;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ZoomAppearance {
-    pub initial_scale: f32,
-    pub min_scale: f32,
-    pub max_scale: f32,
-    pub scroll_speed: f32,
-    pub pan_friction: f32,
-    pub follow_cursor: bool,
-}
-
-impl Default for ZoomAppearance {
-    fn default() -> Self {
-        Self {
-            initial_scale: 2.0,
-            min_scale: 1.0,
-            max_scale: 6.0,
-            scroll_speed: 0.25,
-            pan_friction: 0.82,
-            follow_cursor: true,
-        }
-    }
-}
-
-impl From<rpresent_config::ZoomConfig> for ZoomAppearance {
-    fn from(config: rpresent_config::ZoomConfig) -> Self {
-        Self {
-            initial_scale: config.initial_scale,
-            min_scale: config.min_scale,
-            max_scale: config.max_scale,
-            scroll_speed: config.scroll_speed,
-            pan_friction: config.pan_friction,
-            follow_cursor: config.follow_cursor,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ZoomRect {
@@ -72,12 +37,15 @@ pub enum OverlayError {
 
 #[cfg(target_os = "linux")]
 pub fn run_overlay(
-    appearance: ZoomAppearance,
+    config_service: Arc<rpresent_config::ConfigService>,
     rx: Receiver<ZoomState>,
 ) -> Result<(), OverlayError> {
     use crate::x11::X11ZoomOverlay;
 
-    tracing::debug!(?appearance, "starting zoom overlay");
+    tracing::debug!(
+        initial_scale = config_service.zoom().initial_scale,
+        "starting zoom overlay"
+    );
 
     let mut backend = X11ZoomOverlay::new().inspect_err(|e| {
         tracing::error!(?e, "failed to initialise zoom X11 backend");
@@ -117,7 +85,7 @@ pub fn run_overlay(
 
 #[cfg(not(target_os = "linux"))]
 pub fn run_overlay(
-    _appearance: ZoomAppearance,
+    _config_service: Arc<rpresent_config::ConfigService>,
     _rx: Receiver<ZoomState>,
 ) -> Result<(), OverlayError> {
     Err(OverlayError::UnsupportedPlatform)

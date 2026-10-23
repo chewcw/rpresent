@@ -19,7 +19,7 @@ pub struct ZoomController {
 }
 
 impl ZoomController {
-    pub fn from_config(config: rpresent_config::ZoomConfig) -> Self {
+    pub fn from_config(config: &rpresent_config::ZoomConfig) -> Self {
         Self {
             state: ZoomState {
                 enabled: config.enabled_on_start,

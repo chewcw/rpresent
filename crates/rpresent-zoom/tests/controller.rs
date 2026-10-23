@@ -9,7 +9,7 @@ fn applies_zoom_commands_and_resets_geometry() {
         ..ZoomConfig::default()
     };
 
-    let mut controller = ZoomController::from_config(config);
+    let mut controller = ZoomController::from_config(&config);
 
     assert!(!controller.state().enabled);
     assert!(controller.apply(ZoomCommand::On));
@@ -37,7 +37,7 @@ fn zoom_by_scroll_uses_speed_and_clamps_and_pan_uses_friction() {
         ..ZoomConfig::default()
     };
 
-    let mut controller = ZoomController::from_config(config);
+    let mut controller = ZoomController::from_config(&config);
 
     assert!(controller.zoom_by_scroll(1.0, (320.0, 200.0)));
     let state = controller.state();
@@ -54,7 +54,7 @@ fn zoom_by_scroll_uses_speed_and_clamps_and_pan_uses_friction() {
 #[test]
 fn zoom_by_scroll_with_follow_cursor_updates_pivot() {
     let config = ZoomConfig::default();
-    let mut controller = ZoomController::from_config(config);
+    let mut controller = ZoomController::from_config(&config);
 
     controller.zoom_by_scroll(1.0, (500.0, 400.0));
     assert_eq!(controller.state().pivot, (500.0, 400.0));
@@ -63,7 +63,7 @@ fn zoom_by_scroll_with_follow_cursor_updates_pivot() {
 #[test]
 fn zoom_by_scroll_with_fixed_pivot_keeps_pivot_stable() {
     let config = ZoomConfig::default();
-    let mut controller = ZoomController::from_config(config);
+    let mut controller = ZoomController::from_config(&config);
 
     controller.zoom_by_scroll(0.5, (100.0, 200.0));
     controller.zoom_by_scroll(0.5, (100.0, 200.0));
@@ -76,7 +76,7 @@ fn reset_restores_scale_and_pivot() {
         initial_scale: 2.0,
         ..ZoomConfig::default()
     };
-    let mut controller = ZoomController::from_config(config);
+    let mut controller = ZoomController::from_config(&config);
 
     controller.zoom_by_scroll(1.0, (320.0, 200.0));
     controller.apply(ZoomCommand::On);
