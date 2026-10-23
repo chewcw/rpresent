@@ -27,7 +27,13 @@ struct ConfigurableFakeFrameSource {
 impl FrameSource for ConfigurableFakeFrameSource {
     fn capture_frame(&mut self) -> Result<CapturedFrame, CaptureError> {
         let pixel_count = (self.width * self.height) as usize;
-        let rgba: Vec<u8> = self.color.iter().copied().cycle().take(pixel_count * 4).collect();
+        let rgba: Vec<u8> = self
+            .color
+            .iter()
+            .copied()
+            .cycle()
+            .take(pixel_count * 4)
+            .collect();
         Ok(CapturedFrame::new(self.width, self.height, rgba))
     }
 }

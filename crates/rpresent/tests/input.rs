@@ -107,7 +107,11 @@ fn zoom_wheel_emits_zoom_wheel_action_in_zoom_mode() {
     assert!(router.handle_key("Ctrl+3").is_some());
     assert_eq!(
         router.handle_wheel("Ctrl", -1.0, 100, 200),
-        Some(InputAction::ZoomWheel { delta: -1.0, cursor_x: 100, cursor_y: 200 })
+        Some(InputAction::ZoomWheel {
+            delta: -1.0,
+            cursor_x: 100,
+            cursor_y: 200
+        })
     );
 }
 

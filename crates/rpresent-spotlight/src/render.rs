@@ -199,7 +199,8 @@ pub fn build_projecteur_frame(
         // Two concentric sub-paths + EvenOdd fill rule = ring between them.
         let has_outer = add_shape(&mut pb, config.shape, cx, cy, radius);
         let has_inner = add_shape(&mut pb, config.shape, cx, cy, inner_r);
-        if has_outer && has_inner
+        if has_outer
+            && has_inner
             && let Some(path) = pb.finish()
         {
             let (br, bg, bb) = parse_hex(&config.border_color);

@@ -8,7 +8,7 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 
 use crate::controller::ZoomState;
-use crate::overlay::{zoom_sample_rect, OverlayError};
+use crate::overlay::{OverlayError, zoom_sample_rect};
 
 fn runtime_error(error: impl std::fmt::Display) -> OverlayError {
     OverlayError::Runtime(error.to_string())
@@ -44,16 +44,12 @@ fn choose_visual(
                 && f.direct.alpha_shift == 24
                 && f.direct.alpha_mask == 255
         }) {
-            if let Some(visual) = formats
-                .screens
-                .get(screen_num)
-                .and_then(|sf| {
-                    sf.depths
-                        .iter()
-                        .flat_map(|d| d.visuals.iter())
-                        .find(|v| v.format == format.id)
-                })
-            {
+            if let Some(visual) = formats.screens.get(screen_num).and_then(|sf| {
+                sf.depths
+                    .iter()
+                    .flat_map(|d| d.visuals.iter())
+                    .find(|v| v.format == format.id)
+            }) {
                 return Ok((format.depth, visual.visual));
             }
         }
@@ -190,10 +186,7 @@ impl X11ZoomOverlay {
     }
 
     /// Capture the magnified region and upload it to the overlay window.
-    pub(crate) fn render(
-        &mut self,
-        state: &ZoomState,
-    ) -> Result<(), OverlayError> {
+    pub(crate) fn render(&mut self, state: &ZoomState) -> Result<(), OverlayError> {
         // Determine pivot: follow cursor or use state pivot.
         let pivot = if state.follow_cursor {
             self.query_pointer().unwrap_or(state.pivot)
@@ -209,8 +202,11 @@ impl X11ZoomOverlay {
             capture_target: String::new(),
         };
 
-        let rect =
-            zoom_sample_rect(self.screen_width as u32, self.screen_height as u32, &effective_pivot);
+        let rect = zoom_sample_rect(
+            self.screen_width as u32,
+            self.screen_height as u32,
+            &effective_pivot,
+        );
 
         let src_x = rect.left as i16;
         let src_y = rect.top as i16;
