@@ -160,28 +160,19 @@ fn parse_hex_rgb(color: &str) -> Option<(u8, u8, u8)> {
     Some((r, g, b))
 }
 
-fn legacy_appearance(
-    config: &rpresent_config::SpotlightConfig,
-) -> crate::overlay::SpotlightAppearance {
-    crate::overlay::SpotlightAppearance {
-        radius_px: config.radius_px,
-        softness_px: config.softness_px,
-        dim_alpha: config.dim_alpha,
-    }
-}
-
 fn create_gradient_picture<'a>(
     connection: &'a RustConnection,
     cursor: CursorPosition,
-    appearance: &crate::overlay::SpotlightAppearance,
+    config: &rpresent_config::SpotlightConfig,
+    radius_px: u32,
 ) -> Result<PictureWrapper<&'a RustConnection>, OverlayError> {
     let inner = Pointfix {
         x: fixed_from_i16(cursor.x),
         y: fixed_from_i16(cursor.y),
     };
     let outer = inner;
-    let inner_radius = fixed_from_u32(appearance.radius_px);
-    let outer_radius = fixed_from_u32(appearance.radius_px.saturating_add(appearance.softness_px));
+    let inner_radius = fixed_from_u32(radius_px);
+    let outer_radius = fixed_from_u32(radius_px.saturating_add(config.softness_px));
     let stops: [Fixed; 2] = [0, 1 << 16];
     let colors = [
         Color {
@@ -194,7 +185,7 @@ fn create_gradient_picture<'a>(
             red: 0,
             green: 0,
             blue: 0,
-            alpha: alpha_to_u16(appearance.dim_alpha),
+            alpha: alpha_to_u16(config.dim_alpha),
         },
     ];
 
@@ -650,6 +641,7 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
         &mut self,
         cursor: CursorPosition,
         config: &SpotlightConfig,
+        radius_px: u32,
     ) -> Result<(), OverlayError> {
         let strategy = select_render_strategy(config);
         let result = match (strategy, &self.backend) {
@@ -660,20 +652,17 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
                     depth,
                     ..
                 },
-            ) => {
-                let appearance = legacy_appearance(config);
-                redraw_render(
-                    &self.connection,
-                    self.window,
-                    window_picture,
-                    self.surface_size,
-                    cursor,
-                    &appearance,
-                    config,
-                    &mut self.dot_cache,
-                    depth,
-                )
-            }
+            ) => redraw_render(
+                &self.connection,
+                self.window,
+                window_picture,
+                self.surface_size,
+                cursor,
+                config,
+                radius_px,
+                &mut self.dot_cache,
+                depth,
+            ),
             (RenderStrategy::SoftwareFrame, &BackendKind::Render { gc, depth, .. })
             | (_, &BackendKind::Software { gc, depth }) => redraw_software(
                 &self.connection,
@@ -798,12 +787,12 @@ fn redraw_render(
     window_picture: Picture,
     surface_size: (u16, u16),
     cursor: CursorPosition,
-    appearance: &crate::overlay::SpotlightAppearance,
     config: &SpotlightConfig,
+    radius_px: u32,
     dot_cache: &mut Option<DotRenderCache>,
     depth: u8,
 ) -> Result<(), OverlayError> {
-    let gradient = create_gradient_picture(connection, cursor, appearance)?;
+    let gradient = create_gradient_picture(connection, cursor, config, radius_px)?;
     let _ = render::composite(
         connection,
         PictOp::SRC,
@@ -1012,22 +1001,6 @@ mod tests {
         assert_eq!(fixed_from_u32(max_safe), (max_safe as i32) << 16);
         // Values above max should be clamped
         assert_eq!(fixed_from_u32(max_safe + 1), (max_safe as i32) << 16);
-    }
-
-    #[test]
-    fn legacy_appearance_maps_config_fields() {
-        let config = rpresent_config::SpotlightConfig {
-            radius_px: 300,
-            softness_px: 90,
-            dim_alpha: 0.8,
-            ..rpresent_config::SpotlightConfig::default()
-        };
-
-        let appearance = legacy_appearance(&config);
-
-        assert_eq!(appearance.radius_px, 300);
-        assert_eq!(appearance.softness_px, 90);
-        assert!((appearance.dim_alpha - 0.8).abs() < f32::EPSILON);
     }
 
     #[test]

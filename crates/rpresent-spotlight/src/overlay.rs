@@ -1,33 +1,7 @@
+use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 use crate::controller::SpotlightState;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SpotlightAppearance {
-    pub radius_px: u32,
-    pub softness_px: u32,
-    pub dim_alpha: f32,
-}
-
-impl Default for SpotlightAppearance {
-    fn default() -> Self {
-        Self {
-            radius_px: 240,
-            softness_px: 80,
-            dim_alpha: 0.72,
-        }
-    }
-}
-
-impl From<rpresent_config::SpotlightConfig> for SpotlightAppearance {
-    fn from(config: rpresent_config::SpotlightConfig) -> Self {
-        Self {
-            radius_px: config.radius_px,
-            softness_px: config.softness_px,
-            dim_alpha: config.dim_alpha,
-        }
-    }
-}
 
 pub fn spotlight_alpha(distance_px: f32, radius_px: f32, softness_px: f32) -> f32 {
     if distance_px <= radius_px {
@@ -95,6 +69,7 @@ pub(crate) trait SpotlightOverlayBackend {
         &mut self,
         cursor: CursorPosition,
         config: &rpresent_config::SpotlightConfig,
+        radius_px: u32,
     ) -> Result<(), OverlayError>;
 }
 
@@ -105,7 +80,8 @@ pub enum SpotlightRuntimeMessage {
 }
 
 pub(crate) struct SpotlightOverlayRuntime<B> {
-    config: rpresent_config::SpotlightConfig,
+    config_service: Arc<rpresent_config::ConfigService>,
+    radius_px: u32,
     backend: B,
     visible: bool,
     last_render_inputs: Option<RenderInputs>,
@@ -113,9 +89,11 @@ pub(crate) struct SpotlightOverlayRuntime<B> {
 }
 
 impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
-    pub(crate) fn new(config: rpresent_config::SpotlightConfig, backend: B) -> Self {
+    pub(crate) fn new(config_service: Arc<rpresent_config::ConfigService>, backend: B) -> Self {
+        let radius_px = config_service.spotlight().radius_px;
         Self {
-            config,
+            config_service,
+            radius_px,
             backend,
             visible: false,
             last_render_inputs: None,
@@ -141,11 +119,9 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
         match message {
             SpotlightRuntimeMessage::Visibility(state) => self.process_state(state),
             SpotlightRuntimeMessage::ResizeBy(delta) => {
-                let next = (self.config.radius_px as f32 + delta)
-                    .round()
-                    .clamp(24.0, 4096.0) as u32;
-                if next != self.config.radius_px {
-                    self.config.radius_px = next;
+                let next = (self.radius_px as f32 + delta).round().clamp(24.0, 4096.0) as u32;
+                if next != self.radius_px {
+                    self.radius_px = next;
                     self.needs_redraw = true;
                     if self.visible {
                         self.tick()?;
@@ -201,7 +177,11 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
         }
 
         tracing::trace!(?inputs, "spotlight overlay redraw tick");
-        self.backend.redraw(inputs.cursor, &self.config)?;
+        self.backend.redraw(
+            inputs.cursor,
+            self.config_service.spotlight(),
+            self.radius_px,
+        )?;
         self.last_render_inputs = Some(inputs);
         self.needs_redraw = false;
         Ok(())
@@ -219,7 +199,9 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
 pub(crate) fn build_spotlight_frame(
     surface_size: (u16, u16),
     cursor: CursorPosition,
-    appearance: &SpotlightAppearance,
+    radius_px: u32,
+    softness_px: u32,
+    dim_alpha: f32,
 ) -> SpotlightFrame {
     let (width, height) = surface_size;
     let rgba_byte = 4; // 4 bytes per pixel in RGBA format
@@ -230,12 +212,8 @@ pub(crate) fn build_spotlight_frame(
             let dx = x as f32 - cursor.x as f32;
             let dy = y as f32 - cursor.y as f32;
             let distance = (dx * dx + dy * dy).sqrt();
-            let spot = spotlight_alpha(
-                distance,
-                appearance.radius_px as f32,
-                appearance.softness_px as f32,
-            );
-            let dim = appearance.dim_alpha * (1.0 - spot);
+            let spot = spotlight_alpha(distance, radius_px as f32, softness_px as f32);
+            let dim = dim_alpha * (1.0 - spot);
             let alpha = (255.0 * dim.clamp(0.0, 1.0)) as u8;
             let offset = ((y as usize * width as usize) + x as usize) * rgba_byte;
             pixels[offset..offset + rgba_byte].copy_from_slice(&[0, 0, 0, alpha]);
@@ -251,7 +229,7 @@ pub(crate) fn build_spotlight_frame(
 
 #[cfg(target_os = "linux")]
 pub fn run_overlay(
-    config: rpresent_config::SpotlightConfig,
+    config_service: Arc<rpresent_config::ConfigService>,
     rx: Receiver<SpotlightRuntimeMessage>,
 ) -> Result<(), OverlayError> {
     use std::sync::mpsc::RecvTimeoutError;
@@ -259,7 +237,7 @@ pub fn run_overlay(
 
     tracing::debug!("starting spotlight overlay");
     let backend = crate::x11::X11SpotlightOverlay::new()?;
-    let mut runtime = SpotlightOverlayRuntime::new(config, backend);
+    let mut runtime = SpotlightOverlayRuntime::new(config_service, backend);
     let mut visible = false;
 
     loop {
@@ -293,7 +271,7 @@ pub fn run_overlay(
 
 #[cfg(not(target_os = "linux"))]
 pub fn run_overlay(
-    _config: rpresent_config::SpotlightConfig,
+    _config_service: Arc<rpresent_config::ConfigService>,
     _rx: Receiver<SpotlightRuntimeMessage>,
 ) -> Result<(), OverlayError> {
     Err(OverlayError::UnsupportedPlatform)
@@ -304,6 +282,18 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
+
+    fn config_service(
+        config: rpresent_config::SpotlightConfig,
+    ) -> std::sync::Arc<rpresent_config::ConfigService> {
+        std::sync::Arc::new(rpresent_config::ConfigService::new(
+            std::path::PathBuf::from("test.toml"),
+            rpresent_config::Config {
+                spotlight: config,
+                ..Default::default()
+            },
+        ))
+    }
 
     #[derive(Debug, Default)]
     struct FakeBackend {
@@ -335,6 +325,7 @@ mod tests {
             &mut self,
             _cursor: CursorPosition,
             _config: &rpresent_config::SpotlightConfig,
+            _radius_px: u32,
         ) -> Result<(), OverlayError> {
             self.calls.push("redraw");
             Ok(())
@@ -349,8 +340,10 @@ mod tests {
             cursor: CursorPosition { x: 8, y: 8 },
             ..Default::default()
         };
-        let mut runtime =
-            SpotlightOverlayRuntime::new(rpresent_config::SpotlightConfig::default(), backend);
+        let mut runtime = SpotlightOverlayRuntime::new(
+            config_service(rpresent_config::SpotlightConfig::default()),
+            backend,
+        );
 
         tx.send(SpotlightRuntimeMessage::Visibility(SpotlightState::On))
             .unwrap();
@@ -370,8 +363,10 @@ mod tests {
             cursor: CursorPosition { x: 8, y: 8 },
             ..Default::default()
         };
-        let mut runtime =
-            SpotlightOverlayRuntime::new(rpresent_config::SpotlightConfig::default(), backend);
+        let mut runtime = SpotlightOverlayRuntime::new(
+            config_service(rpresent_config::SpotlightConfig::default()),
+            backend,
+        );
 
         runtime.process_state(SpotlightState::On).unwrap();
         runtime.tick().unwrap();
@@ -386,8 +381,10 @@ mod tests {
             cursor: CursorPosition { x: 8, y: 8 },
             ..Default::default()
         };
-        let mut runtime =
-            SpotlightOverlayRuntime::new(rpresent_config::SpotlightConfig::default(), backend);
+        let mut runtime = SpotlightOverlayRuntime::new(
+            config_service(rpresent_config::SpotlightConfig::default()),
+            backend,
+        );
 
         runtime.process_state(SpotlightState::On).unwrap();
         runtime.backend.cursor = CursorPosition { x: 9, y: 8 };
@@ -404,12 +401,13 @@ mod tests {
             ..Default::default()
         };
 
-        let config = rpresent_config::SpotlightConfig {
+        let config_service = config_service(rpresent_config::SpotlightConfig {
             radius_px: 100,
             ..rpresent_config::SpotlightConfig::default()
-        };
+        });
 
-        let mut runtime = SpotlightOverlayRuntime::new(config, backend);
+        let mut runtime =
+            SpotlightOverlayRuntime::new(std::sync::Arc::clone(&config_service), backend);
         runtime
             .process_message(SpotlightRuntimeMessage::Visibility(SpotlightState::On))
             .unwrap();
@@ -417,21 +415,13 @@ mod tests {
             .process_message(SpotlightRuntimeMessage::ResizeBy(20.0))
             .unwrap();
 
-        assert_eq!(runtime.config.radius_px, 120);
+        assert_eq!(runtime.radius_px, 120);
         assert_eq!(runtime.backend.calls, vec!["show", "redraw", "redraw"]);
     }
 
     #[test]
     fn spotlight_frame_is_centered_on_the_cursor() {
-        let frame = build_spotlight_frame(
-            (16, 16),
-            CursorPosition { x: 8, y: 8 },
-            &SpotlightAppearance {
-                radius_px: 4,
-                softness_px: 2,
-                dim_alpha: 0.72,
-            },
-        );
+        let frame = build_spotlight_frame((16, 16), CursorPosition { x: 8, y: 8 }, 4, 2, 0.72);
 
         assert_eq!(frame.width, 16);
         assert_eq!(frame.height, 16);
@@ -439,5 +429,30 @@ mod tests {
         assert!(frame.alpha_at(13, 8) > frame.alpha_at(8, 8));
         assert!(frame.alpha_at(15, 8) >= frame.alpha_at(13, 8));
         assert!(frame.alpha_at(15, 15) > frame.alpha_at(8, 8));
+    }
+
+    #[test]
+    fn resize_changes_the_runtime_radius_but_not_the_service_config() {
+        let backend = FakeBackend {
+            surface_size: (16, 16),
+            cursor: CursorPosition { x: 8, y: 8 },
+            ..Default::default()
+        };
+        let config_service = config_service(rpresent_config::SpotlightConfig {
+            radius_px: 100,
+            ..rpresent_config::SpotlightConfig::default()
+        });
+
+        let mut runtime =
+            SpotlightOverlayRuntime::new(std::sync::Arc::clone(&config_service), backend);
+        runtime
+            .process_message(SpotlightRuntimeMessage::Visibility(SpotlightState::On))
+            .unwrap();
+        runtime
+            .process_message(SpotlightRuntimeMessage::ResizeBy(20.0))
+            .unwrap();
+
+        assert_eq!(runtime.radius_px, 120);
+        assert_eq!(config_service.spotlight().radius_px, 100);
     }
 }
