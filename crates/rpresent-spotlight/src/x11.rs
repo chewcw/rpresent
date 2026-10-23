@@ -4,13 +4,16 @@ use x11rb::protocol::render::{
     self, ChangePictureAux, Color, ConnectionExt as RenderConnectionExt, CreatePictureAux, Fixed,
     PictOp, PictType, Pictformat, Picture, PictureWrapper, Pointfix, Repeat,
 };
+use x11rb::protocol::shm::ConnectionExt as ShmConnectionExt;
 use x11rb::protocol::xproto::{
-    ColormapAlloc, ConnectionExt as XprotoConnectionExt, CreateGCAux, CreateWindowAux, Gcontext,
-    Visualid, Window, WindowClass,
+    ColormapAlloc, ConfigureWindowAux, ConnectionExt as XprotoConnectionExt, CreateGCAux,
+    CreateWindowAux, Gcontext, ImageFormat, Visualid, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 
-use crate::overlay::{CursorPosition, OverlayError, SpotlightOverlayBackend};
+use crate::damage;
+use crate::overlay::{CursorPosition, OverlayError, SpotlightOverlayBackend, runtime_error};
+use crate::shm::ShmSegment;
 use rpresent_config::SpotlightConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,10 +35,6 @@ fn overlay_window_spec(surface_size: (u16, u16)) -> OverlayWindowSpec {
         override_redirect: true,
         input_transparent: true,
     }
-}
-
-fn runtime_error(error: impl std::fmt::Display) -> OverlayError {
-    OverlayError::Runtime(error.to_string())
 }
 
 fn choose_visual(
@@ -219,7 +218,7 @@ enum BackendKind {
         gc: Gcontext,
         depth: u8,
     },
-    Software {
+    Shm {
         gc: Gcontext,
         depth: u8,
     },
@@ -227,17 +226,17 @@ enum BackendKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RenderStrategy {
-    XrenderRadial,
-    SoftwareFrame,
+    Render,
+    Shm,
 }
 
 fn select_render_strategy(config: &rpresent_config::SpotlightConfig) -> RenderStrategy {
     let is_circle = matches!(config.shape, rpresent_config::SpotShape::Circle);
 
     if is_circle {
-        RenderStrategy::XrenderRadial
+        RenderStrategy::Render
     } else {
-        RenderStrategy::SoftwareFrame
+        RenderStrategy::Shm
     }
 }
 
@@ -247,21 +246,17 @@ struct DotRenderCache {
     picture: Picture,
 }
 
-struct SoftwareFrameBuffer {
-    width: u16,
-    height: u16,
-    depth: u8,
-    image: Image<'static>,
-}
-
 pub(crate) struct X11SpotlightOverlay {
     connection: RustConnection,
     screen_num: usize,
     window: Window,
     surface_size: (u16, u16),
     backend: BackendKind,
+    shm: ShmSegment,
     dot_cache: Option<DotRenderCache>,
-    software_frame_buffer: Option<SoftwareFrameBuffer>,
+    last_cursor: Option<CursorPosition>,
+    last_config: Option<SpotlightConfig>,
+    needs_full_redraw: bool,
 }
 
 impl X11SpotlightOverlay {
@@ -272,10 +267,12 @@ impl X11SpotlightOverlay {
                 tracing::error!(?error, "failed to connect to X11 for spotlight backend");
             })
             .map_err(runtime_error)?;
+        check_required_extensions(&connection)?;
         let screen = &connection.setup().roots[screen_num];
         let (depth, visual_id) = choose_visual(&connection, screen_num).inspect_err(|error| {
             tracing::error!(screen_num, ?error, "failed to choose spotlight visual");
         })?;
+        check_surface_format(&connection, depth)?;
         let spec = overlay_window_spec((screen.width_in_pixels, screen.height_in_pixels));
         let transparent = spec.input_transparent && depth == 32;
 
@@ -345,6 +342,7 @@ impl X11SpotlightOverlay {
             .map_err(runtime_error)?;
 
         let backend = create_backend(&connection, window, screen_num, visual_id, depth)?;
+        let shm = ShmSegment::new(&connection, spec.width, spec.height)?;
 
         connection
             .flush()
@@ -372,8 +370,11 @@ impl X11SpotlightOverlay {
             window,
             surface_size: (spec.width, spec.height),
             backend,
+            shm,
             dot_cache: None,
-            software_frame_buffer: None,
+            last_cursor: None,
+            last_config: None,
+            needs_full_redraw: true,
         })
     }
 
@@ -388,6 +389,99 @@ impl X11SpotlightOverlay {
                 );
             })
             .map_err(runtime_error)
+    }
+
+    fn refresh_surface_size(&mut self) -> Result<(), OverlayError> {
+        let next = self.surface_size()?;
+        if next != self.surface_size {
+            self.connection
+                .configure_window(
+                    self.window,
+                    &ConfigureWindowAux::new()
+                        .width(u32::from(next.0))
+                        .height(u32::from(next.1)),
+                )
+                .map_err(runtime_error)?
+                .check()
+                .map_err(runtime_error)?;
+            self.surface_size = next;
+            // Repaint after every resize, including shrinkage within the SHM capacity.
+            self.needs_full_redraw = true;
+        }
+        Ok(())
+    }
+
+    fn redraw_shm(
+        &mut self,
+        gc: Gcontext,
+        depth: u8,
+        cursor: CursorPosition,
+        config: &SpotlightConfig,
+    ) -> Result<(), OverlayError> {
+        let (surface_width, surface_height) = self.surface_size;
+        let full_rect = (0_i16, 0_i16, surface_width, surface_height);
+        let config_changed = self.last_config.as_ref() != Some(config);
+
+        let mut full_redraw = std::mem::take(&mut self.needs_full_redraw) || config_changed;
+        if self
+            .shm
+            .ensure_capacity(&self.connection, surface_width, surface_height)?
+        {
+            full_redraw = true;
+        }
+
+        let damage_rect = if full_redraw {
+            full_rect
+        } else {
+            match self.last_cursor {
+                Some(previous) => {
+                    let old = damage::paint_bounds(self.surface_size, previous, config);
+                    let new = damage::paint_bounds(self.surface_size, cursor, config);
+                    damage::union(old, new, self.surface_size)
+                }
+                None => full_rect,
+            }
+        };
+
+        if damage_rect.2 > 0 && damage_rect.3 > 0 {
+            let frame = crate::render::build_projecteur_frame_rect(
+                self.surface_size,
+                damage_rect,
+                cursor,
+                config,
+            );
+            crate::shm::blit_patch(
+                self.shm.bytes_mut(),
+                surface_width,
+                &frame,
+                (damage_rect.0 as u16, damage_rect.1 as u16),
+            )?;
+            self.connection
+                .shm_put_image(
+                    self.window,
+                    gc,
+                    surface_width,
+                    surface_height,
+                    damage_rect.0 as u16,
+                    damage_rect.1 as u16,
+                    damage_rect.2,
+                    damage_rect.3,
+                    damage_rect.0,
+                    damage_rect.1,
+                    depth,
+                    u8::from(ImageFormat::Z_PIXMAP),
+                    false,
+                    self.shm.seg(),
+                    0,
+                )
+                .map_err(runtime_error)?;
+        }
+
+        self.last_cursor = Some(cursor);
+        if config_changed {
+            self.last_config = Some(config.clone());
+        }
+        Ok(())
     }
 }
 
@@ -568,14 +662,18 @@ impl Drop for X11SpotlightOverlay {
         if let Some(cache) = self.dot_cache.take() {
             free_dot_cache(&self.connection, cache);
         }
-        if let BackendKind::Render { gc, .. } = self.backend {
-            let _ = self.connection.free_gc(gc);
+        match self.backend {
+            BackendKind::Render { gc, .. } | BackendKind::Shm { gc, .. } => {
+                let _ = self.connection.free_gc(gc);
+            }
         }
+        self.shm.destroy(&self.connection);
     }
 }
 
 impl SpotlightOverlayBackend for X11SpotlightOverlay {
     fn show(&mut self) -> Result<(), OverlayError> {
+        self.needs_full_redraw = true;
         self.connection
             .map_window(self.window)
             .inspect_err(|error| {
@@ -604,7 +702,14 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
     }
 
     fn surface_size(&self) -> Result<(u16, u16), OverlayError> {
-        Ok(self.surface_size)
+        let root = self.connection.setup().roots[self.screen_num].root;
+        let geometry = self
+            .connection
+            .get_geometry(root)
+            .map_err(runtime_error)?
+            .reply()
+            .map_err(runtime_error)?;
+        Ok((geometry.width, geometry.height))
     }
 
     fn cursor_position(&self) -> Result<CursorPosition, OverlayError> {
@@ -642,37 +747,35 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
         config: &SpotlightConfig,
         radius_px: u32,
     ) -> Result<(), OverlayError> {
+        self.refresh_surface_size()?;
         let strategy = select_render_strategy(config);
-        let result = match (strategy, &self.backend) {
-            (
-                RenderStrategy::XrenderRadial,
-                &BackendKind::Render {
-                    window_picture,
-                    depth,
-                    ..
-                },
-            ) => redraw_render(
-                &self.connection,
-                self.window,
+        let (gc, depth, window_picture) = match &self.backend {
+            BackendKind::Render {
                 window_picture,
-                self.surface_size,
-                cursor,
-                config,
-                radius_px,
-                &mut self.dot_cache,
-                depth,
-            ),
-            (RenderStrategy::SoftwareFrame, &BackendKind::Render { gc, depth, .. })
-            | (_, &BackendKind::Software { gc, depth }) => redraw_software(
-                &self.connection,
-                self.window,
                 gc,
                 depth,
-                self.surface_size,
-                cursor,
-                config,
-                &mut self.software_frame_buffer,
-            ),
+            } => (*gc, *depth, Some(*window_picture)),
+            BackendKind::Shm { gc, depth } => (*gc, *depth, None),
+        };
+
+        let result = match (strategy, window_picture) {
+            (RenderStrategy::Render, Some(window_picture)) => {
+                // The XRender composite writes the whole window with SRC, so the next
+                // SHM frame cannot reuse pixels from before this redraw.
+                self.needs_full_redraw = true;
+                redraw_render(
+                    &self.connection,
+                    self.window,
+                    window_picture,
+                    self.surface_size,
+                    cursor,
+                    config,
+                    radius_px,
+                    &mut self.dot_cache,
+                    depth,
+                )
+            }
+            _ => self.redraw_shm(gc, depth, cursor, config),
         };
         result.inspect_err(|error| {
             tracing::error!(
@@ -683,6 +786,59 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
         })?;
         self.flush()
     }
+}
+
+/// Fail fast when the X server cannot support the spotlight backend.
+///
+/// The backend requires DAMAGE at startup even though the damage rectangle is computed
+/// in this crate: a server without the extension is outside the supported configuration.
+/// MIT-SHM 1.2 is the minimum version that provides `shm_create_segment`.
+fn check_required_extensions(connection: &RustConnection) -> Result<(), OverlayError> {
+    if connection
+        .extension_information(x11rb::protocol::damage::X11_EXTENSION_NAME)
+        .map_err(runtime_error)?
+        .is_none()
+    {
+        return Err(runtime_error("the DAMAGE extension is unavailable"));
+    }
+    if connection
+        .extension_information(x11rb::protocol::shm::X11_EXTENSION_NAME)
+        .map_err(runtime_error)?
+        .is_none()
+    {
+        return Err(runtime_error("the MIT-SHM extension is unavailable"));
+    }
+
+    let version = connection
+        .shm_query_version()
+        .map_err(runtime_error)?
+        .reply()
+        .map_err(runtime_error)?;
+    if version.major_version < 1 || (version.major_version == 1 && version.minor_version < 2) {
+        return Err(runtime_error(format!(
+            "MIT-SHM 1.2 is required, server reports {}.{}",
+            version.major_version, version.minor_version
+        )));
+    }
+
+    Ok(())
+}
+
+/// The software renderer writes four bytes per pixel, so the chosen visual must use 32 bpp.
+fn check_surface_format(connection: &RustConnection, depth: u8) -> Result<(), OverlayError> {
+    let format = connection
+        .setup()
+        .pixmap_formats
+        .iter()
+        .find(|format| format.depth == depth)
+        .ok_or_else(|| runtime_error(format!("no X11 pixmap format for depth {depth}")))?;
+    if format.bits_per_pixel != 32 {
+        return Err(runtime_error(format!(
+            "spotlight requires a 32-bit-per-pixel visual, depth {depth} uses {}",
+            format.bits_per_pixel
+        )));
+    }
+    Ok(())
 }
 
 fn create_backend(
@@ -724,33 +880,33 @@ fn create_backend(
                         tracing::warn!(
                             window,
                             ?error,
-                            "failed to create XRender spotlight picture; falling back to software backend"
+                            "failed to create XRender spotlight picture; using the MIT-SHM backend"
                         );
-                        create_software_backend(connection, window, depth)
+                        create_shm_backend(connection, window, depth)
                     }
                 },
                 None => {
                     tracing::debug!(
                         window,
-                        "XRender alpha format unavailable for spotlight visual; using software backend"
+                        "XRender alpha format unavailable for spotlight visual; using the MIT-SHM backend"
                     );
-                    create_software_backend(connection, window, depth)
+                    create_shm_backend(connection, window, depth)
                 }
             },
             Err(error) => {
                 tracing::warn!(
                     window,
                     ?error,
-                    "failed to query XRender formats; using software backend"
+                    "failed to query XRender formats; using the MIT-SHM backend"
                 );
-                create_software_backend(connection, window, depth)
+                create_shm_backend(connection, window, depth)
             }
         },
-        None => create_software_backend(connection, window, depth),
+        None => create_shm_backend(connection, window, depth),
     }
 }
 
-fn create_software_backend(
+fn create_shm_backend(
     connection: &RustConnection,
     window: Window,
     depth: u8,
@@ -776,7 +932,7 @@ fn create_software_backend(
         })
         .map_err(runtime_error)?;
 
-    Ok(BackendKind::Software { gc, depth })
+    Ok(BackendKind::Shm { gc, depth })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -843,75 +999,6 @@ fn redraw_render(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn redraw_software(
-    connection: &RustConnection,
-    window: Window,
-    gc: Gcontext,
-    depth: u8,
-    surface_size: (u16, u16),
-    cursor: CursorPosition,
-    config: &rpresent_config::SpotlightConfig,
-    software_frame_buffer: &mut Option<SoftwareFrameBuffer>,
-) -> Result<(), OverlayError> {
-    let frame = crate::render::build_projecteur_frame(surface_size, cursor, config);
-
-    let needs_realloc = software_frame_buffer
-        .as_ref()
-        .map(|buffer| {
-            buffer.width != frame.width || buffer.height != frame.height || buffer.depth != depth
-        })
-        .unwrap_or(true);
-
-    if needs_realloc {
-        let image = Image::allocate_native(frame.width, frame.height, depth, connection.setup())
-            .map_err(runtime_error)?;
-        if image.data().len() != frame.pixels.len() {
-            return Err(runtime_error(format!(
-                "spotlight frame size mismatch: image expects {} bytes, frame has {} bytes",
-                image.data().len(),
-                frame.pixels.len()
-            )));
-        }
-
-        *software_frame_buffer = Some(SoftwareFrameBuffer {
-            width: frame.width,
-            height: frame.height,
-            depth,
-            image,
-        });
-    }
-
-    let buffer = software_frame_buffer
-        .as_mut()
-        .ok_or_else(|| runtime_error("software frame buffer unavailable"))?;
-
-    if buffer.image.data().len() != frame.pixels.len() {
-        return Err(runtime_error(format!(
-            "spotlight frame size mismatch: image expects {} bytes, frame has {} bytes",
-            buffer.image.data().len(),
-            frame.pixels.len()
-        )));
-    }
-
-    buffer.image.data_mut().copy_from_slice(&frame.pixels);
-    let _ = buffer
-        .image
-        .put(connection, window, gc, 0, 0)
-        .inspect_err(|error| {
-            tracing::error!(
-                window,
-                width = frame.width,
-                height = frame.height,
-                ?error,
-                "failed to redraw spotlight overlay"
-            );
-        })
-        .map_err(runtime_error)?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -943,18 +1030,16 @@ mod tests {
     }
 
     #[test]
-    fn default_circle_prefers_xrender_radial() {
-        // Default config has show_border=true, show_center_dot=true — XRender fires anyway
-        // and silently omits those features (same as 54ace59 behavior).
+    fn default_circle_uses_the_xrender_path() {
         let config = rpresent_config::SpotlightConfig::default();
         assert!(matches!(
             select_render_strategy(&config),
-            RenderStrategy::XrenderRadial
+            RenderStrategy::Render
         ));
     }
 
     #[test]
-    fn non_circle_shape_falls_back_to_software() {
+    fn non_circle_shape_uses_the_shm_path() {
         let config = rpresent_config::SpotlightConfig {
             shape: rpresent_config::SpotShape::Square {
                 corner_radius_pct: 0,
@@ -963,7 +1048,7 @@ mod tests {
         };
         assert!(matches!(
             select_render_strategy(&config),
-            RenderStrategy::SoftwareFrame
+            RenderStrategy::Shm
         ));
     }
 

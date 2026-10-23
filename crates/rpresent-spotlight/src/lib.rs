@@ -1,8 +1,11 @@
 pub mod command;
 pub mod controller;
+mod damage;
 pub mod overlay;
 pub(crate) mod render;
 
+#[cfg(target_os = "linux")]
+mod shm;
 #[cfg(target_os = "linux")]
 mod x11;
 

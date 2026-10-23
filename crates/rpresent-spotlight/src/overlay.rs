@@ -21,13 +21,20 @@ pub enum OverlayError {
     Runtime(String),
 }
 
+pub(crate) fn runtime_error(error: impl std::fmt::Display) -> OverlayError {
+    OverlayError::Runtime(error.to_string())
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CursorPosition {
     pub x: i16,
     pub y: i16,
 }
 
-/// Spotlight overlay frame.  Pixels are stored in **BGRA** premultiplied byte order.
+/// Spotlight overlay frame. Pixels are stored in **BGRA** premultiplied byte order.
+///
+/// `width` and `height` describe the rendered region. A partial redraw returns only the
+/// damage rectangle, so the caller must place the pixels at the rectangle origin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpotlightFrame {
     pub width: u16,
@@ -454,5 +461,28 @@ mod tests {
 
         assert_eq!(runtime.radius_px, 120);
         assert_eq!(config_service.spotlight().radius_px, 100);
+    }
+
+    #[test]
+    fn tick_redraws_when_the_surface_size_changes_without_cursor_motion() {
+        let backend = FakeBackend {
+            surface_size: (400, 300),
+            cursor: CursorPosition { x: 200, y: 150 },
+            ..Default::default()
+        };
+        let mut runtime = SpotlightOverlayRuntime::new(
+            config_service(rpresent_config::SpotlightConfig::default()),
+            backend,
+        );
+        runtime.process_state(SpotlightState::On).unwrap();
+        runtime.backend.surface_size = (600, 400);
+        runtime.tick().unwrap();
+        runtime.backend.surface_size = (300, 200);
+        runtime.tick().unwrap();
+        runtime.tick().unwrap();
+        assert_eq!(
+            runtime.backend.calls,
+            vec!["show", "redraw", "redraw", "redraw"]
+        );
     }
 }

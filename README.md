@@ -17,7 +17,7 @@ This repository is a Rust workspace with five crates:
 - Rust 2024 toolchain
 - Linux with X11 support
 
-The spotlight overlay uses X11 on Linux. It opens one overlay window, tracks the cursor, and redraws the spotlight mask from the current spotlight state. Transparent compositing requires a running compositor on the desktop session.
+The spotlight overlay uses X11 on Linux. It opens one overlay window, tracks the cursor, and redraws the spotlight mask from the current spotlight state. Transparent compositing requires a running compositor on the desktop session. The software render path requires MIT-SHM 1.2 and DAMAGE; the daemon exits with an error when either extension is missing. It writes frames through shared memory and re-renders only the rectangle that the cursor moved across.
 
 ## Logging
 
