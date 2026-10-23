@@ -100,6 +100,8 @@ pub struct SpotlightConfig {
     pub softness_px: u32,
     #[serde(default = "default_dim_alpha")]
     pub dim_alpha: f32,
+    #[serde(default = "default_wheel_speed")]
+    pub wheel_speed: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +163,7 @@ impl Default for SpotlightConfig {
             radius_px: default_radius_px(),
             softness_px: default_softness_px(),
             dim_alpha: default_dim_alpha(),
+            wheel_speed: default_wheel_speed(),
         }
     }
 }
@@ -383,6 +386,10 @@ fn default_softness_px() -> u32 {
 
 fn default_dim_alpha() -> f32 {
     0.72
+}
+
+fn default_wheel_speed() -> f32 {
+    12.0
 }
 
 fn default_annotation_enabled() -> bool {

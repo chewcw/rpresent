@@ -240,7 +240,9 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
                     }
                 }
                 AppEvent::Input(crate::input::InputAction::SpotlightWheel { delta }) => {
-                    let _ = spotlight_tx.send(SpotlightRuntimeMessage::ResizeBy(delta * 12.0));
+                    let _ = spotlight_tx.send(SpotlightRuntimeMessage::ResizeBy(
+                        delta * spotlight_config.wheel_speed,
+                    ));
                 }
                 AppEvent::Input(crate::input::InputAction::ZoomWheel { delta, cursor_x, cursor_y }) => {
                     if zoom_controller.zoom_by_scroll(delta, (cursor_x as f32, cursor_y as f32)) {

@@ -16,6 +16,7 @@ show_border = true
 border_color = "#bada55"
 border_size_pct = 10
 border_opacity = 0.8
+wheel_speed = 60.0
 
 [spotlight.shape]
 type = "circle"

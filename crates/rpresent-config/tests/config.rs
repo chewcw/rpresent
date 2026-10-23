@@ -17,6 +17,7 @@ fn parses_module_sections_and_applies_defaults() {
 
         [spotlight]
         radius_px = 260
+        wheel_speed = 8.0
 
         [annotation]
         default_tool = "line"
@@ -39,6 +40,7 @@ fn parses_module_sections_and_applies_defaults() {
     assert_eq!(config.spotlight.radius_px, 260);
     assert_eq!(config.spotlight.softness_px, 80);
     assert!((config.spotlight.dim_alpha - 0.72).abs() < f32::EPSILON);
+    assert!((config.spotlight.wheel_speed - 8.0).abs() < f32::EPSILON);
     // Projecteur-style defaults applied when not specified in TOML
     assert!(config.spotlight.show_spot_shade);
     assert_eq!(config.spotlight.spot_size_pct, 30);
@@ -111,6 +113,7 @@ fn default_config_file_is_written_with_all_sections() {
     assert!(contents.contains("spot_size_pct = 30"));
     assert!(contents.contains("shade_color = \"#000000\""));
     assert!(contents.contains("border_size_pct = 10"));
+    assert!(contents.contains("wheel_speed = 12.0"));
 }
 
 #[test]
