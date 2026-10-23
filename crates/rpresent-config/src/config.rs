@@ -66,8 +66,6 @@ pub struct SpotlightConfig {
     // Projecteur-style visual fields
     #[serde(default = "default_show_spot_shade")]
     pub show_spot_shade: bool,
-    #[serde(default = "default_spot_size_pct")]
-    pub spot_size_pct: u32,
     #[serde(default)]
     pub shape: SpotShape,
     #[serde(default = "default_show_center_dot")]
@@ -91,13 +89,10 @@ pub struct SpotlightConfig {
     #[serde(default = "default_border_opacity")]
     pub border_opacity: f32,
 
-    // Legacy compatibility fields — kept as a bridge; new renderer does not use these.
     #[serde(default = "default_radius_px")]
     pub radius_px: u32,
     #[serde(default = "default_softness_px")]
     pub softness_px: u32,
-    #[serde(default = "default_dim_alpha")]
-    pub dim_alpha: f32,
     #[serde(default = "default_wheel_speed")]
     pub wheel_speed: f32,
 }
@@ -145,7 +140,6 @@ impl Default for SpotlightConfig {
         Self {
             enabled_on_start: default_spotlight_enabled(),
             show_spot_shade: default_show_spot_shade(),
-            spot_size_pct: default_spot_size_pct(),
             shape: SpotShape::default(),
             show_center_dot: default_show_center_dot(),
             dot_size_px: default_dot_size_px(),
@@ -159,7 +153,6 @@ impl Default for SpotlightConfig {
             border_opacity: default_border_opacity(),
             radius_px: default_radius_px(),
             softness_px: default_softness_px(),
-            dim_alpha: default_dim_alpha(),
             wheel_speed: default_wheel_speed(),
         }
     }
@@ -309,10 +302,6 @@ fn default_show_spot_shade() -> bool {
     true
 }
 
-fn default_spot_size_pct() -> u32 {
-    30
-}
-
 fn default_show_center_dot() -> bool {
     true
 }
@@ -375,10 +364,6 @@ fn default_radius_px() -> u32 {
 
 fn default_softness_px() -> u32 {
     80
-}
-
-fn default_dim_alpha() -> f32 {
-    0.72
 }
 
 fn default_wheel_speed() -> f32 {

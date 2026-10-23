@@ -84,6 +84,18 @@ cargo run -p rpresent -- config init --config ~/.config/rpresent/config.toml
 
 `config init` writes the default config and will not overwrite an existing file.
 
+### Spotlight settings
+
+The spotlight uses one configured radius and one shade opacity for every render path:
+
+- `radius_px` is the spotlight radius in pixels. Wheel resizing changes this live value for circles and other shapes.
+- `shade_opacity` is the final shade alpha outside the spotlight fade.
+- `softness_px` is the outward fade width in pixels. It affects the shade only.
+
+The built-in defaults are `radius_px = 240`, `shade_opacity = 0.6`, and `softness_px = 80`. The repository example keeps `radius_px = 150`, `shade_opacity = 1.0`, and `softness_px = 50`.
+
+Existing configurations must remove `dim_alpha` and `spot_size_pct`. To migrate a percentage radius, use `max(floor(screen_height * spot_size_pct / 100), 25)` for `radius_px`. If the old XRender opacity is preferred, copy `dim_alpha` to `shade_opacity` before removing it. Removed keys now produce the normal unknown-field parse error.
+
 ## Zoom
 
 When the daemon starts without a command it enters an idle loop — no overlay appears until a shortcut or IPC command triggers one.

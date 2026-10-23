@@ -1,171 +1,48 @@
 //! Pure Rust spotlight frame compositor, mirroring Projecteur's QML overlay pipeline.
 //!
-//! Composition order (identical to Projecteur's QML scene):
-//!  1. Fill the damage rectangle with the shade colour (if `show_spot_shade`).
-//!  2. Cut a transparent hole at the outer spotlight shape (if `show_spot_shade`).
-//!  3. Draw the border ring — outer shape minus inner shape — via EvenOdd fill (if `show_border`).
-//!  4. Draw the centre dot (if `show_center_dot`).
+//! Composition order:
+//!  1. Fill the damage rectangle with the shade colour and outward fade.
+//!  2. Draw the border ring.
+//!  3. Draw the centre dot.
 //!
 //! Output pixels are stored in **BGRA** order (premultiplied), matching the X11 32-bit visual
-//! selected by `x11.rs` (`blue_shift=0, green_shift=8, red_shift=16, alpha_shift=24`).
+//! selected by `x11.rs`.
 
-use rpresent_config::{SpotShape, SpotlightConfig};
-use tiny_skia::{BlendMode, Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Shader, Transform};
+use rpresent_config::SpotlightConfig;
+use tiny_skia::{BlendMode, FillRule, Paint, Pixmap, Transform};
 
 use crate::overlay::{CursorPosition, SpotlightFrame};
+use crate::shape::{ShapeGeometry, draw_decorations, parse_rgb};
 
-/// Minimum spotlight radius in pixels, matching Projecteur's lower bound.
-const MIN_SPOT_RADIUS: f32 = 25.0;
-
-// ────────────────────────────────────────────────────────────── helpers ──
-
-/// Compute spotlight radius from screen height and the percentage setting.
-/// Formula: `max(floor(height * pct / 100), MIN_SPOT_RADIUS)`.
-pub(crate) fn spot_radius_px(surface_height: u16, spot_size_pct: u32) -> f32 {
-    (surface_height as f32 * spot_size_pct as f32 / 100.0)
-        .floor()
-        .max(MIN_SPOT_RADIUS)
-}
-
-/// Parse `#RRGGBB` to `(r, g, b)`. Returns white on malformed input.
-fn parse_hex(hex: &str) -> (u8, u8, u8) {
-    let s = hex.trim_start_matches('#');
-    if s.len() < 6 {
-        return (255, 255, 255);
+pub(crate) fn shade_factor(distance: f32, softness_px: u32) -> f32 {
+    if softness_px == 0 {
+        return if distance > 0.0 { 1.0 } else { 0.0 };
     }
-    let r = u8::from_str_radix(&s[0..2], 16).unwrap_or(255);
-    let g = u8::from_str_radix(&s[2..4], 16).unwrap_or(255);
-    let b = u8::from_str_radix(&s[4..6], 16).unwrap_or(255);
-    (r, g, b)
+    (distance / softness_px as f32).clamp(0.0, 1.0)
 }
-
-/// Add the outline for `shape` centred at `(cx, cy)` with outer `radius` to `pb`.
-/// Returns `false` and adds nothing if the radius is below the sub-pixel threshold.
-fn add_shape(pb: &mut PathBuilder, shape: SpotShape, cx: f32, cy: f32, radius: f32) -> bool {
-    if radius < 0.5 {
-        return false;
-    }
-    match shape {
-        SpotShape::Circle => {
-            let Some(rect) = Rect::from_xywh(cx - radius, cy - radius, radius * 2.0, radius * 2.0)
-            else {
-                return false;
-            };
-            pb.push_oval(rect);
-        }
-        SpotShape::Square { corner_radius_pct } => {
-            let cr = (radius * corner_radius_pct as f32 / 100.0).min(radius);
-            add_rounded_rect(pb, cx - radius, cy - radius, radius * 2.0, radius * 2.0, cr);
-        }
-        SpotShape::Star {
-            points,
-            inner_radius_pct,
-        } => {
-            if points < 3 {
-                return false;
-            }
-            let inner_r = radius * inner_radius_pct as f32 / 100.0;
-            add_star(pb, cx, cy, radius, inner_r, points);
-        }
-        SpotShape::Ngon { sides } => {
-            if sides < 3 {
-                return false;
-            }
-            add_ngon(pb, cx, cy, radius, sides);
-        }
-    }
-    true
-}
-
-/// Add a rounded rectangle to `pb`.  Corner arcs use the cubic-bezier kappa approximation.
-fn add_rounded_rect(pb: &mut PathBuilder, x: f32, y: f32, w: f32, h: f32, r: f32) {
-    // kappa = (4/3) * tan(π/8) ≈ 0.5523 gives a good circular-arc approximation.
-    const K: f32 = 0.5523;
-    let kr = r * K;
-    pb.move_to(x + r, y);
-    pb.line_to(x + w - r, y);
-    pb.cubic_to(x + w - r + kr, y, x + w, y + r - kr, x + w, y + r);
-    pb.line_to(x + w, y + h - r);
-    pb.cubic_to(
-        x + w,
-        y + h - r + kr,
-        x + w - r + kr,
-        y + h,
-        x + w - r,
-        y + h,
-    );
-    pb.line_to(x + r, y + h);
-    pb.cubic_to(x + r - kr, y + h, x, y + h - r + kr, x, y + h - r);
-    pb.line_to(x, y + r);
-    pb.cubic_to(x, y + r - kr, x + r - kr, y, x + r, y);
-    pb.close();
-}
-
-/// Add a star polygon with `points` outer tips to `pb`, pointing up.
-fn add_star(pb: &mut PathBuilder, cx: f32, cy: f32, outer_r: f32, inner_r: f32, points: u32) {
-    use std::f32::consts::PI;
-    let n = points as usize;
-    let step = PI / n as f32; // alternates outer / inner every half-step
-    let start = -PI / 2.0; // first tip points up
-    for i in 0..n * 2 {
-        let angle = start + i as f32 * step;
-        let r = if i % 2 == 0 { outer_r } else { inner_r };
-        let (x, y) = (cx + r * angle.cos(), cy + r * angle.sin());
-        if i == 0 {
-            pb.move_to(x, y);
-        } else {
-            pb.line_to(x, y);
-        }
-    }
-    pb.close();
-}
-
-/// Add a regular N-gon to `pb`, with the first vertex pointing up.
-fn add_ngon(pb: &mut PathBuilder, cx: f32, cy: f32, r: f32, sides: u32) {
-    use std::f32::consts::PI;
-    let n = sides as usize;
-    let step = 2.0 * PI / n as f32;
-    let start = -PI / 2.0;
-    for i in 0..n {
-        let angle = start + i as f32 * step;
-        let (x, y) = (cx + r * angle.cos(), cy + r * angle.sin());
-        if i == 0 {
-            pb.move_to(x, y);
-        } else {
-            pb.line_to(x, y);
-        }
-    }
-    pb.close();
-}
-
-// ──────────────────────────────────────────────────── main entry point ──
 
 /// Build a full-surface Projecteur-style spotlight frame.
 ///
-/// The returned [`SpotlightFrame`] stores pixels in **BGRA** premultiplied byte order, matching
-/// the X11 32-bit visual (`blue_shift=0, red_shift=16, alpha_shift=24`).
+/// The returned [`SpotlightFrame`] stores pixels in **BGRA** premultiplied byte order.
 pub fn build_projecteur_frame(
     surface_size: (u16, u16),
     cursor: CursorPosition,
     config: &SpotlightConfig,
+    radius_px: u32,
 ) -> SpotlightFrame {
     let (width, height) = surface_size;
-    build_projecteur_frame_rect(surface_size, (0, 0, width, height), cursor, config)
+    build_projecteur_frame_rect((0, 0, width, height), cursor, config, radius_px)
 }
 
 /// Build the spotlight pixels for `damage_rect` only.
 ///
 /// `damage_rect` is `(x, y, width, height)` in surface pixels. The returned frame is exactly
-/// the size of that rectangle, so the caller blits it at `(x, y)`.
-///
-/// Every pixel in the rectangle is rewritten: pixels outside the spotlight receive the shade
-/// colour, or transparent black when `show_spot_shade` is false. That rewrite erases the hole
-/// left at the previous cursor position.
+/// the size of that rectangle, so the caller blits it at the rectangle origin.
 pub fn build_projecteur_frame_rect(
-    surface_size: (u16, u16),
     damage_rect: (i16, i16, u16, u16),
     cursor: CursorPosition,
     config: &SpotlightConfig,
+    radius_px: u32,
 ) -> SpotlightFrame {
     let (rect_x, rect_y, width, height) = damage_rect;
     assert!(
@@ -174,83 +51,103 @@ pub fn build_projecteur_frame_rect(
     );
     let mut pixmap = Pixmap::new(u32::from(width), u32::from(height))
         .expect("damage rectangle dimensions are non-zero");
-
-    // Build identical paths for full frames and patches. Translating the finished
-    // paths avoids rounding differences from rebuilding curves around a local cursor.
-    let cx = f32::from(cursor.x);
-    let cy = f32::from(cursor.y);
-    let radius = spot_radius_px(surface_size.1, config.spot_size_pct);
     let transform = Transform::from_translate(-f32::from(rect_x), -f32::from(rect_y));
 
-    // ── 1. Shade layer ────────────────────────────────────────────────────
     if config.show_spot_shade {
-        let (sr, sg, sb) = parse_hex(&config.shade_color);
-        let a = (config.shade_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-        pixmap.fill(Color::from_rgba8(sr, sg, sb, a));
-
-        // Cut the transparent spotlight hole at the outer shape.
-        let mut pb = PathBuilder::new();
-        if add_shape(&mut pb, config.shape, cx, cy, radius)
-            && let Some(path) = pb.finish()
-        {
-            let paint = Paint {
-                blend_mode: BlendMode::Clear,
-                ..Paint::default()
-            };
-            pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
-        }
-    }
-
-    // ── 2. Border ring ────────────────────────────────────────────────────
-    if config.show_border {
-        let inner_r = radius * (1.0 - config.border_size_pct.min(99) as f32 / 100.0);
-        let mut pb = PathBuilder::new();
-        // Two concentric sub-paths + EvenOdd fill rule = ring between them.
-        let has_outer = add_shape(&mut pb, config.shape, cx, cy, radius);
-        let has_inner = add_shape(&mut pb, config.shape, cx, cy, inner_r);
-        if has_outer
-            && has_inner
-            && let Some(path) = pb.finish()
-        {
-            let (br, bg, bb) = parse_hex(&config.border_color);
-            let a = (config.border_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-            let paint = Paint {
-                shader: Shader::SolidColor(Color::from_rgba8(br, bg, bb, a)),
-                anti_alias: true,
-                ..Paint::default()
-            };
-            pixmap.fill_path(&path, &paint, FillRule::EvenOdd, transform, None);
-        }
-    }
-
-    // ── 3. Centre dot ─────────────────────────────────────────────────────
-    if config.show_center_dot {
-        let dot_r = config.dot_size_px as f32 / 2.0;
-        if let Some(rect) = Rect::from_xywh(cx - dot_r, cy - dot_r, dot_r * 2.0, dot_r * 2.0) {
-            let mut pb = PathBuilder::new();
-            pb.push_oval(rect);
-            if let Some(path) = pb.finish() {
-                let (dr, dg, db) = parse_hex(&config.dot_color);
-                let a = (config.dot_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let geometry = ShapeGeometry::new(config.shape, radius_px as f32);
+        if config.softness_px == 0 {
+            fill_hard_shade(&mut pixmap, config);
+            if let Some(geometry) = geometry
+                && let Some(path) = geometry.path_at((f32::from(cursor.x), f32::from(cursor.y)))
+            {
                 let paint = Paint {
-                    shader: Shader::SolidColor(Color::from_rgba8(dr, dg, db, a)),
-                    anti_alias: true,
+                    blend_mode: BlendMode::Clear,
                     ..Paint::default()
                 };
                 pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
             }
+        } else if let Some(geometry) = geometry {
+            fill_soft_shade(&mut pixmap, damage_rect, cursor, config, geometry);
+        } else {
+            fill_hard_shade(&mut pixmap, config);
         }
     }
 
-    // ── Emit BGRA (swap R↔B from tiny-skia's RGBA) ───────────────────────
+    draw_decorations(&mut pixmap, cursor, config, radius_px, transform);
+
     let mut bgra = pixmap.data().to_vec();
     for chunk in bgra.chunks_exact_mut(4) {
-        chunk.swap(0, 2); // [R, G, B, A] → [B, G, R, A]
+        chunk.swap(0, 2);
     }
 
     SpotlightFrame {
         width,
         height,
         pixels: bgra,
+    }
+}
+
+fn fill_hard_shade(pixmap: &mut Pixmap, config: &SpotlightConfig) {
+    let (red, green, blue) = parse_rgb(&config.shade_color);
+    let alpha = (config.shade_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+    for pixel in pixmap.data_mut().chunks_exact_mut(4) {
+        pixel[0] = premultiply(red, alpha);
+        pixel[1] = premultiply(green, alpha);
+        pixel[2] = premultiply(blue, alpha);
+        pixel[3] = alpha;
+    }
+}
+
+fn fill_soft_shade(
+    pixmap: &mut Pixmap,
+    damage_rect: (i16, i16, u16, u16),
+    cursor: CursorPosition,
+    config: &SpotlightConfig,
+    geometry: ShapeGeometry,
+) {
+    let (red, green, blue) = parse_rgb(&config.shade_color);
+    let opacity = config.shade_opacity.clamp(0.0, 1.0);
+    let (rect_x, rect_y, width, height) = damage_rect;
+    let pixels = pixmap.data_mut();
+    for y in 0..height {
+        for x in 0..width {
+            let global_x = i32::from(rect_x) + i32::from(x);
+            let global_y = i32::from(rect_y) + i32::from(y);
+            let local = (
+                global_x as f32 - f32::from(cursor.x),
+                global_y as f32 - f32::from(cursor.y),
+            );
+            let factor = shade_factor(geometry.signed_distance(local), config.softness_px);
+            let alpha = (opacity * factor * 255.0).round() as u8;
+            let index = (y as usize * width as usize + x as usize) * 4;
+            pixels[index] = premultiply(red, alpha);
+            pixels[index + 1] = premultiply(green, alpha);
+            pixels[index + 2] = premultiply(blue, alpha);
+            pixels[index + 3] = alpha;
+        }
+    }
+}
+
+fn premultiply(channel: u8, alpha: u8) -> u8 {
+    ((u16::from(channel) * u16::from(alpha) + 127) / 255) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shade_factor_has_a_hard_edge_when_softness_is_zero() {
+        assert_eq!(shade_factor(-1.0, 0), 0.0);
+        assert_eq!(shade_factor(0.0, 0), 0.0);
+        assert_eq!(shade_factor(1.0, 0), 1.0);
+    }
+
+    #[test]
+    fn shade_factor_fades_outward_over_the_requested_width() {
+        assert_eq!(shade_factor(-1.0, 20), 0.0);
+        assert_eq!(shade_factor(0.0, 20), 0.0);
+        assert_eq!(shade_factor(10.0, 20), 0.5);
+        assert_eq!(shade_factor(20.0, 20), 1.0);
     }
 }

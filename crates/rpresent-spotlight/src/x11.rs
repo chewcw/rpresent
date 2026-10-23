@@ -1,3 +1,4 @@
+use tiny_skia::{Color as SkiaColor, FillRule, Paint as SkiaPaint, Pixmap, Transform};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::image::Image;
 use x11rb::protocol::render::{
@@ -7,12 +8,13 @@ use x11rb::protocol::render::{
 use x11rb::protocol::shm::ConnectionExt as ShmConnectionExt;
 use x11rb::protocol::xproto::{
     ColormapAlloc, ConfigureWindowAux, ConnectionExt as XprotoConnectionExt, CreateGCAux,
-    CreateWindowAux, Gcontext, ImageFormat, Visualid, Window, WindowClass,
+    CreateWindowAux, Gcontext, ImageFormat, Rectangle, Visualid, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 
 use crate::damage;
 use crate::overlay::{CursorPosition, OverlayError, SpotlightOverlayBackend, runtime_error};
+use crate::shape::{ShapeGeometry, build_circle_decorations, parse_rgb};
 use crate::shm::ShmSegment;
 use rpresent_config::SpotlightConfig;
 
@@ -126,37 +128,76 @@ fn alpha_to_u16(alpha: f32) -> u16 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DotCacheKey {
-    size_px: u16,
-    color_rgb: (u8, u8, u8),
-    alpha_u16: u16,
+struct DecorationCacheKey {
+    radius_px: u32,
+    border_size_pct: u32,
+    border_color_rgb: (u8, u8, u8),
+    border_alpha_u16: u16,
+    dot_size_px: u16,
+    dot_color_rgb: (u8, u8, u8),
+    dot_alpha_u16: u16,
 }
 
-fn dot_cache_key(config: &SpotlightConfig) -> Option<DotCacheKey> {
-    if !config.show_center_dot {
+fn decoration_cache_key(config: &SpotlightConfig, radius_px: u32) -> Option<DecorationCacheKey> {
+    if !config.show_border && !config.show_center_dot {
         return None;
     }
 
-    let size_px = config.dot_size_px.max(1).min(u16::MAX as u32) as u16;
-    let color_rgb = parse_hex_rgb(&config.dot_color).unwrap_or((255, 255, 255));
-    let alpha_u16 = alpha_to_u16(config.dot_opacity);
+    let border_color_rgb = if config.show_border {
+        parse_rgb(&config.border_color)
+    } else {
+        (0, 0, 0)
+    };
+    let border_alpha_u16 = if config.show_border {
+        alpha_to_u16(config.border_opacity)
+    } else {
+        0
+    };
+    let dot_size_px = if config.show_center_dot {
+        config.dot_size_px.max(1).min(u16::MAX as u32) as u16
+    } else {
+        0
+    };
+    let dot_color_rgb = if config.show_center_dot {
+        parse_rgb(&config.dot_color)
+    } else {
+        (0, 0, 0)
+    };
+    let dot_alpha_u16 = if config.show_center_dot {
+        alpha_to_u16(config.dot_opacity)
+    } else {
+        0
+    };
 
-    Some(DotCacheKey {
-        size_px,
-        color_rgb,
-        alpha_u16,
+    Some(DecorationCacheKey {
+        radius_px: if config.show_border { radius_px } else { 0 },
+        border_size_pct: if config.show_border {
+            config.border_size_pct.min(99)
+        } else {
+            0
+        },
+        border_color_rgb,
+        border_alpha_u16,
+        dot_size_px,
+        dot_color_rgb,
+        dot_alpha_u16,
     })
 }
 
-fn parse_hex_rgb(color: &str) -> Option<(u8, u8, u8)> {
-    let hex = color.strip_prefix('#')?;
-    if hex.len() != 6 {
-        return None;
+fn shade_fill_color(config: &SpotlightConfig) -> Color {
+    let (red, green, blue) = parse_rgb(&config.shade_color);
+    let alpha = alpha_to_u16(config.shade_opacity);
+    Color {
+        red: premultiply_u16(red, alpha),
+        green: premultiply_u16(green, alpha),
+        blue: premultiply_u16(blue, alpha),
+        alpha,
     }
-    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-    Some((r, g, b))
+}
+
+fn premultiply_u16(channel: u8, alpha: u16) -> u16 {
+    ((u32::from(channel) * 257 * u32::from(alpha) + u32::from(u16::MAX) / 2) / u32::from(u16::MAX))
+        as u16
 }
 
 fn create_gradient_picture<'a>(
@@ -173,18 +214,22 @@ fn create_gradient_picture<'a>(
     let inner_radius = fixed_from_u32(radius_px);
     let outer_radius = fixed_from_u32(radius_px.saturating_add(config.softness_px));
     let stops: [Fixed; 2] = [0, 1 << 16];
+    let (red, green, blue) = parse_rgb(&config.shade_color);
+    let red = u16::from(red) * 257;
+    let green = u16::from(green) * 257;
+    let blue = u16::from(blue) * 257;
     let colors = [
         Color {
-            red: 0,
-            green: 0,
-            blue: 0,
+            red,
+            green,
+            blue,
             alpha: 0,
         },
         Color {
-            red: 0,
-            green: 0,
-            blue: 0,
-            alpha: alpha_to_u16(config.dim_alpha),
+            red,
+            green,
+            blue,
+            alpha: alpha_to_u16(config.shade_opacity),
         },
     ];
 
@@ -240,10 +285,22 @@ fn select_render_strategy(config: &rpresent_config::SpotlightConfig) -> RenderSt
     }
 }
 
-struct DotRenderCache {
-    key: DotCacheKey,
+struct DecorationRenderCache {
+    key: DecorationCacheKey,
     pixmap: u32,
     picture: Picture,
+    center_offset: i16,
+    width: u16,
+    height: u16,
+}
+
+struct HardCutoutCache {
+    radius_px: u32,
+    pixmap: u32,
+    picture: Picture,
+    center_offset: i16,
+    width: u16,
+    height: u16,
 }
 
 pub(crate) struct X11SpotlightOverlay {
@@ -253,8 +310,9 @@ pub(crate) struct X11SpotlightOverlay {
     surface_size: (u16, u16),
     backend: BackendKind,
     shm: ShmSegment,
-    dot_cache: Option<DotRenderCache>,
-    last_cursor: Option<CursorPosition>,
+    decoration_cache: Option<DecorationRenderCache>,
+    hard_cutout_cache: Option<HardCutoutCache>,
+    last_paint_bounds: Option<damage::DamageRect>,
     last_config: Option<SpotlightConfig>,
     needs_full_redraw: bool,
 }
@@ -371,8 +429,9 @@ impl X11SpotlightOverlay {
             surface_size: (spec.width, spec.height),
             backend,
             shm,
-            dot_cache: None,
-            last_cursor: None,
+            decoration_cache: None,
+            hard_cutout_cache: None,
+            last_paint_bounds: None,
             last_config: None,
             needs_full_redraw: true,
         })
@@ -417,6 +476,7 @@ impl X11SpotlightOverlay {
         depth: u8,
         cursor: CursorPosition,
         config: &SpotlightConfig,
+        radius_px: u32,
     ) -> Result<(), OverlayError> {
         let (surface_width, surface_height) = self.surface_size;
         let full_rect = (0_i16, 0_i16, surface_width, surface_height);
@@ -430,26 +490,18 @@ impl X11SpotlightOverlay {
             full_redraw = true;
         }
 
+        let next_bounds = damage::paint_bounds(self.surface_size, cursor, config, radius_px);
         let damage_rect = if full_redraw {
             full_rect
         } else {
-            match self.last_cursor {
-                Some(previous) => {
-                    let old = damage::paint_bounds(self.surface_size, previous, config);
-                    let new = damage::paint_bounds(self.surface_size, cursor, config);
-                    damage::union(old, new, self.surface_size)
-                }
-                None => full_rect,
-            }
+            self.last_paint_bounds
+                .map(|previous| damage::union(previous, next_bounds, self.surface_size))
+                .unwrap_or(full_rect)
         };
 
         if damage_rect.2 > 0 && damage_rect.3 > 0 {
-            let frame = crate::render::build_projecteur_frame_rect(
-                self.surface_size,
-                damage_rect,
-                cursor,
-                config,
-            );
+            let frame =
+                crate::render::build_projecteur_frame_rect(damage_rect, cursor, config, radius_px);
             crate::shm::blit_patch(
                 self.shm.bytes_mut(),
                 surface_width,
@@ -477,7 +529,7 @@ impl X11SpotlightOverlay {
                 .map_err(runtime_error)?;
         }
 
-        self.last_cursor = Some(cursor);
+        self.last_paint_bounds = Some(next_bounds);
         if config_changed {
             self.last_config = Some(config.clone());
         }
@@ -485,84 +537,62 @@ impl X11SpotlightOverlay {
     }
 }
 
-fn free_dot_cache(connection: &RustConnection, cache: DotRenderCache) {
-    let _ = connection.render_free_picture(cache.picture);
-    let _ = connection.free_pixmap(cache.pixmap);
+fn free_picture_cache(connection: &RustConnection, pixmap: u32, picture: Picture) {
+    let _ = connection.render_free_picture(picture);
+    let _ = connection.free_pixmap(pixmap);
 }
 
-/// Build premultiplied BGRA bytes for a filled circle inside a `size_px × size_px` square.
-fn build_circle_dot_bgra(size_px: u16, rgb: (u8, u8, u8), alpha_u16: u16) -> Vec<u8> {
-    let w = size_px as usize;
-    let h = size_px as usize;
-    let mut out = vec![0u8; w * h * 4];
-    let cx = (size_px as f32 - 1.0) * 0.5;
-    let cy = (size_px as f32 - 1.0) * 0.5;
-    let r = size_px as f32 * 0.5;
-    let max_a = (alpha_u16 as f32 / u16::MAX as f32).clamp(0.0, 1.0);
-    for y in 0..h {
-        for x in 0..w {
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cy;
-            if dx * dx + dy * dy <= r * r {
-                let i = (y * w + x) * 4;
-                let a8 = (max_a * 255.0).round() as u8;
-                // premultiplied BGRA
-                out[i] = ((rgb.2 as u16 * a8 as u16) / 255) as u8;
-                out[i + 1] = ((rgb.1 as u16 * a8 as u16) / 255) as u8;
-                out[i + 2] = ((rgb.0 as u16 * a8 as u16) / 255) as u8;
-                out[i + 3] = a8;
-            }
-        }
-    }
-    out
+fn free_decoration_cache(connection: &RustConnection, cache: DecorationRenderCache) {
+    free_picture_cache(connection, cache.pixmap, cache.picture);
 }
 
-/// Create a pixmap + picture for the given dot key, uploading circle pixels.
-fn upload_dot_cache(
-    connection: &RustConnection,
-    window: Window,
-    depth: u8,
-    key: DotCacheKey,
-) -> Result<DotRenderCache, OverlayError> {
-    if depth != 32 {
-        return Err(runtime_error(format!(
-            "dot cache requires 32-bit depth, got {depth}"
-        )));
-    }
+fn free_hard_cutout_cache(connection: &RustConnection, cache: HardCutoutCache) {
+    free_picture_cache(connection, cache.pixmap, cache.picture);
+}
 
-    let sz = key.size_px;
-    let pixels = build_circle_dot_bgra(sz, key.color_rgb, key.alpha_u16);
-
-    // Locate ARGB32 pictformat.
+fn argb32_pictformat(connection: &RustConnection) -> Result<Pictformat, OverlayError> {
     let formats = connection
         .render_query_pict_formats()
         .map_err(runtime_error)?
         .reply()
         .map_err(runtime_error)?;
-    let pictformat = formats
+    formats
         .formats
         .iter()
-        .find(|f| {
-            f.type_ == PictType::DIRECT
-                && f.depth == 32
-                && f.direct.red_shift == 16
-                && f.direct.red_mask == 255
-                && f.direct.green_shift == 8
-                && f.direct.green_mask == 255
-                && f.direct.blue_shift == 0
-                && f.direct.blue_mask == 255
-                && f.direct.alpha_shift == 24
-                && f.direct.alpha_mask == 255
+        .find(|format| {
+            format.type_ == PictType::DIRECT
+                && format.depth == 32
+                && format.direct.red_shift == 16
+                && format.direct.red_mask == 255
+                && format.direct.green_shift == 8
+                && format.direct.green_mask == 255
+                && format.direct.blue_shift == 0
+                && format.direct.blue_mask == 255
+                && format.direct.alpha_shift == 24
+                && format.direct.alpha_mask == 255
         })
-        .map(|f| f.id)
-        .ok_or_else(|| runtime_error("ARGB32 pictformat not found for dot cache"))?;
+        .map(|format| format.id)
+        .ok_or_else(|| runtime_error("ARGB32 pictformat not found for spotlight cache"))
+}
 
+fn upload_picture_cache(
+    connection: &RustConnection,
+    window: Window,
+    depth: u8,
+    frame: &crate::overlay::SpotlightFrame,
+) -> Result<(u32, Picture), OverlayError> {
+    if depth != 32 {
+        return Err(runtime_error(format!(
+            "spotlight cache requires 32-bit depth, got {depth}"
+        )));
+    }
+
+    let pictformat = argb32_pictformat(connection)?;
     let pixmap = connection.generate_id().map_err(runtime_error)?;
-    connection
-        .create_pixmap(depth, pixmap, window, sz, sz)
-        .map_err(runtime_error)?;
+    if let Err(error) = connection.create_pixmap(depth, pixmap, window, frame.width, frame.height) {
+        return Err(runtime_error(error));
+    }
 
-    // Temporary GC to upload image data.
     let gc = match connection.generate_id() {
         Ok(id) => id,
         Err(error) => {
@@ -576,24 +606,26 @@ fn upload_dot_cache(
         let _ = connection.free_pixmap(pixmap);
         return Err(runtime_error(error));
     }
-    let mut image = match Image::allocate_native(sz, sz, depth, connection.setup()) {
-        Ok(img) => img,
-        Err(error) => {
-            let _ = connection.free_gc(gc);
-            let _ = connection.free_pixmap(pixmap);
-            return Err(runtime_error(error));
-        }
-    };
-    if image.data().len() != pixels.len() {
+
+    let mut image =
+        match Image::allocate_native(frame.width, frame.height, depth, connection.setup()) {
+            Ok(image) => image,
+            Err(error) => {
+                let _ = connection.free_gc(gc);
+                let _ = connection.free_pixmap(pixmap);
+                return Err(runtime_error(error));
+            }
+        };
+    if image.data().len() != frame.pixels.len() {
         let _ = connection.free_gc(gc);
         let _ = connection.free_pixmap(pixmap);
         return Err(runtime_error(format!(
-            "dot cache image size mismatch: image {} bytes, pixels {} bytes",
+            "spotlight cache image size mismatch: image {} bytes, pixels {}",
             image.data().len(),
-            pixels.len()
+            frame.pixels.len()
         )));
     }
-    image.data_mut().copy_from_slice(&pixels);
+    image.data_mut().copy_from_slice(&frame.pixels);
     if let Err(error) = image.put(connection, pixmap, gc, 0, 0) {
         let _ = connection.free_gc(gc);
         let _ = connection.free_pixmap(pixmap);
@@ -615,52 +647,141 @@ fn upload_dot_cache(
         return Err(runtime_error(error));
     }
 
-    Ok(DotRenderCache {
-        key,
-        pixmap,
-        picture,
-    })
+    Ok((pixmap, picture))
 }
 
-/// Return the cached dot picture, rebuilding it when the key changes.
-/// Returns None when the dot is disabled.
-fn ensure_dot_cache(
+fn build_circle_cutout(radius_px: u32) -> (crate::overlay::SpotlightFrame, i16) {
+    let extent = radius_px as u16 + 1;
+    let side = extent * 2 + 1;
+    let center = (extent as f32, extent as f32);
+    let mut pixmap = Pixmap::new(u32::from(side), u32::from(side)).expect("valid cutout size");
+    if let Some(geometry) = ShapeGeometry::new(rpresent_config::SpotShape::Circle, radius_px as f32)
+        && let Some(path) = geometry.path_at(center)
+    {
+        let paint = SkiaPaint {
+            shader: tiny_skia::Shader::SolidColor(SkiaColor::from_rgba8(255, 255, 255, 255)),
+            anti_alias: true,
+            ..SkiaPaint::default()
+        };
+        pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+    let mut pixels = pixmap.data().to_vec();
+    for chunk in pixels.chunks_exact_mut(4) {
+        chunk.swap(0, 2);
+    }
+    (
+        crate::overlay::SpotlightFrame {
+            width: side,
+            height: side,
+            pixels,
+        },
+        extent as i16,
+    )
+}
+
+fn ensure_hard_cutout_cache(
     connection: &RustConnection,
     window: Window,
     depth: u8,
-    dot_cache: &mut Option<DotRenderCache>,
-    config: &SpotlightConfig,
-) -> Result<Option<(Picture, DotCacheKey)>, OverlayError> {
-    let key = match dot_cache_key(config) {
-        None => {
-            if let Some(old) = dot_cache.take() {
-                free_dot_cache(connection, old);
-            }
-            return Ok(None);
-        }
-        Some(k) => k,
-    };
-
-    if let Some(ref cache) = *dot_cache
-        && cache.key == key
+    cache: &mut Option<HardCutoutCache>,
+    radius_px: u32,
+) -> Result<(Picture, i16, u16, u16), OverlayError> {
+    if let Some(existing) = cache.as_ref()
+        && existing.radius_px == radius_px
     {
-        return Ok(Some((cache.picture, cache.key)));
+        return Ok((
+            existing.picture,
+            existing.center_offset,
+            existing.width,
+            existing.height,
+        ));
     }
+    if let Some(old) = cache.take() {
+        free_hard_cutout_cache(connection, old);
+    }
+    let (frame, center_offset) = build_circle_cutout(radius_px);
+    let (pixmap, picture) = upload_picture_cache(connection, window, depth, &frame)?;
+    let new_cache = HardCutoutCache {
+        radius_px,
+        pixmap,
+        picture,
+        center_offset,
+        width: frame.width,
+        height: frame.height,
+    };
+    let result = (
+        new_cache.picture,
+        new_cache.center_offset,
+        new_cache.width,
+        new_cache.height,
+    );
+    *cache = Some(new_cache);
+    Ok(result)
+}
 
-    // Key changed — free old cache then rebuild.
-    if let Some(old) = dot_cache.take() {
-        free_dot_cache(connection, old);
+fn ensure_decoration_cache(
+    connection: &RustConnection,
+    window: Window,
+    depth: u8,
+    cache: &mut Option<DecorationRenderCache>,
+    config: &SpotlightConfig,
+    radius_px: u32,
+) -> Result<Option<(Picture, i16, u16, u16)>, OverlayError> {
+    let Some(key) = decoration_cache_key(config, radius_px) else {
+        if let Some(old) = cache.take() {
+            free_decoration_cache(connection, old);
+        }
+        return Ok(None);
+    };
+    if let Some(existing) = cache.as_ref()
+        && existing.key == key
+    {
+        return Ok(Some((
+            existing.picture,
+            existing.center_offset,
+            existing.width,
+            existing.height,
+        )));
     }
-    let new_cache = upload_dot_cache(connection, window, depth, key)?;
-    let picture = new_cache.picture;
-    *dot_cache = Some(new_cache);
-    Ok(Some((picture, key)))
+    if let Some(old) = cache.take() {
+        free_decoration_cache(connection, old);
+    }
+    let decoration_radius = if config.show_border { radius_px } else { 0 };
+    let Some((frame, center_offset)) = build_circle_decorations(decoration_radius, config) else {
+        return Ok(None);
+    };
+    let (pixmap, picture) = upload_picture_cache(connection, window, depth, &frame)?;
+    let new_cache = DecorationRenderCache {
+        key,
+        pixmap,
+        picture,
+        center_offset,
+        width: frame.width,
+        height: frame.height,
+    };
+    let result = (
+        new_cache.picture,
+        new_cache.center_offset,
+        new_cache.width,
+        new_cache.height,
+    );
+    *cache = Some(new_cache);
+    Ok(Some(result))
 }
 
 impl Drop for X11SpotlightOverlay {
     fn drop(&mut self) {
-        if let Some(cache) = self.dot_cache.take() {
-            free_dot_cache(&self.connection, cache);
+        if let Some(cache) = self.decoration_cache.take() {
+            free_decoration_cache(&self.connection, cache);
+        }
+        if let Some(cache) = self.hard_cutout_cache.take() {
+            free_hard_cutout_cache(&self.connection, cache);
         }
         match self.backend {
             BackendKind::Render { gc, .. } | BackendKind::Shm { gc, .. } => {
@@ -771,11 +892,12 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
                     cursor,
                     config,
                     radius_px,
-                    &mut self.dot_cache,
+                    &mut self.decoration_cache,
+                    &mut self.hard_cutout_cache,
                     depth,
                 )
             }
-            _ => self.redraw_shm(gc, depth, cursor, config),
+            _ => self.redraw_shm(gc, depth, cursor, config, radius_px),
         };
         result.inspect_err(|error| {
             tracing::error!(
@@ -944,41 +1066,117 @@ fn redraw_render(
     cursor: CursorPosition,
     config: &SpotlightConfig,
     radius_px: u32,
-    dot_cache: &mut Option<DotRenderCache>,
+    decoration_cache: &mut Option<DecorationRenderCache>,
+    hard_cutout_cache: &mut Option<HardCutoutCache>,
     depth: u8,
 ) -> Result<(), OverlayError> {
-    let gradient = create_gradient_picture(connection, cursor, config, radius_px)?;
-    let _ = render::composite(
-        connection,
-        PictOp::SRC,
-        gradient.picture(),
-        x11rb::NONE,
-        window_picture,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        surface_size.0,
-        surface_size.1,
-    )
-    .inspect_err(|error| {
-        tracing::error!(window, ?error, "failed to composite spotlight overlay");
-    })
-    .map_err(runtime_error)?;
+    let full_rect = [Rectangle {
+        x: 0,
+        y: 0,
+        width: surface_size.0,
+        height: surface_size.1,
+    }];
 
-    // Composite circle dot if enabled.
-    if let Some((dot_picture, key)) =
-        ensure_dot_cache(connection, window, depth, dot_cache, config)?
-    {
-        let half = (key.size_px as i32) / 2;
-        let dst_x = (cursor.x as i32 - half).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-        let dst_y = (cursor.y as i32 - half).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-        let _ = render::composite(
+    if config.show_spot_shade {
+        if config.softness_px == 0 {
+            connection
+                .render_fill_rectangles(
+                    PictOp::SRC,
+                    window_picture,
+                    shade_fill_color(config),
+                    &full_rect,
+                )
+                .map_err(runtime_error)?
+                .check()
+                .map_err(runtime_error)?;
+
+            let (cutout_picture, center_offset, width, height) =
+                ensure_hard_cutout_cache(connection, window, depth, hard_cutout_cache, radius_px)?;
+            let dst_x = (i32::from(cursor.x) - i32::from(center_offset))
+                .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            let dst_y = (i32::from(cursor.y) - i32::from(center_offset))
+                .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            render::composite(
+                connection,
+                PictOp::OUT_REVERSE,
+                cutout_picture,
+                x11rb::NONE,
+                window_picture,
+                0,
+                0,
+                0,
+                0,
+                dst_x,
+                dst_y,
+                width,
+                height,
+            )
+            .inspect_err(|error| {
+                tracing::error!(window, ?error, "failed to composite spotlight cutout");
+            })
+            .map_err(runtime_error)?;
+        } else {
+            if let Some(old) = hard_cutout_cache.take() {
+                free_hard_cutout_cache(connection, old);
+            }
+            let gradient = create_gradient_picture(connection, cursor, config, radius_px)?;
+            render::composite(
+                connection,
+                PictOp::SRC,
+                gradient.picture(),
+                x11rb::NONE,
+                window_picture,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                surface_size.0,
+                surface_size.1,
+            )
+            .inspect_err(|error| {
+                tracing::error!(window, ?error, "failed to composite spotlight overlay");
+            })
+            .map_err(runtime_error)?;
+        }
+    } else {
+        if let Some(old) = hard_cutout_cache.take() {
+            free_hard_cutout_cache(connection, old);
+        }
+        connection
+            .render_fill_rectangles(
+                PictOp::CLEAR,
+                window_picture,
+                Color {
+                    red: 0,
+                    green: 0,
+                    blue: 0,
+                    alpha: 0,
+                },
+                &full_rect,
+            )
+            .map_err(runtime_error)?
+            .check()
+            .map_err(runtime_error)?;
+    }
+
+    if let Some((decoration_picture, center_offset, width, height)) = ensure_decoration_cache(
+        connection,
+        window,
+        depth,
+        decoration_cache,
+        config,
+        radius_px,
+    )? {
+        let dst_x = (i32::from(cursor.x) - i32::from(center_offset))
+            .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let dst_y = (i32::from(cursor.y) - i32::from(center_offset))
+            .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        render::composite(
             connection,
             PictOp::OVER,
-            dot_picture,
+            decoration_picture,
             x11rb::NONE,
             window_picture,
             0,
@@ -987,11 +1185,11 @@ fn redraw_render(
             0,
             dst_x,
             dst_y,
-            key.size_px,
-            key.size_px,
+            width,
+            height,
         )
         .inspect_err(|error| {
-            tracing::error!(window, ?error, "failed to composite spotlight center dot");
+            tracing::error!(window, ?error, "failed to composite spotlight decorations");
         })
         .map_err(runtime_error)?;
     }
@@ -1076,34 +1274,379 @@ mod tests {
     }
 
     #[test]
-    fn dot_cache_key_changes_when_visual_inputs_change() {
-        let a = rpresent_config::SpotlightConfig {
-            show_center_dot: true,
-            dot_size_px: 8,
-            dot_color: "#ffffff".to_owned(),
-            dot_opacity: 0.8,
-            ..rpresent_config::SpotlightConfig::default()
+    fn decoration_cache_key_covers_border_and_dot_settings() {
+        let base = rpresent_config::SpotlightConfig::default();
+        let base_key = decoration_cache_key(&base, 40).unwrap();
+
+        for config in [
+            rpresent_config::SpotlightConfig {
+                show_border: false,
+                ..base.clone()
+            },
+            rpresent_config::SpotlightConfig {
+                border_size_pct: 20,
+                ..base.clone()
+            },
+            rpresent_config::SpotlightConfig {
+                border_color: "#ff0000".to_owned(),
+                ..base.clone()
+            },
+            rpresent_config::SpotlightConfig {
+                border_opacity: 0.4,
+                ..base.clone()
+            },
+            rpresent_config::SpotlightConfig {
+                show_center_dot: false,
+                ..base.clone()
+            },
+            rpresent_config::SpotlightConfig {
+                dot_size_px: 12,
+                ..base.clone()
+            },
+            rpresent_config::SpotlightConfig {
+                dot_color: "#00ff00".to_owned(),
+                ..base.clone()
+            },
+            rpresent_config::SpotlightConfig {
+                dot_opacity: 0.4,
+                ..base.clone()
+            },
+        ] {
+            assert_ne!(decoration_cache_key(&config, 40), Some(base_key));
+        }
+
+        let dot_only = rpresent_config::SpotlightConfig {
+            show_border: false,
+            ..base.clone()
         };
+        assert_eq!(
+            decoration_cache_key(&dot_only, 40),
+            decoration_cache_key(&dot_only, 80)
+        );
+        assert_ne!(
+            decoration_cache_key(&base, 40),
+            decoration_cache_key(&base, 80)
+        );
 
-        let mut b = a.clone();
-        b.dot_size_px = 9;
-        assert_ne!(dot_cache_key(&a), dot_cache_key(&b));
-
-        b = a.clone();
-        b.dot_color = "#ff0000".to_owned();
-        assert_ne!(dot_cache_key(&a), dot_cache_key(&b));
-
-        b = a.clone();
-        b.dot_opacity = 0.5;
-        assert_ne!(dot_cache_key(&a), dot_cache_key(&b));
+        let hidden = rpresent_config::SpotlightConfig {
+            show_border: false,
+            show_center_dot: false,
+            ..base
+        };
+        assert_eq!(decoration_cache_key(&hidden, 40), None);
     }
 
     #[test]
-    fn dot_cache_key_none_when_dot_is_hidden() {
-        let c = rpresent_config::SpotlightConfig {
-            show_center_dot: false,
-            ..rpresent_config::SpotlightConfig::default()
+    fn shade_fill_color_is_premultiplied_and_uses_the_shared_rgb_parser() {
+        let config = rpresent_config::SpotlightConfig {
+            shade_color: "#804020".to_owned(),
+            shade_opacity: 0.5,
+            ..Default::default()
         };
-        assert_eq!(dot_cache_key(&c), None);
+        let color = shade_fill_color(&config);
+        assert_eq!(color.red, 16_448);
+        assert_eq!(color.green, 8_224);
+        assert_eq!(color.blue, 4_112);
+        assert_eq!(color.alpha, 32_768);
+    }
+
+    #[test]
+    fn hard_cutout_geometry_changes_with_radius() {
+        let (small, small_offset) = build_circle_cutout(40);
+        let (large, large_offset) = build_circle_cutout(80);
+
+        assert!(large.width > small.width);
+        assert_eq!(small.width, small.height);
+        assert_eq!(large.width, large.height);
+        assert_eq!(small_offset, (small.width / 2) as i16);
+        assert_eq!(large_offset, (large.width / 2) as i16);
+        assert_ne!(small.pixels, large.pixels);
+    }
+
+    #[test]
+    fn hard_cutout_geometry_is_independent_of_cursor_position() {
+        let (first, first_offset) = build_circle_cutout(40);
+        let (second, second_offset) = build_circle_cutout(40);
+
+        assert_eq!(first, second);
+        assert_eq!(first_offset, second_offset);
+    }
+
+    #[test]
+    #[ignore = "requires an X server with RENDER and an ARGB32 format"]
+    fn xrender_circle_matches_software_layers() {
+        assert_circle_render_parity();
+    }
+
+    fn assert_circle_render_parity() {
+        let (connection, screen_num) = x11rb::connect(None).expect("connect to the X server");
+        let screen = &connection.setup().roots[screen_num];
+        let surface_size = (128_u16, 96_u16);
+        let target_pixmap = connection.generate_id().expect("allocate target pixmap id");
+        connection
+            .create_pixmap(
+                32,
+                target_pixmap,
+                screen.root,
+                surface_size.0,
+                surface_size.1,
+            )
+            .expect("create ARGB32 target pixmap")
+            .check()
+            .expect("create target pixmap request");
+        let target_picture = connection
+            .generate_id()
+            .expect("allocate target picture id");
+        connection
+            .render_create_picture(
+                target_picture,
+                target_pixmap,
+                argb32_pictformat(&connection).expect("find ARGB32 picture format"),
+                &CreatePictureAux::default(),
+            )
+            .expect("create target picture")
+            .check()
+            .expect("create target picture request");
+
+        let mut decoration_cache = None;
+        let mut hard_cutout_cache = None;
+        let center = CursorPosition { x: 64, y: 48 };
+        let soft_shade = SpotlightConfig {
+            shade_color: "#804020".to_owned(),
+            shade_opacity: 0.4,
+            softness_px: 20,
+            show_border: false,
+            show_center_dot: false,
+            ..Default::default()
+        };
+
+        let cases = [
+            ("colored soft shade", soft_shade.clone(), center, 40),
+            (
+                "hard shade",
+                SpotlightConfig {
+                    softness_px: 0,
+                    show_border: false,
+                    show_center_dot: false,
+                    ..soft_shade.clone()
+                },
+                center,
+                40,
+            ),
+            (
+                "border only",
+                SpotlightConfig {
+                    show_spot_shade: false,
+                    show_center_dot: false,
+                    show_border: true,
+                    border_color: "#20a0e0".to_owned(),
+                    border_size_pct: 15,
+                    border_opacity: 0.7,
+                    ..Default::default()
+                },
+                center,
+                40,
+            ),
+            (
+                "dot only",
+                SpotlightConfig {
+                    show_spot_shade: false,
+                    show_border: false,
+                    show_center_dot: true,
+                    dot_size_px: 12,
+                    dot_color: "#e02070".to_owned(),
+                    dot_opacity: 0.8,
+                    ..Default::default()
+                },
+                center,
+                40,
+            ),
+            (
+                "all disabled",
+                SpotlightConfig {
+                    show_spot_shade: false,
+                    show_border: false,
+                    show_center_dot: false,
+                    ..Default::default()
+                },
+                center,
+                40,
+            ),
+            (
+                "all enabled",
+                SpotlightConfig {
+                    shade_color: "#102040".to_owned(),
+                    shade_opacity: 0.45,
+                    softness_px: 12,
+                    border_color: "#40d080".to_owned(),
+                    border_opacity: 0.65,
+                    dot_color: "#e0a020".to_owned(),
+                    dot_opacity: 0.85,
+                    dot_size_px: 10,
+                    ..Default::default()
+                },
+                center,
+                40,
+            ),
+            (
+                "large dot",
+                SpotlightConfig {
+                    show_spot_shade: false,
+                    show_border: false,
+                    show_center_dot: true,
+                    dot_size_px: 100,
+                    dot_color: "#8030c0".to_owned(),
+                    dot_opacity: 0.5,
+                    ..Default::default()
+                },
+                center,
+                40,
+            ),
+            ("radius 40", soft_shade.clone(), center, 40),
+            ("radius 80", soft_shade.clone(), center, 80),
+            ("radius 30", soft_shade.clone(), center, 30),
+            (
+                "cursor moved",
+                soft_shade.clone(),
+                CursorPosition { x: 35, y: 25 },
+                40,
+            ),
+            (
+                "edge position",
+                soft_shade.clone(),
+                CursorPosition { x: 2, y: 3 },
+                40,
+            ),
+        ];
+
+        for (name, config, cursor, radius_px) in cases {
+            redraw_render(
+                &connection,
+                screen.root,
+                target_picture,
+                surface_size,
+                cursor,
+                &config,
+                radius_px,
+                &mut decoration_cache,
+                &mut hard_cutout_cache,
+                32,
+            )
+            .unwrap_or_else(|error| panic!("{name}: XRender redraw failed: {error}"));
+            connection.flush().expect("flush XRender commands");
+
+            let image = Image::get(
+                &connection,
+                target_pixmap,
+                0,
+                0,
+                surface_size.0,
+                surface_size.1,
+            )
+            .unwrap_or_else(|error| panic!("{name}: read target pixmap: {error}"))
+            .0;
+            let expected =
+                crate::render::build_projecteur_frame(surface_size, cursor, &config, radius_px);
+            for y in 0..surface_size.1 {
+                for x in 0..surface_size.0 {
+                    let actual_pixel = image.get_pixel(x, y);
+                    let actual = [
+                        actual_pixel as u8,
+                        (actual_pixel >> 8) as u8,
+                        (actual_pixel >> 16) as u8,
+                        (actual_pixel >> 24) as u8,
+                    ];
+                    let expected = expected.bgra_at(x, y);
+                    let distance = (f32::from(x) - f32::from(cursor.x))
+                        .hypot(f32::from(y) - f32::from(cursor.y));
+                    let mut boundaries = vec![radius_px as f32];
+                    if config.show_spot_shade && config.softness_px > 0 {
+                        boundaries.push(radius_px as f32 + config.softness_px as f32);
+                    }
+                    if config.show_border {
+                        boundaries.push(
+                            radius_px as f32
+                                * (1.0 - config.border_size_pct.min(99) as f32 / 100.0),
+                        );
+                    }
+                    if config.show_center_dot {
+                        boundaries.push(config.dot_size_px as f32 / 2.0);
+                    }
+                    // XRender evaluates radial gradients in fixed-point pixel space, so its
+                    // sample can differ slightly from the integer-coordinate software sample.
+                    let tolerance = if boundaries
+                        .iter()
+                        .any(|boundary| (distance - boundary).abs() <= 1.5)
+                    {
+                        10
+                    } else {
+                        8
+                    };
+                    for channel in 0..4 {
+                        let difference = actual[channel].abs_diff(expected[channel]);
+                        assert!(
+                            difference <= tolerance,
+                            "{name}: pixel ({x}, {y}) channel {channel} differs: actual={actual:?}, expected={expected:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        let cache_config = SpotlightConfig {
+            show_spot_shade: false,
+            show_center_dot: true,
+            dot_size_px: 10,
+            ..Default::default()
+        };
+        redraw_render(
+            &connection,
+            screen.root,
+            target_picture,
+            surface_size,
+            center,
+            &cache_config,
+            40,
+            &mut decoration_cache,
+            &mut hard_cutout_cache,
+            32,
+        )
+        .expect("render cache reuse setup");
+        connection.flush().expect("flush cache setup");
+        let first_picture = decoration_cache.as_ref().map(|cache| cache.picture);
+        redraw_render(
+            &connection,
+            screen.root,
+            target_picture,
+            surface_size,
+            CursorPosition { x: 20, y: 20 },
+            &cache_config,
+            40,
+            &mut decoration_cache,
+            &mut hard_cutout_cache,
+            32,
+        )
+        .expect("render cursor-only cache reuse");
+        assert_eq!(
+            first_picture,
+            decoration_cache.as_ref().map(|cache| cache.picture)
+        );
+
+        if let Some(cache) = decoration_cache.take() {
+            free_decoration_cache(&connection, cache);
+        }
+        if let Some(cache) = hard_cutout_cache.take() {
+            free_hard_cutout_cache(&connection, cache);
+        }
+        connection
+            .render_free_picture(target_picture)
+            .expect("free target picture")
+            .check()
+            .expect("free target picture request");
+        connection
+            .free_pixmap(target_pixmap)
+            .expect("free target pixmap")
+            .check()
+            .expect("free target pixmap request");
     }
 }

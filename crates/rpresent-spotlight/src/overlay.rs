@@ -208,7 +208,7 @@ pub(crate) fn build_spotlight_frame(
     cursor: CursorPosition,
     radius_px: u32,
     softness_px: u32,
-    dim_alpha: f32,
+    shade_opacity: f32,
 ) -> SpotlightFrame {
     let (width, height) = surface_size;
     let rgba_byte = 4; // 4 bytes per pixel in RGBA format
@@ -220,7 +220,7 @@ pub(crate) fn build_spotlight_frame(
             let dy = y as f32 - cursor.y as f32;
             let distance = (dx * dx + dy * dy).sqrt();
             let spot = spotlight_alpha(distance, radius_px as f32, softness_px as f32);
-            let dim = dim_alpha * (1.0 - spot);
+            let dim = shade_opacity * (1.0 - spot);
             let alpha = (255.0 * dim.clamp(0.0, 1.0)) as u8;
             let offset = ((y as usize * width as usize) + x as usize) * rgba_byte;
             pixels[offset..offset + rgba_byte].copy_from_slice(&[0, 0, 0, alpha]);
@@ -305,6 +305,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct FakeBackend {
         calls: Vec<&'static str>,
+        redraw_radii: Vec<u32>,
         surface_size: (u16, u16),
         cursor: CursorPosition,
     }
@@ -332,9 +333,10 @@ mod tests {
             &mut self,
             _cursor: CursorPosition,
             _config: &rpresent_config::SpotlightConfig,
-            _radius_px: u32,
+            radius_px: u32,
         ) -> Result<(), OverlayError> {
             self.calls.push("redraw");
+            self.redraw_radii.push(radius_px);
             Ok(())
         }
     }
@@ -361,6 +363,10 @@ mod tests {
         runtime.run(rx).unwrap();
 
         assert_eq!(runtime.backend.calls, vec!["show", "redraw", "hide"]);
+        assert_eq!(
+            runtime.backend.redraw_radii,
+            vec![rpresent_config::SpotlightConfig::default().radius_px]
+        );
     }
 
     #[test]
@@ -424,6 +430,58 @@ mod tests {
 
         assert_eq!(runtime.radius_px, 120);
         assert_eq!(runtime.backend.calls, vec!["show", "redraw", "redraw"]);
+        assert_eq!(runtime.backend.redraw_radii, vec![100, 120]);
+    }
+
+    #[test]
+    fn hidden_resize_is_forwarded_on_next_activation() {
+        let backend = FakeBackend {
+            surface_size: (16, 16),
+            cursor: CursorPosition { x: 8, y: 8 },
+            ..Default::default()
+        };
+        let mut runtime = SpotlightOverlayRuntime::new(
+            config_service(rpresent_config::SpotlightConfig {
+                radius_px: 100,
+                ..Default::default()
+            }),
+            backend,
+        );
+
+        runtime
+            .process_message(SpotlightRuntimeMessage::ResizeBy(20.0))
+            .unwrap();
+        assert!(runtime.backend.redraw_radii.is_empty());
+
+        runtime.process_state(SpotlightState::On).unwrap();
+
+        assert_eq!(runtime.backend.redraw_radii, vec![120]);
+    }
+
+    #[test]
+    fn wheel_resize_clamps_the_live_radius_at_both_bounds() {
+        let backend = FakeBackend {
+            surface_size: (16, 16),
+            cursor: CursorPosition { x: 8, y: 8 },
+            ..Default::default()
+        };
+        let mut runtime = SpotlightOverlayRuntime::new(
+            config_service(rpresent_config::SpotlightConfig {
+                radius_px: 100,
+                ..Default::default()
+            }),
+            backend,
+        );
+
+        runtime.process_state(SpotlightState::On).unwrap();
+        runtime
+            .process_message(SpotlightRuntimeMessage::ResizeBy(-1000.0))
+            .unwrap();
+        runtime
+            .process_message(SpotlightRuntimeMessage::ResizeBy(10000.0))
+            .unwrap();
+
+        assert_eq!(runtime.backend.redraw_radii, vec![100, 24, 4096]);
     }
 
     #[test]

@@ -17,11 +17,11 @@ fn load_or_default_keeps_the_caller_path_and_gives_defaults_for_a_missing_file()
 fn load_or_default_exposes_the_loaded_sections() {
     let tempdir = tempfile::tempdir().unwrap();
     let path = tempdir.path().join("config.toml");
-    std::fs::write(&path, "[spotlight]\nspot_size_pct = 42\n").unwrap();
+    std::fs::write(&path, "[spotlight]\nradius_px = 42\n").unwrap();
 
     let config_service = ConfigService::load_or_default(path).unwrap();
 
-    assert_eq!(config_service.spotlight().spot_size_pct, 42);
+    assert_eq!(config_service.spotlight().radius_px, 42);
     assert_eq!(config_service.zoom(), &ZoomConfig::default());
 }
 
@@ -29,7 +29,7 @@ fn load_or_default_exposes_the_loaded_sections() {
 fn new_builds_a_service_from_an_in_memory_config() {
     let config = Config {
         spotlight: SpotlightConfig {
-            spot_size_pct: 7,
+            radius_px: 70,
             ..SpotlightConfig::default()
         },
         ..Config::default()
@@ -38,7 +38,7 @@ fn new_builds_a_service_from_an_in_memory_config() {
     let config_service = ConfigService::new(PathBuf::from("test.toml"), config);
 
     assert_eq!(config_service.path(), Path::new("test.toml"));
-    assert_eq!(config_service.spotlight().spot_size_pct, 7);
+    assert_eq!(config_service.spotlight().radius_px, 70);
 }
 
 #[test]

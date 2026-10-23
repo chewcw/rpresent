@@ -39,11 +39,9 @@ fn parses_module_sections_and_applies_defaults() {
     assert!(config.spotlight.enabled_on_start);
     assert_eq!(config.spotlight.radius_px, 260);
     assert_eq!(config.spotlight.softness_px, 80);
-    assert!((config.spotlight.dim_alpha - 0.72).abs() < f32::EPSILON);
     assert!((config.spotlight.wheel_speed - 8.0).abs() < f32::EPSILON);
     // Projecteur-style defaults applied when not specified in TOML
     assert!(config.spotlight.show_spot_shade);
-    assert_eq!(config.spotlight.spot_size_pct, 30);
     assert_eq!(config.spotlight.shape, SpotShape::Circle);
     assert!(config.spotlight.show_center_dot);
     assert_eq!(config.spotlight.dot_size_px, 8);
@@ -75,6 +73,24 @@ fn parses_module_sections_and_applies_defaults() {
 fn rejects_unknown_keys() {
     let error = load_from_str("[spotlight]\nunknown = 1").unwrap_err();
     assert!(error.to_string().contains("unknown field"));
+}
+
+#[test]
+fn removed_spotlight_keys_are_rejected() {
+    for entry in ["dim_alpha = 0.9", "spot_size_pct = 10"] {
+        let error = load_from_str(&format!("[spotlight]\n{entry}\n")).unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+    }
+}
+
+#[test]
+fn default_spotlight_config_uses_only_canonical_keys() {
+    let text = rpresent_config::default_config_toml();
+    assert!(text.contains("radius_px = 240"));
+    assert!(text.contains("shade_opacity = 0.6"));
+    assert!(!text.contains("dim_alpha"));
+    assert!(!text.contains("spot_size_pct"));
+    assert_eq!(load_from_str(&text).unwrap(), Config::default());
 }
 
 #[test]
@@ -115,7 +131,10 @@ fn default_config_file_is_written_with_all_sections() {
     assert!(contents.contains("socket_name = \"rpresent.sock\""));
     assert!(contents.contains("spotlight_mode = \"Ctrl+1\""));
     assert!(contents.contains("wheel_modifier = \"Ctrl\""));
-    assert!(contents.contains("spot_size_pct = 30"));
+    assert!(contents.contains("radius_px = 240"));
+    assert!(contents.contains("shade_opacity = 0.6"));
+    assert!(!contents.contains("dim_alpha"));
+    assert!(!contents.contains("spot_size_pct"));
     assert!(contents.contains("shade_color = \"#000000\""));
     assert!(contents.contains("border_size_pct = 10"));
     assert!(contents.contains("wheel_speed = 12.0"));

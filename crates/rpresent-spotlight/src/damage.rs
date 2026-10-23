@@ -1,6 +1,7 @@
 //! Damage-rectangle geometry for partial spotlight redraws.
 
 use crate::overlay::CursorPosition;
+use crate::shape::ShapeGeometry;
 
 /// A changed region as `(x, y, width, height)` in surface pixels.
 pub(crate) type DamageRect = (i16, i16, u16, u16);
@@ -51,14 +52,24 @@ pub(crate) fn paint_bounds(
     surface_size: (u16, u16),
     cursor: CursorPosition,
     config: &rpresent_config::SpotlightConfig,
+    radius_px: u32,
 ) -> DamageRect {
-    let spot_radius = crate::render::spot_radius_px(surface_size.1, config.spot_size_pct);
+    let shape_extent = if config.show_spot_shade {
+        let Some(geometry) = ShapeGeometry::new(config.shape, radius_px as f32) else {
+            return (0, 0, surface_size.0, surface_size.1);
+        };
+        geometry.extent_px() + config.softness_px as f32
+    } else {
+        ShapeGeometry::new(config.shape, radius_px as f32)
+            .map(|geometry| geometry.extent_px())
+            .unwrap_or(radius_px as f32)
+    };
     let dot_radius = if config.show_center_dot {
         config.dot_size_px as f32 / 2.0
     } else {
         0.0
     };
-    spotlight_bounds(surface_size, cursor, spot_radius.max(dot_radius), 1)
+    spotlight_bounds(surface_size, cursor, shape_extent.max(dot_radius), 1)
 }
 
 fn is_empty(rect: DamageRect) -> bool {
@@ -126,22 +137,22 @@ mod tests {
     #[test]
     fn movement_bounds_include_a_dot_larger_than_the_spotlight() {
         let config = rpresent_config::SpotlightConfig {
-            spot_size_pct: 1,
             dot_size_px: 100,
             shape: rpresent_config::SpotShape::Square {
                 corner_radius_pct: 0,
             },
+            softness_px: 0,
             ..Default::default()
         };
         let old = CursorPosition { x: 200, y: 150 };
         let new = CursorPosition { x: 201, y: 150 };
         let rect = union(
-            paint_bounds(SURFACE, old, &config),
-            paint_bounds(SURFACE, new, &config),
+            paint_bounds(SURFACE, old, &config, 25),
+            paint_bounds(SURFACE, new, &config, 25),
             SURFACE,
         );
-        let previous = crate::render::build_projecteur_frame(SURFACE, old, &config);
-        let next = crate::render::build_projecteur_frame(SURFACE, new, &config);
+        let previous = crate::render::build_projecteur_frame(SURFACE, old, &config, 25);
+        let next = crate::render::build_projecteur_frame(SURFACE, new, &config, 25);
         let (x0, y0, width, height) = rect;
         for y in 0..SURFACE.1 {
             for x in 0..SURFACE.0 {
@@ -163,14 +174,43 @@ mod tests {
     #[test]
     fn hidden_dot_does_not_expand_the_paint_bounds() {
         let config = rpresent_config::SpotlightConfig {
-            spot_size_pct: 1,
             dot_size_px: 100,
             show_center_dot: false,
+            softness_px: 0,
             ..Default::default()
         };
         assert_eq!(
-            paint_bounds(SURFACE, CursorPosition { x: 200, y: 150 }, &config),
+            paint_bounds(SURFACE, CursorPosition { x: 200, y: 150 }, &config, 25),
             (174, 124, 52, 52)
+        );
+    }
+
+    #[test]
+    fn paint_bounds_include_the_visible_shade_fade() {
+        let config = rpresent_config::SpotlightConfig {
+            show_border: false,
+            show_center_dot: false,
+            softness_px: 20,
+            ..Default::default()
+        };
+        assert_eq!(
+            paint_bounds(SURFACE, CursorPosition { x: 200, y: 150 }, &config, 40),
+            (139, 89, 122, 122)
+        );
+    }
+
+    #[test]
+    fn paint_bounds_do_not_include_softness_when_shade_is_hidden() {
+        let config = rpresent_config::SpotlightConfig {
+            show_spot_shade: false,
+            show_border: false,
+            show_center_dot: false,
+            softness_px: 80,
+            ..Default::default()
+        };
+        assert_eq!(
+            paint_bounds(SURFACE, CursorPosition { x: 200, y: 150 }, &config, 40),
+            (159, 109, 82, 82)
         );
     }
 }

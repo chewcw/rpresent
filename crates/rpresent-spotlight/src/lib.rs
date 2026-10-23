@@ -3,6 +3,7 @@ pub mod controller;
 mod damage;
 pub mod overlay;
 pub(crate) mod render;
+pub(crate) mod shape;
 
 #[cfg(target_os = "linux")]
 mod shm;
