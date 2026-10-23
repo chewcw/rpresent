@@ -6,11 +6,11 @@ const BUTTON_WHEEL_DOWN: u8 = 5;
 
 #[cfg(target_os = "linux")]
 pub(crate) fn spawn(
-    shortcuts: rpresent_config::ShortcutConfig,
+    config_service: std::sync::Arc<rpresent_config::ConfigService>,
     tx: std::sync::mpsc::Sender<crate::input::AppEvent>,
 ) {
     std::thread::spawn(move || {
-        if let Err(e) = run_input_loop(shortcuts, tx) {
+        if let Err(e) = run_input_loop(config_service, tx) {
             tracing::error!(error = %e, "X11 input loop failed");
         }
     });
@@ -18,7 +18,7 @@ pub(crate) fn spawn(
 
 #[cfg(target_os = "linux")]
 fn run_input_loop(
-    shortcuts: rpresent_config::ShortcutConfig,
+    config_service: std::sync::Arc<rpresent_config::ConfigService>,
     tx: std::sync::mpsc::Sender<crate::input::AppEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::collections::HashMap;
@@ -129,7 +129,7 @@ fn run_input_loop(
     }
 
     conn.flush()?;
-    let bindings = InputBindings::from(&shortcuts);
+    let bindings = InputBindings::from(config_service.shortcuts());
     let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);
 
     loop {

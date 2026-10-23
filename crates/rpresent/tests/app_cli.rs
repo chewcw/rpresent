@@ -82,7 +82,7 @@ fn zoom_command_sends_state_to_overlay_channel() {
     use rpresent_zoom::{ZoomCommand, ZoomController};
 
     let (tx, rx) = unbounded();
-    let mut controller = ZoomController::from_config(rpresent_zoom::ZoomConfig::default());
+    let mut controller = ZoomController::from_config(&rpresent_zoom::ZoomConfig::default());
 
     controller.apply(ZoomCommand::On);
     tx.send(controller.state()).unwrap();

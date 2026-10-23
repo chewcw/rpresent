@@ -1,14 +1,13 @@
 use clap::Parser;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc;
 
-use rpresent_annotation::{AnnotationAppearance, AnnotationController, AnnotationState};
-use rpresent_config::{
-    Config, default_config_path, load_or_default_from_path, write_default_config,
-};
+use rpresent_annotation::{AnnotationController, AnnotationState};
+use rpresent_config::{ConfigService, default_config_path, write_default_config};
 use rpresent_spotlight::{SpotlightController, SpotlightRuntimeMessage};
-use rpresent_zoom::{ZoomAppearance, ZoomController, ZoomState};
+use rpresent_zoom::{ZoomController, ZoomState};
 
 use crate::command::AppCommand;
 use crate::input::AppEvent;
@@ -136,18 +135,18 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
     };
     tracing::debug!(config_path = %config_path.display(), "loading configuration");
 
-    let config = load_or_default_from_path(config_path)?;
+    let config_service = Arc::new(ConfigService::load_or_default(config_path)?);
 
     match mode {
         AppMode::Send(command) => {
-            let socket_path = ipc::socket_path_for(&config.app.socket_name)?;
+            let socket_path = ipc::socket_path_for(&config_service.app().socket_name)?;
             tracing::debug!(socket_path = %socket_path.display(), "sending command to daemon");
             ipc::send_command(&socket_path, command)?;
             Ok(())
         }
         AppMode::Run => {
             tracing::debug!("entering daemon mode");
-            run_daemon(config)
+            run_daemon(config_service)
         }
     }
 }
@@ -168,22 +167,19 @@ pub fn run_config_init(cli: ConfigInitCli) -> Result<PathBuf, AppError> {
     Ok(write_default_config(config_path)?)
 }
 
-#[tracing::instrument(level = "debug", skip(config))]
-fn run_daemon(config: Config) -> Result<(), AppError> {
-    tracing::debug!(socket_name = %config.app.socket_name, "starting daemon runtime");
+#[tracing::instrument(level = "debug", skip(config_service))]
+fn run_daemon(config_service: Arc<ConfigService>) -> Result<(), AppError> {
+    tracing::debug!(
+        socket_name = %config_service.app().socket_name,
+        "starting daemon runtime"
+    );
 
     let (ipc_tx, ipc_rx) = mpsc::channel::<AppCommand>();
     let (event_tx, event_rx) = mpsc::channel::<AppEvent>();
     let (spotlight_tx, spotlight_rx) = mpsc::channel::<SpotlightRuntimeMessage>();
     let (annotation_tx, annotation_rx) = mpsc::channel::<AnnotationState>();
     let (zoom_tx, zoom_rx) = crossbeam_channel::unbounded::<ZoomState>();
-    let socket_path = ipc::socket_path_for(&config.app.socket_name)?;
-
-    let spotlight_config = config.spotlight.clone();
-    let annotation_config = config.annotation.clone();
-    let zoom_config = config.zoom.clone();
-    let annotation_appearance = AnnotationAppearance::from(annotation_config.clone());
-    let zoom_appearance = ZoomAppearance::from(zoom_config.clone());
+    let socket_path = ipc::socket_path_for(&config_service.app().socket_name)?;
 
     // Forward IPC commands into unified event channel
     let event_tx_for_ipc = event_tx.clone();
@@ -201,18 +197,20 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
 
     // X11 input capture (Linux only)
     #[cfg(target_os = "linux")]
-    crate::x11_input::spawn(config.shortcuts.clone(), event_tx);
+    crate::x11_input::spawn(Arc::clone(&config_service), event_tx);
     #[cfg(not(target_os = "linux"))]
     let _ = event_tx;
 
+    let controller_service = Arc::clone(&config_service);
     std::thread::spawn(move || {
-        let mut spotlight_controller = SpotlightController::new(spotlight_config.enabled_on_start);
+        let mut spotlight_controller =
+            SpotlightController::new(controller_service.spotlight().enabled_on_start);
         let mut annotation_controller = AnnotationController::new(
-            annotation_config.enabled_on_start,
-            annotation_config.default_tool,
-            annotation_config.history_depth,
+            controller_service.annotation().enabled_on_start,
+            controller_service.annotation().default_tool,
+            controller_service.annotation().history_depth,
         );
-        let mut zoom_controller = ZoomController::from_config(zoom_config);
+        let mut zoom_controller = ZoomController::from_config(controller_service.zoom());
 
         let _ = spotlight_tx.send(SpotlightRuntimeMessage::Visibility(
             spotlight_controller.state(),
@@ -241,7 +239,7 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
                 }
                 AppEvent::Input(crate::input::InputAction::SpotlightWheel { delta }) => {
                     let _ = spotlight_tx.send(SpotlightRuntimeMessage::ResizeBy(
-                        delta * spotlight_config.wheel_speed,
+                        delta * controller_service.spotlight().wheel_speed,
                     ));
                 }
                 AppEvent::Input(crate::input::InputAction::ZoomWheel {
@@ -257,13 +255,16 @@ fn run_daemon(config: Config) -> Result<(), AppError> {
         }
     });
 
-    let spotlight_handle =
-        std::thread::spawn(move || rpresent_spotlight::run_overlay(spotlight_config, spotlight_rx));
-    let annotation_handle = std::thread::spawn(move || {
-        rpresent_annotation::run_overlay(annotation_appearance, annotation_rx)
+    let spotlight_service = Arc::clone(&config_service);
+    let spotlight_handle = std::thread::spawn(move || {
+        rpresent_spotlight::run_overlay(spotlight_service, spotlight_rx)
     });
-    let zoom_handle =
-        std::thread::spawn(move || rpresent_zoom::run_overlay(zoom_appearance, zoom_rx));
+    let annotation_service = Arc::clone(&config_service);
+    let annotation_handle = std::thread::spawn(move || {
+        rpresent_annotation::run_overlay(annotation_service, annotation_rx)
+    });
+    let zoom_service = Arc::clone(&config_service);
+    let zoom_handle = std::thread::spawn(move || rpresent_zoom::run_overlay(zoom_service, zoom_rx));
 
     spotlight_handle.join().unwrap()?;
     annotation_handle.join().unwrap()?;
