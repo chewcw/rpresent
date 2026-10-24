@@ -74,7 +74,7 @@ pub enum PointerOwner {
 pub enum RawPointer {
     Down { root: (i32, i32), time: Duration },
     Move { root: (i32, i32), time: Duration },
-    Up { time: Duration },
+    Up { root: (i32, i32), time: Duration },
 }
 
 pub fn preferred_pointer_owner(status: InputStatus) -> PointerOwner {
@@ -125,6 +125,22 @@ impl InputCoordinator {
         self.epoch = epoch;
         self.button_down = false;
         self.cancelled = false;
+    }
+
+    /// Whether `owner` currently holds the confirmed epoch and still accepts
+    /// input. Local keyboard events use the same confirmation as the pointer.
+    pub fn owns_epoch(&self, owner: PointerOwner, epoch: u64) -> bool {
+        self.owner == owner && self.epoch == epoch && self.owner_accepts_gestures()
+    }
+
+    /// Drop confirmed ownership before the native layer changes its grab.
+    /// Events stay rejected until another native confirmation arrives.
+    pub fn revoke_owner(&mut self) {
+        if self.button_down && self.owner != PointerOwner::Desktop {
+            self.cancelled = true;
+        }
+        self.owner = PointerOwner::Desktop;
+        self.button_down = false;
     }
 
     /// Cancel the in-flight gesture, if any. Returns the owner that lost it.

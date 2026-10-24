@@ -208,6 +208,7 @@ fn moved(x: i32, y: i32) -> RawPointer {
 
 fn up() -> RawPointer {
     RawPointer::Up {
+        root: (0, 0),
         time: Duration::from_millis(3),
     }
 }
@@ -247,6 +248,23 @@ fn an_unavailable_annotation_backend_leaves_drawing_to_zoom() {
         input.handle_pointer(1, down(10, 10)),
         Some((PointerOwner::Zoom, down(10, 10)))
     );
+}
+
+#[test]
+fn local_keyboard_events_require_the_confirmed_owner_epoch() {
+    let bindings = InputBindings::from(&rpresent_config::ShortcutConfig::default());
+    let mut input = InputCoordinator::new(bindings);
+    input.set_status(InputStatus {
+        zoom_ready: true,
+        zoom_active: true,
+        annotation_enabled: true,
+        annotation_ready: true,
+    });
+    input.confirm_owner(PointerOwner::Annotation, 9);
+    assert!(input.owns_epoch(PointerOwner::Annotation, 9));
+    assert!(!input.owns_epoch(PointerOwner::Annotation, 8));
+    input.confirm_owner(PointerOwner::Zoom, 10);
+    assert!(!input.owns_epoch(PointerOwner::Annotation, 9));
 }
 
 #[test]

@@ -15,6 +15,7 @@ use x11rb::rust_connection::RustConnection;
 
 use crate::input::{InputBindings, RawPointer};
 use crate::native_input::{NativeEvent, NativeEventSink, NativeInbox, NativeRequest};
+use crate::native_keys::NativeKeys;
 
 const BUTTON_WHEEL_UP: u8 = 4;
 const BUTTON_WHEEL_DOWN: u8 = 5;
@@ -40,7 +41,9 @@ fn run_input_loop(
 ) -> Result<(), Box<dyn Error>> {
     let (connection, screen_num) = x11rb::connect(None)?;
     let root = connection.setup().roots[screen_num].root;
-    let keycode_map = build_keycode_map(&connection);
+    let mut keycode_map = build_keycode_map(&connection);
+    let mut keys = NativeKeys::new().map_err(std::io::Error::other)?;
+    let keys_fd = keys.fd();
     let bindings = InputBindings::from(config_service.shortcuts());
     install_passive_grabs(&connection, root, &keycode_map, &bindings)?;
     connection.flush()?;
@@ -87,7 +90,15 @@ fn run_input_loop(
         }
 
         while let Some(event) = connection.poll_for_event()? {
-            translate_event(&event, &connection, &keycode_map, &events, &mut owner);
+            translate_event(
+                &event,
+                &connection,
+                &mut keycode_map,
+                &mut keys,
+                &events,
+                &mut owner,
+                &mut saved_focus,
+            );
         }
         connection.flush()?;
 
@@ -102,8 +113,13 @@ fn run_input_loop(
                 events: libc::POLLIN,
                 revents: 0,
             },
+            libc::pollfd {
+                fd: keys_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
-        let result = unsafe { libc::poll(descriptors.as_mut_ptr(), 2, -1) };
+        let result = unsafe { libc::poll(descriptors.as_mut_ptr(), 3, -1) };
         if result < 0 {
             let error = std::io::Error::last_os_error();
             if error.kind() == std::io::ErrorKind::Interrupted {
@@ -114,6 +130,9 @@ fn run_input_loop(
         if descriptors[0].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
             release_owner(&connection, &mut owner, &mut saved_focus, true);
             return Err("X11 connection closed".into());
+        }
+        if descriptors[2].revents & libc::POLLIN != 0 {
+            keys.drain_map_notifications();
         }
     }
 }
@@ -276,12 +295,15 @@ struct Owner {
     epoch: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn translate_event(
     event: &Event,
     connection: &RustConnection,
-    keycode_map: &HashMap<u8, &'static str>,
+    keycode_map: &mut HashMap<u8, &'static str>,
+    keys: &mut NativeKeys,
     events: &NativeEventSink,
     owner: &mut Option<Owner>,
+    saved_focus: &mut Option<Window>,
 ) {
     match event {
         Event::ButtonPress(event)
@@ -313,6 +335,7 @@ fn translate_event(
                 events(NativeEvent::Pointer {
                     epoch: owner.epoch,
                     input: RawPointer::Up {
+                        root: (i32::from(event.root_x), i32::from(event.root_y)),
                         time: Duration::from_millis(u64::from(event.time)),
                     },
                 });
@@ -330,21 +353,54 @@ fn translate_event(
             }
         }
         Event::KeyPress(event) => {
-            if keycode_map.get(&event.detail) == Some(&"Escape") {
-                events(NativeEvent::Escape);
-            } else if let Some(shortcut) =
+            if let Some(shortcut) =
                 shortcut_from_keypress(event.detail, event.state, keycode_map)
             {
                 events(NativeEvent::Key(shortcut));
+                return;
             }
+            let Some(owner) = *owner else {
+                if keycode_map.get(&event.detail) == Some(&"Escape") {
+                    events(NativeEvent::Escape);
+                }
+                return;
+            };
+            match keys.translate(event.detail, u16::from(event.state)) {
+                Ok(input) => events(NativeEvent::AnnotationKey {
+                    epoch: owner.epoch,
+                    input,
+                }),
+                Err(error) => {
+                    tracing::debug!(%error, keycode = event.detail, "key translation failed");
+                }
+            }
+        }
+        Event::FocusOut(event) if owner.is_some_and(|owner| owner.window == event.event) => {
+            let focused = connection
+                .get_input_focus()
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+                .map(|reply| reply.focus);
+            if focused == Some(u32::from(event.event)) {
+                return;
+            }
+            let epoch = owner.take().map_or(0, |owner| owner.epoch);
+            release_owner(connection, owner, saved_focus, true);
+            events(NativeEvent::Lost {
+                epoch,
+                reason: "owned window lost focus".to_owned(),
+            });
         }
         Event::DestroyNotify(event) if owner.is_some_and(|owner| owner.window == event.window) => {
             let epoch = owner.take().map_or(0, |owner| owner.epoch);
+            release_owner(connection, owner, saved_focus, true);
             events(NativeEvent::Lost {
                 epoch,
                 reason: "owned window was destroyed".to_owned(),
             });
-            let _ = connection.ungrab_pointer(x11rb::CURRENT_TIME);
+        }
+        Event::MappingNotify(_) => {
+            *keycode_map = build_keycode_map(connection);
         }
         _ => {}
     }

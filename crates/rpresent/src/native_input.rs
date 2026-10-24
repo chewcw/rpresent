@@ -1,3 +1,5 @@
+use rpresent_annotation::KeyInput;
+
 use crate::input::RawPointer;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +32,10 @@ pub enum NativeEvent {
         root: (i16, i16),
     },
     Key(String),
+    AnnotationKey {
+        epoch: u64,
+        input: KeyInput,
+    },
     Escape,
     Lost {
         epoch: u64,

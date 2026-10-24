@@ -220,15 +220,17 @@ impl Coordinator {
                 window,
                 restore_focus,
                 ..
-            } => self
-                .outputs
-                .native
-                .send(NativeRequest::SetOwner {
-                    operation,
-                    window,
-                    restore_focus,
-                })
-                .map_err(|error| error.to_string()),
+            } => {
+                self.input.revoke_owner();
+                self.outputs
+                    .native
+                    .send(NativeRequest::SetOwner {
+                        operation,
+                        window,
+                        restore_focus,
+                    })
+                    .map_err(|error| error.to_string())
+            }
             Effect::CommitZoom { .. } => self
                 .outputs
                 .zoom
@@ -426,6 +428,15 @@ impl Coordinator {
                 }
                 Ok(())
             }
+            NativeEvent::AnnotationKey { epoch, input } => {
+                if self.input.owns_epoch(PointerOwner::Annotation, epoch) {
+                    Ok(())
+                } else if input.keysym == 0xff1b {
+                    self.handle_command(AppCommand::Zoom(rpresent_zoom::ZoomCommand::Off))
+                } else {
+                    Ok(())
+                }
+            }
             NativeEvent::Escape => {
                 self.handle_command(AppCommand::Zoom(rpresent_zoom::ZoomCommand::Off))
             }
@@ -538,7 +549,7 @@ pub(crate) fn zoom_pointer(input: RawPointer, monitor: rpresent_zoom::MonitorRec
             ),
             time,
         },
-        RawPointer::Up { time } => PointerInput::Up { time },
+        RawPointer::Up { time, .. } => PointerInput::Up { time },
     }
 }
 
@@ -588,6 +599,23 @@ mod tests {
             width: 1920,
             height: 1080,
         }
+    }
+
+    #[test]
+    fn zoom_release_keeps_its_existing_semantics_and_ignores_root() {
+        let released = zoom_pointer(
+            RawPointer::Up {
+                root: (900, 800),
+                time: std::time::Duration::from_millis(5),
+            },
+            monitor(),
+        );
+        assert_eq!(
+            released,
+            rpresent_zoom::PointerInput::Up {
+                time: std::time::Duration::from_millis(5),
+            }
+        );
     }
 
     #[test]

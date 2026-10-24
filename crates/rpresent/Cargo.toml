@@ -17,6 +17,8 @@ x11rb = { version = "0.13", features = ["shape", "xtest"] }
 tracing = { workspace = true }
 tracing-log = { workspace = true }
 tracing-subscriber = { workspace = true }
+x11-dl = "2.21"
+xkeysym = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
