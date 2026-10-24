@@ -638,8 +638,8 @@ impl WindowLifecycle {
                     if !effects.is_empty() {
                         return effects;
                     }
-                    if self.reconcile_owner(layers, now) {
-                        continue;
+                    if let Some(effects) = self.reconcile_owner(layers, now) {
+                        return effects;
                     }
                     return Vec::new();
                 }
@@ -968,20 +968,20 @@ impl WindowLifecycle {
     }
 
     /// Reconcile ownership while zoom is idle or already active.
-    fn reconcile_owner(&mut self, layers: &LayerSnapshot, now: Instant) -> bool {
+    fn reconcile_owner(&mut self, layers: &LayerSnapshot, now: Instant) -> Option<Vec<Effect>> {
         let preferred = self.preferred_owner_window(layers);
         if preferred == self.owner_window {
-            return false;
+            return None;
         }
         if preferred != layers.annotation.window
             && self.owner_window == layers.annotation.window
-            && let Some(_) = self.maybe_cancel_annotation(layers, now)
+            && let Some(effects) = self.maybe_cancel_annotation(layers, now)
         {
-            return true;
+            return Some(effects);
         }
         self.owner_action = OwnerAction::Continue;
         self.pending_owner = Some(preferred);
-        self.emit(
+        Some(self.emit(
             Effect::SetOwner {
                 operation: self.next_operation(),
                 window: preferred,
@@ -989,8 +989,7 @@ impl WindowLifecycle {
             },
             Expect::Owner,
             now,
-        );
-        true
+        ))
     }
 
     fn emit(&mut self, effect: Effect, expect: Expect, now: Instant) -> Vec<Effect> {

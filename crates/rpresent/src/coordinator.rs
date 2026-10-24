@@ -673,6 +673,7 @@ impl Coordinator {
         self.annotation_generation = status.generation;
         self.annotation_ready = status.ready;
         self.annotation_editing = status.editing_requested;
+        self.layers.annotation_editing = status.editing_requested;
         self.layers.annotation.window = status.window;
         self.layers.annotation.input_ready = status.ready;
         self.layers.annotation.requested = status.ready
@@ -842,6 +843,54 @@ mod tests {
         assert!(matches!(
             annotation.try_recv(),
             Ok(AnnotationRequest::Present { visible: true, .. })
+        ));
+    }
+
+    #[test]
+    fn editing_annotation_acquires_native_owner_after_presentation() {
+        let (mut coordinator, _, _, native, annotation) = coordinator();
+        coordinator
+            .handle_event(AppEvent::AnnotationRuntime(AnnotationEvent::Status(
+                AnnotationStatus {
+                    generation: 1,
+                    window: Some(3),
+                    ready: true,
+                    editing_requested: true,
+                    has_content: false,
+                    text_editing: false,
+                },
+            )))
+            .unwrap();
+
+        let AnnotationRequest::Present { operation, .. } = annotation.try_recv().unwrap() else {
+            panic!("editing annotation should be presented");
+        };
+        coordinator
+            .handle_event(AppEvent::AnnotationRuntime(AnnotationEvent::Presented {
+                operation,
+                generation: 1,
+                visible: true,
+                result: Ok(()),
+            }))
+            .unwrap();
+
+        let NativeRequest::Restack { operation, .. } = native.try_recv().unwrap() else {
+            panic!("annotation presentation should be restacked");
+        };
+        coordinator
+            .handle_event(AppEvent::Native(NativeEvent::Applied {
+                operation,
+                result: Ok(()),
+            }))
+            .unwrap();
+
+        assert!(matches!(
+            native.try_recv(),
+            Ok(NativeRequest::SetOwner {
+                window: Some(3),
+                restore_focus: false,
+                ..
+            })
         ));
     }
 
