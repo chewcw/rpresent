@@ -41,6 +41,16 @@ fn stationary_release_does_not_reuse_old_velocity() {
 }
 
 #[test]
+fn short_stationary_gap_before_release_stops_inertia() {
+    let mut camera = Camera::new(NavigationConfig::default(), (1920.0, 1080.0));
+    camera.pointer_down((100.0, 100.0), Duration::ZERO);
+    camera.pointer_move((140.0, 100.0), Duration::from_millis(40));
+    camera.pointer_up(Duration::from_millis(50));
+    assert_eq!(camera.pan_velocity(), (0.0, 0.0));
+    assert!(!camera.is_animating());
+}
+
+#[test]
 fn timed_zoom_replay_is_frame_rate_independent() {
     let run = |fps: u32, frames: u32| {
         let frame = Duration::from_secs_f64(1.0 / f64::from(fps));

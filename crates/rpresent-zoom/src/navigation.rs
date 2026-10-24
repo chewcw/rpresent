@@ -124,7 +124,8 @@ impl Camera {
         if !self.dragging {
             return;
         }
-        self.pan_velocity = self.release_velocity(time);
+        let release_position = self.last_point;
+        self.pan_velocity = self.release_velocity(time, release_position);
         self.dragging = false;
         self.samples.clear();
     }
@@ -218,23 +219,33 @@ impl Camera {
         speed >= PAN_VELOCITY_THRESHOLD
     }
 
-    fn release_velocity(&self, release_time: Duration) -> (f64, f64) {
+    fn release_velocity(&self, release_time: Duration, release_position: (f64, f64)) -> (f64, f64) {
         let start = release_time.saturating_sub(RELEASE_INTERVAL);
-        let mut last: Option<(Duration, (f64, f64))> = None;
-        let mut previous: Option<(Duration, (f64, f64))> = None;
-        for sample in &self.samples {
+        let mut timeline: Vec<(Duration, (f64, f64))> = self.samples.clone();
+        if let Some(last) = timeline.last_mut() {
+            if last.0 == release_time {
+                last.1 = release_position;
+            } else {
+                timeline.push((release_time, release_position));
+            }
+        } else {
+            timeline.push((release_time, release_position));
+        }
+        let mut samples: Vec<(Duration, (f64, f64))> = Vec::new();
+        for sample in timeline {
             if sample.0 < start || sample.0 > release_time {
                 continue;
             }
-            previous = last;
-            last = Some(*sample);
+            if samples.last().is_some_and(|last| last.0 == sample.0) {
+                samples.pop();
+            }
+            samples.push(sample);
         }
-        let Some((time, position)) = last else {
+        if samples.len() < 2 {
             return (0.0, 0.0);
-        };
-        let Some((previous_time, previous_position)) = previous else {
-            return (0.0, 0.0);
-        };
+        }
+        let (time, position) = samples[samples.len() - 1];
+        let (previous_time, previous_position) = samples[samples.len() - 2];
         let elapsed = (time - previous_time).as_secs_f64();
         if elapsed <= 0.0 {
             return (0.0, 0.0);
