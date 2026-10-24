@@ -50,6 +50,14 @@ impl History {
         self.undo.push_back(change.clone());
         Some(change)
     }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
 }
 
 /// Entries for the affected objects, indexed as if the affected objects were

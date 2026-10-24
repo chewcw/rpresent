@@ -219,6 +219,26 @@ impl Session {
         self.text_sizes[self.text_size_index]
     }
 
+    /// Read-only view of the authoritative drawing settings and action
+    /// availability for the toolbar. Borrows the configured catalogs in
+    /// place; never clones them or mutates history.
+    pub(crate) fn toolbar_values(&self) -> crate::toolbar::ToolbarValues<'_> {
+        crate::toolbar::ToolbarValues {
+            editing: self.editing_requested,
+            tool: self.tool,
+            color: self.color(),
+            width_px: self.width_px(),
+            text_size_px: self.text_size_px(),
+            colors: &self.colors,
+            widths: &self.widths,
+            text_sizes: &self.text_sizes,
+            can_undo: self.document.can_undo(),
+            can_redo: self.document.can_redo(),
+            has_selection: self.selection.is_some(),
+            has_content: !self.document.objects().is_empty(),
+        }
+    }
+
     pub fn draft_id(&self) -> Option<u64> {
         self.text_edit.as_ref().map(|edit| edit.id)
     }
@@ -1228,6 +1248,22 @@ mod tests {
             .unwrap()
             .clone();
         session.text_system.bounds(&object)
+    }
+
+    #[test]
+    fn toolbar_values_borrow_catalogs_and_follow_commands() {
+        let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+        let values = session.toolbar_values();
+        assert_eq!(values.colors, session.colors.as_slice());
+        assert_eq!(values.colors.as_ptr(), session.colors.as_ptr());
+        assert_eq!(values.widths.as_ptr(), session.widths.as_ptr());
+        assert_eq!(values.text_sizes.as_ptr(), session.text_sizes.as_ptr());
+        assert!(!values.can_undo);
+        assert!(!values.can_redo);
+        assert!(!values.has_selection);
+        assert!(!values.has_content);
+        session.command(AnnotationCommand::Tool(AnnotationTool::Text)).unwrap();
+        assert_eq!(session.toolbar_values().tool, AnnotationTool::Text);
     }
 
     #[test]

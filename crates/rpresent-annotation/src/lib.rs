@@ -7,6 +7,7 @@ mod render;
 mod runtime;
 mod session;
 mod text;
+mod toolbar;
 mod transport;
 mod undo;
 mod x11_clipboard;
