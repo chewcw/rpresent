@@ -85,6 +85,7 @@ pub(crate) trait SpotlightOverlayBackend {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SpotlightRuntimeMessage {
     Present { operation: u64, visible: bool },
+    SetFollowing { operation: u64, following: bool },
     ResizeBy(f32),
 }
 
@@ -98,6 +99,11 @@ pub enum SpotlightEvent {
         visible: bool,
         result: Result<(), String>,
     },
+    FollowingApplied {
+        operation: u64,
+        following: bool,
+        result: Result<(), String>,
+    },
     Exited(Result<(), String>),
 }
 
@@ -108,6 +114,7 @@ pub(crate) struct SpotlightOverlayRuntime<B> {
     radius_px: u32,
     backend: B,
     visible: bool,
+    following: bool,
     last_render_inputs: Option<RenderInputs>,
     needs_redraw: bool,
 }
@@ -120,6 +127,7 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
             radius_px,
             backend,
             visible: false,
+            following: false,
             last_render_inputs: None,
             needs_redraw: false,
         }
@@ -142,6 +150,13 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
     ) -> Result<(), OverlayError> {
         match message {
             SpotlightRuntimeMessage::Present { visible, .. } => self.process_visibility(visible),
+            SpotlightRuntimeMessage::SetFollowing { following, .. } => {
+                self.following = following;
+                if following && self.visible {
+                    self.tick()?;
+                }
+                Ok(())
+            }
             SpotlightRuntimeMessage::ResizeBy(delta) => {
                 let next = (self.radius_px as f32 + delta).round().clamp(24.0, 4096.0) as u32;
                 if next != self.radius_px {
@@ -235,10 +250,44 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
     }
 
     fn current_render_inputs(&self) -> Result<RenderInputs, OverlayError> {
+        let cursor = match (self.following, self.last_render_inputs) {
+            (false, Some(previous)) => previous.cursor,
+            _ => self.backend.cursor_position()?,
+        };
         Ok(RenderInputs {
             surface_size: self.backend.surface_size()?,
-            cursor: self.backend.cursor_position()?,
+            cursor,
         })
+    }
+
+    fn process_request(
+        &mut self,
+        message: SpotlightRuntimeMessage,
+        events: &SpotlightEventSink,
+    ) -> Result<(), OverlayError> {
+        let (present, set_following) = match &message {
+            SpotlightRuntimeMessage::Present { operation, visible } => {
+                (Some((*operation, *visible)), None)
+            }
+            SpotlightRuntimeMessage::SetFollowing { operation, .. } => (None, Some(*operation)),
+            SpotlightRuntimeMessage::ResizeBy(_) => (None, None),
+        };
+        let result = self.process_message(message);
+        let acknowledgment = result.as_ref().map(|_| ()).map_err(ToString::to_string);
+        if let Some((operation, visible)) = present {
+            events(SpotlightEvent::Presented {
+                operation,
+                visible,
+                result: acknowledgment,
+            });
+        } else if let Some(operation) = set_following {
+            events(SpotlightEvent::FollowingApplied {
+                operation,
+                following: self.following,
+                result: acknowledgment,
+            });
+        }
+        result
     }
 }
 
@@ -316,31 +365,11 @@ pub fn run_overlay(
             }
         };
 
-        if let Some(msg) = next_msg {
-            let presentation = match msg {
-                SpotlightRuntimeMessage::Present { operation, visible } => {
-                    Some((operation, visible))
-                }
-                SpotlightRuntimeMessage::ResizeBy(_) => None,
-            };
-            if let Err(error) = runtime.process_message(msg) {
-                if let Some((operation, visible)) = presentation {
-                    events(SpotlightEvent::Presented {
-                        operation,
-                        visible,
-                        result: Err(error.to_string()),
-                    });
-                }
-                events(SpotlightEvent::Exited(Err(error.to_string())));
-                return Err(error);
-            }
-            if let Some((operation, visible)) = presentation {
-                events(SpotlightEvent::Presented {
-                    operation,
-                    visible,
-                    result: Ok(()),
-                });
-            }
+        if let Some(msg) = next_msg
+            && let Err(error) = runtime.process_request(msg, &events)
+        {
+            events(SpotlightEvent::Exited(Err(error.to_string())));
+            return Err(error);
         }
     }
 
@@ -361,7 +390,9 @@ pub fn run_overlay(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
 
@@ -384,6 +415,10 @@ mod tests {
         redraw_radii: Vec<u32>,
         surface_size: (u16, u16),
         cursor: CursorPosition,
+        cursor_queries: Cell<usize>,
+        redraw_positions: Vec<CursorPosition>,
+        fail_redraw: bool,
+        trace: Arc<Mutex<Vec<&'static str>>>,
     }
 
     impl SpotlightOverlayBackend for FakeBackend {
@@ -406,17 +441,23 @@ mod tests {
         }
 
         fn cursor_position(&self) -> Result<CursorPosition, OverlayError> {
+            self.cursor_queries.set(self.cursor_queries.get() + 1);
             Ok(self.cursor)
         }
 
         fn redraw(
             &mut self,
-            _cursor: CursorPosition,
+            cursor: CursorPosition,
             _config: &rpresent_config::SpotlightConfig,
             radius_px: u32,
         ) -> Result<(), OverlayError> {
             self.calls.push("redraw");
+            if self.fail_redraw {
+                return Err(runtime_error("injected redraw failure"));
+            }
             self.redraw_radii.push(radius_px);
+            self.redraw_positions.push(cursor);
+            self.trace.lock().unwrap().push("redraw");
             Ok(())
         }
     }
@@ -486,6 +527,12 @@ mod tests {
         );
 
         runtime.process_state(SpotlightState::On).unwrap();
+        runtime
+            .process_message(SpotlightRuntimeMessage::SetFollowing {
+                operation: 1,
+                following: true,
+            })
+            .unwrap();
         runtime.backend.cursor = CursorPosition { x: 9, y: 8 };
         runtime.tick().unwrap();
 
@@ -669,6 +716,221 @@ mod tests {
         assert_eq!(
             runtime.backend.calls,
             vec!["show", "redraw", "redraw", "redraw"]
+        );
+    }
+
+    fn visible_runtime() -> SpotlightOverlayRuntime<FakeBackend> {
+        let backend = FakeBackend {
+            surface_size: (800, 600),
+            cursor: CursorPosition { x: 100, y: 100 },
+            ..Default::default()
+        };
+        let mut runtime = SpotlightOverlayRuntime::new(
+            config_service(rpresent_config::SpotlightConfig::default()),
+            backend,
+        );
+        runtime
+            .process_message(SpotlightRuntimeMessage::Present {
+                operation: 1,
+                visible: true,
+            })
+            .unwrap();
+        runtime
+            .process_message(SpotlightRuntimeMessage::SetFollowing {
+                operation: 2,
+                following: true,
+            })
+            .unwrap();
+        runtime
+    }
+
+    #[test]
+    fn suspension_preserves_the_last_render_without_querying_the_pointer() {
+        let mut runtime = visible_runtime();
+        let retained = runtime.last_render_inputs.unwrap();
+        let queries = runtime.backend.cursor_queries.get();
+        let draws = runtime.backend.redraw_positions.len();
+        runtime.backend.cursor = CursorPosition { x: 600, y: 400 };
+        runtime
+            .process_message(SpotlightRuntimeMessage::SetFollowing {
+                operation: 3,
+                following: false,
+            })
+            .unwrap();
+        for _ in 0..8 {
+            runtime.tick().unwrap();
+        }
+        assert_eq!(runtime.last_render_inputs, Some(retained));
+        assert_eq!(runtime.backend.cursor_queries.get(), queries);
+        assert_eq!(runtime.backend.redraw_positions.len(), draws);
+    }
+
+    #[test]
+    fn held_redraw_and_hide_show_keep_the_rendered_position() {
+        let mut runtime = visible_runtime();
+        let retained = runtime.last_render_inputs.unwrap().cursor;
+        runtime
+            .process_message(SpotlightRuntimeMessage::SetFollowing {
+                operation: 3,
+                following: false,
+            })
+            .unwrap();
+        let queries = runtime.backend.cursor_queries.get();
+        runtime.backend.cursor = CursorPosition { x: 600, y: 400 };
+        runtime.backend.surface_size = (1024, 768);
+        runtime.tick().unwrap();
+        runtime
+            .process_message(SpotlightRuntimeMessage::ResizeBy(12.0))
+            .unwrap();
+        runtime
+            .process_message(SpotlightRuntimeMessage::Present {
+                operation: 4,
+                visible: false,
+            })
+            .unwrap();
+        runtime.tick().unwrap();
+        runtime
+            .process_message(SpotlightRuntimeMessage::Present {
+                operation: 5,
+                visible: true,
+            })
+            .unwrap();
+        assert_eq!(runtime.backend.cursor_queries.get(), queries);
+        assert!(
+            runtime
+                .backend
+                .redraw_positions
+                .iter()
+                .all(|p| *p == retained)
+        );
+        assert_eq!(
+            runtime.last_render_inputs.unwrap().surface_size,
+            (1024, 768)
+        );
+    }
+
+    #[test]
+    fn held_first_presentation_initializes_once_then_resume_samples_now() {
+        let mut runtime = SpotlightOverlayRuntime::new(
+            config_service(rpresent_config::SpotlightConfig::default()),
+            FakeBackend {
+                surface_size: (800, 600),
+                cursor: CursorPosition { x: 100, y: 100 },
+                ..Default::default()
+            },
+        );
+        runtime
+            .process_message(SpotlightRuntimeMessage::SetFollowing {
+                operation: 1,
+                following: false,
+            })
+            .unwrap();
+        assert_eq!(runtime.backend.cursor_queries.get(), 0);
+        runtime
+            .process_message(SpotlightRuntimeMessage::Present {
+                operation: 2,
+                visible: true,
+            })
+            .unwrap();
+        for _ in 0..8 {
+            runtime.tick().unwrap();
+        }
+        assert_eq!(runtime.backend.cursor_queries.get(), 1);
+        runtime.backend.cursor = CursorPosition { x: 600, y: 400 };
+        runtime
+            .process_message(SpotlightRuntimeMessage::SetFollowing {
+                operation: 3,
+                following: true,
+            })
+            .unwrap();
+        assert_eq!(runtime.backend.cursor_queries.get(), 2);
+        assert_eq!(
+            runtime.backend.redraw_positions.last(),
+            Some(&runtime.backend.cursor)
+        );
+    }
+
+    #[test]
+    fn following_acknowledgment_reports_redraw_failure() {
+        let mut runtime = visible_runtime();
+        runtime
+            .process_message(SpotlightRuntimeMessage::SetFollowing {
+                operation: 3,
+                following: false,
+            })
+            .unwrap();
+        runtime.backend.cursor = CursorPosition { x: 600, y: 400 };
+        runtime.backend.fail_redraw = true;
+        let previous = runtime.last_render_inputs;
+        let (tx, rx) = mpsc::channel();
+        let events: SpotlightEventSink = Arc::new(move |event| {
+            tx.send(event).unwrap();
+        });
+        assert!(
+            runtime
+                .process_request(
+                    SpotlightRuntimeMessage::SetFollowing {
+                        operation: 4,
+                        following: true,
+                    },
+                    &events
+                )
+                .is_err()
+        );
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            SpotlightEvent::FollowingApplied {
+                operation: 4,
+                following: true,
+                result: Err(_),
+            }
+        ));
+        assert_eq!(runtime.last_render_inputs, previous);
+    }
+
+    #[test]
+    fn successful_resume_redraws_before_acknowledgment() {
+        let mut runtime = visible_runtime();
+        runtime
+            .process_message(SpotlightRuntimeMessage::SetFollowing {
+                operation: 3,
+                following: false,
+            })
+            .unwrap();
+        runtime.backend.cursor = CursorPosition { x: 600, y: 400 };
+        let trace = Arc::clone(&runtime.backend.trace);
+        trace.lock().unwrap().clear();
+        let callback_trace = Arc::clone(&trace);
+        let (tx, rx) = mpsc::channel();
+        let events: SpotlightEventSink = Arc::new(move |event| {
+            callback_trace.lock().unwrap().push("acknowledgment");
+            tx.send(event).unwrap();
+        });
+        runtime
+            .process_request(
+                SpotlightRuntimeMessage::SetFollowing {
+                    operation: 4,
+                    following: true,
+                },
+                &events,
+            )
+            .unwrap();
+        assert_eq!(*trace.lock().unwrap(), vec!["redraw", "acknowledgment"]);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            SpotlightEvent::FollowingApplied {
+                operation: 4,
+                following: true,
+                result: Ok(()),
+            }
+        ));
+        assert_eq!(
+            runtime.last_render_inputs.unwrap().cursor,
+            runtime.backend.cursor
+        );
+        assert_eq!(
+            runtime.backend.redraw_positions.last(),
+            Some(&runtime.backend.cursor)
         );
     }
 }

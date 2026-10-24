@@ -125,6 +125,8 @@ Activating spotlight or annotation editing cancels the current zoom drag and its
 
 Press the configured annotation shortcut (the default is `Ctrl+2`) to start editing. The annotation window follows the root desktop coordinates.
 
+While annotation editing owns input, spotlight stays at its last rendered position, including its center dot. Hovering, drawing, moving objects, erasing, and editing text do not move it. When editing stops, spotlight moves to the current pointer position after it regains input ownership. Finished artwork alone does not hold spotlight in place.
+
 - Tools: `v` Select, `p` Pen, `l` Line, `e` Eraser, `t` Text.
 - `c` cycles colors (hold Shift to cycle backward). `[` and `]` cycle stroke widths. `-` and `=` cycle text sizes.
 - `Ctrl+Z` undoes, `Ctrl+Shift+Z` or `Ctrl+Y` redoes, and `Delete` removes the selected object.

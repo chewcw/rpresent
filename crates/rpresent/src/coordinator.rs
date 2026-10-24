@@ -38,6 +38,7 @@ pub struct Coordinator {
     pending_wheels: VecDeque<(String, f32, (i16, i16))>,
     zoom_ready: bool,
     spotlight_ready: bool,
+    spotlight_started: bool,
     native_ready: bool,
     startup_applied: bool,
     zoom_worker_failed: bool,
@@ -70,6 +71,7 @@ impl Coordinator {
             pending_wheels: VecDeque::new(),
             zoom_ready: false,
             spotlight_ready: false,
+            spotlight_started: false,
             native_ready: false,
             startup_applied: false,
             zoom_worker_failed: false,
@@ -213,9 +215,8 @@ impl Coordinator {
     }
 
     fn prune_pending(&mut self) {
-        let current = self.lifecycle.pending_operation();
         self.pending
-            .retain(|operation, _| Some(*operation) == current);
+            .retain(|operation, _| self.lifecycle.is_pending_operation(*operation));
     }
 
     fn drain_lifecycle_diagnostics(&mut self) {
@@ -291,6 +292,23 @@ impl Coordinator {
                     })
                     .map_err(|error| error.to_string())
             }
+            Effect::SetSpotlightFollowing { following, .. } => {
+                if !following && self.input.confirmed_target() != PointerOwner::Desktop {
+                    self.lifecycle.invalidate_delivery();
+                    self.input.revoke_owner();
+                    let _ = self
+                        .outputs
+                        .annotation
+                        .send(AnnotationRequest::Ownership { epoch: None });
+                }
+                self.outputs
+                    .spotlight
+                    .send(SpotlightRuntimeMessage::SetFollowing {
+                        operation,
+                        following,
+                    })
+                    .map_err(|error| error.to_string())
+            }
             Effect::CommitZoom { .. } => self
                 .outputs
                 .zoom
@@ -327,8 +345,7 @@ impl Coordinator {
         operation: u64,
         result: Result<Completion, String>,
     ) -> Result<(), String> {
-        if self.lifecycle.pending_operation() != Some(operation)
-            || !self.pending.contains_key(&operation)
+        if !self.lifecycle.is_pending_operation(operation) || !self.pending.contains_key(&operation)
         {
             return Ok(());
         }
@@ -352,10 +369,14 @@ impl Coordinator {
     fn handle_spotlight(&mut self, event: SpotlightEvent) -> Result<(), String> {
         match event {
             SpotlightEvent::Ready { window } => {
+                self.lifecycle.spotlight_restarted();
+                self.spotlight_started = true;
                 self.spotlight_ready = true;
+                self.layers.spotlight.mapped = false;
                 self.layers.spotlight.window = Some(window);
                 self.layers.spotlight.input_ready = true;
                 self.refresh_input()?;
+                self.reconcile(Layer::Spotlight)?;
                 self.maybe_startup()
             }
             SpotlightEvent::Presented {
@@ -363,7 +384,7 @@ impl Coordinator {
                 visible,
                 result,
             } => {
-                if self.lifecycle.pending_operation() != Some(operation)
+                if !self.lifecycle.is_pending_operation(operation)
                     || !self.pending.contains_key(&operation)
                 {
                     return Ok(());
@@ -401,13 +422,37 @@ impl Coordinator {
                 )
             }
             SpotlightEvent::Exited(result) => {
+                self.spotlight_started = true;
                 self.spotlight_ready = false;
                 self.layers.spotlight.mapped = false;
                 self.layers.spotlight.window = None;
                 self.layers.spotlight.input_ready = false;
+                if let Err(error) = result {
+                    tracing::warn!(%error, "spotlight runtime exited");
+                }
                 self.refresh_input()?;
                 self.reconcile(Layer::Spotlight)?;
-                result.map_err(|error| format!("spotlight runtime exited: {error}"))
+                self.maybe_startup()
+            }
+            SpotlightEvent::FollowingApplied {
+                operation,
+                following,
+                result,
+            } => {
+                if !matches!(
+                    self.pending.get(&operation),
+                    Some(Effect::SetSpotlightFollowing {
+                        following: expected,
+                        ..
+                    }) if *expected == following
+                ) || !self.lifecycle.is_pending_operation(operation)
+                {
+                    return Ok(());
+                }
+                self.complete(
+                    operation,
+                    result.map(|()| Completion::SpotlightFollowing { following }),
+                )
             }
         }
     }
@@ -498,6 +543,7 @@ impl Coordinator {
                 if result.is_ok() && !self.accepts(operation, Completion::NativeApplied) {
                     return Ok(());
                 }
+                let mut reconfirm = false;
                 if result.is_ok() {
                     if let Some(Some(window)) = owner_window {
                         let owner = if window == self.layers.annotation.window.unwrap_or(0) {
@@ -509,14 +555,25 @@ impl Coordinator {
                         } else {
                             PointerOwner::Desktop
                         };
-                        self.input.confirm_owner(owner, operation);
-                        if owner == PointerOwner::Annotation {
-                            self.outputs
-                                .annotation
-                                .send(AnnotationRequest::Ownership {
-                                    epoch: Some(operation),
-                                })
-                                .map_err(|error| error.to_string())?;
+                        let prepared_zoom = owner == PointerOwner::Zoom
+                            && !self.lifecycle.is_zoom_active()
+                            && self.layers.zoom.requested
+                            && self.layers.zoom.mapped
+                            && self.input.preferred_owner() == PointerOwner::Desktop;
+                        let allowed = (owner == self.input.preferred_owner() || prepared_zoom)
+                            && (owner != PointerOwner::Annotation
+                                || self.lifecycle.annotation_input_allowed(&self.layers));
+                        reconfirm = !allowed;
+                        if allowed {
+                            self.input.confirm_owner(owner, operation);
+                            if owner == PointerOwner::Annotation {
+                                self.outputs
+                                    .annotation
+                                    .send(AnnotationRequest::Ownership {
+                                        epoch: Some(operation),
+                                    })
+                                    .map_err(|error| error.to_string())?;
+                            }
                         }
                     } else if owner_window == Some(None) {
                         self.input.confirm_owner(PointerOwner::Desktop, operation);
@@ -531,6 +588,10 @@ impl Coordinator {
                 }
                 let success = result.is_ok();
                 self.complete(operation, result.map(|()| Completion::NativeApplied))?;
+                if reconfirm {
+                    self.lifecycle.invalidate_delivery();
+                    self.reconcile(Layer::Spotlight)?;
+                }
                 if success && owner_window.is_some() {
                     self.flush_wheels()?;
                 }
@@ -775,7 +836,7 @@ impl Coordinator {
 
     fn maybe_startup(&mut self) -> Result<(), String> {
         if self.startup_applied
-            || !self.spotlight_ready
+            || !self.spotlight_started
             || !self.zoom_ready
             || !self.native_ready
             || !self.annotation_started
@@ -815,7 +876,7 @@ impl Coordinator {
                 if generation != self.annotation_generation {
                     return Ok(());
                 }
-                if self.lifecycle.pending_operation() != Some(operation)
+                if !self.lifecycle.is_pending_operation(operation)
                     || !self.pending.contains_key(&operation)
                 {
                     return Ok(());
@@ -1076,25 +1137,29 @@ mod tests {
         }
     }
 
-    struct Rig {
-        app: Coordinator,
+    pub(super) struct Rig {
+        pub(super) app: Coordinator,
         spot: mpsc::Receiver<SpotlightRuntimeMessage>,
         zoom: rpresent_zoom::ZoomInbox,
         native: crate::native_input::NativeInbox,
         annotation: rpresent_annotation::AnnotationInbox,
-        zoom_inputs: Vec<ZoomRuntimeRequest>,
-        annotation_inputs: Vec<AnnotationRequest>,
+        pub(super) zoom_inputs: Vec<ZoomRuntimeRequest>,
+        pub(super) annotation_inputs: Vec<AnnotationRequest>,
         resizes: Vec<f32>,
         resolutions: Vec<(u32, bool)>,
         owners: Vec<(u64, Option<u32>)>,
         pause_owner: bool,
         held_owner: Option<NativeRequest>,
+        pause_following: bool,
+        held_following: Option<SpotlightRuntimeMessage>,
+        following_requests: Vec<(u64, bool)>,
     }
 
     impl Rig {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let (mut app, spot, zoom, native, annotation) = coordinator();
             app.spotlight_ready = true;
+            app.spotlight_started = true;
             app.zoom_ready = true;
             app.native_ready = true;
             app.annotation_started = true;
@@ -1118,10 +1183,13 @@ mod tests {
                 owners: Vec::new(),
                 pause_owner: false,
                 held_owner: None,
+                pause_following: false,
+                held_following: None,
+                following_requests: Vec::new(),
             }
         }
 
-        fn event(&mut self, event: AppEvent) {
+        pub(super) fn event(&mut self, event: AppEvent) {
             self.app.handle_event(event).unwrap();
         }
 
@@ -1139,7 +1207,7 @@ mod tests {
             panic!("coordinator requests did not settle");
         }
 
-        fn step(&mut self) -> bool {
+        pub(super) fn step(&mut self) -> bool {
             if let Ok(request) = self.spot.try_recv() {
                 match request {
                     SpotlightRuntimeMessage::Present { operation, visible } => {
@@ -1148,6 +1216,23 @@ mod tests {
                             visible,
                             result: Ok(()),
                         }));
+                    }
+                    SpotlightRuntimeMessage::SetFollowing {
+                        operation,
+                        following,
+                    } => {
+                        self.following_requests.push((operation, following));
+                        if self.pause_following {
+                            self.held_following = Some(request);
+                            return false;
+                        }
+                        self.event(AppEvent::SpotlightRuntime(
+                            SpotlightEvent::FollowingApplied {
+                                operation,
+                                following,
+                                result: Ok(()),
+                            },
+                        ));
                     }
                     SpotlightRuntimeMessage::ResizeBy(delta) => self.resizes.push(delta),
                 }
@@ -1410,6 +1495,22 @@ mod tests {
                 window: 2,
             }))
             .unwrap();
+        let SpotlightRuntimeMessage::SetFollowing {
+            operation,
+            following: false,
+        } = spotlight_events.recv().unwrap()
+        else {
+            panic!("spotlight policy should be acknowledged before presentation");
+        };
+        coordinator
+            .handle_event(AppEvent::SpotlightRuntime(
+                SpotlightEvent::FollowingApplied {
+                    operation,
+                    following: false,
+                    result: Ok(()),
+                },
+            ))
+            .unwrap();
         coordinator
             .handle_event(AppEvent::Command(AppCommand::Spotlight(
                 SpotlightCommand::On,
@@ -1449,8 +1550,41 @@ mod tests {
             }))
             .unwrap();
 
+        let SpotlightRuntimeMessage::SetFollowing {
+            operation,
+            following: true,
+        } = spotlight_events.recv().unwrap()
+        else {
+            panic!("spotlight should resume following after native acquisition");
+        };
+        coordinator
+            .handle_event(AppEvent::SpotlightRuntime(
+                SpotlightEvent::FollowingApplied {
+                    operation,
+                    following: true,
+                    result: Ok(()),
+                },
+            ))
+            .unwrap();
+
         coordinator
             .handle_event(AppEvent::Command(AppCommand::Zoom(ZoomCommand::On)))
+            .unwrap();
+        let SpotlightRuntimeMessage::SetFollowing {
+            operation,
+            following: false,
+        } = spotlight_events.recv().unwrap()
+        else {
+            panic!("capture should suspend spotlight following before selection");
+        };
+        coordinator
+            .handle_event(AppEvent::SpotlightRuntime(
+                SpotlightEvent::FollowingApplied {
+                    operation,
+                    following: false,
+                    result: Ok(()),
+                },
+            ))
             .unwrap();
         let ZoomRuntimeRequest::SelectMonitor { operation } = zoom_events.try_recv().unwrap()
         else {
@@ -1823,6 +1957,7 @@ mod tests {
     fn failed_preparation_clears_buffered_wheel() {
         let mut rig = Rig::new();
         rig.event(AppEvent::Command(AppCommand::Zoom(ZoomCommand::On)));
+        assert!(rig.step());
         let ZoomRuntimeRequest::SelectMonitor { operation } = rig.zoom.try_recv().unwrap() else {
             panic!("expected monitor selection");
         };
@@ -1931,4 +2066,257 @@ mod tests {
         rig.settle();
         assert!(rig.zoom_inputs.is_empty());
     }
+
+    fn report_editing(rig: &mut Rig, editing: bool) {
+        rig.event(AppEvent::AnnotationRuntime(AnnotationEvent::Status(
+            AnnotationStatus {
+                generation: 1,
+                window: Some(3),
+                ready: true,
+                editing_requested: editing,
+                has_content: true,
+                text_editing: false,
+            },
+        )));
+        rig.settle();
+    }
+
+    #[test]
+    fn annotation_grab_waits_for_suspension_and_native_confirmation() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        rig.following_requests.clear();
+        rig.pause_following = true;
+        let prior_owners = rig.owners.len();
+        report_editing(&mut rig, true);
+        let SpotlightRuntimeMessage::SetFollowing {
+            operation,
+            following: false,
+        } = rig.held_following.take().unwrap()
+        else {
+            panic!("expected suspension");
+        };
+        assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Desktop);
+        assert_eq!(rig.owners.len(), prior_owners);
+        rig.pause_owner = true;
+        rig.event(AppEvent::SpotlightRuntime(
+            SpotlightEvent::FollowingApplied {
+                operation,
+                following: false,
+                result: Ok(()),
+            },
+        ));
+        rig.settle();
+        assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Desktop);
+        let NativeRequest::SetOwner {
+            operation,
+            window: Some(3),
+            ..
+        } = rig.held_owner.take().unwrap()
+        else {
+            panic!("expected annotation acquisition");
+        };
+        rig.event(AppEvent::Native(NativeEvent::Applied {
+            operation,
+            result: Ok(()),
+        }));
+        rig.settle();
+        assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Annotation);
+    }
+
+    #[test]
+    fn viewing_artwork_resumes_only_after_spotlight_native_confirmation() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        report_editing(&mut rig, true);
+        rig.following_requests.clear();
+        rig.pause_owner = true;
+        report_editing(&mut rig, false);
+        assert!(rig.following_requests.is_empty());
+        let NativeRequest::SetOwner {
+            operation,
+            window: Some(2),
+            ..
+        } = rig.held_owner.take().unwrap()
+        else {
+            panic!("expected spotlight acquisition");
+        };
+        rig.event(AppEvent::Native(NativeEvent::Applied {
+            operation,
+            result: Ok(()),
+        }));
+        rig.settle();
+        assert_eq!(rig.following_requests.len(), 1);
+        assert!(rig.following_requests[0].1);
+        assert!(rig.app.layers.annotation.mapped);
+    }
+
+    #[test]
+    fn rapid_editing_rejects_a_delayed_resume_acknowledgment() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        report_editing(&mut rig, true);
+        rig.pause_following = true;
+        report_editing(&mut rig, false);
+        let SpotlightRuntimeMessage::SetFollowing {
+            operation: resume,
+            following: true,
+        } = rig.held_following.take().unwrap()
+        else {
+            panic!("expected paused resume");
+        };
+        report_editing(&mut rig, true);
+        let SpotlightRuntimeMessage::SetFollowing {
+            operation: suspend,
+            following: false,
+        } = rig.held_following.take().unwrap()
+        else {
+            panic!("expected newer suspension");
+        };
+        rig.event(AppEvent::SpotlightRuntime(
+            SpotlightEvent::FollowingApplied {
+                operation: resume,
+                following: true,
+                result: Ok(()),
+            },
+        ));
+        assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Desktop);
+        assert!(rig.app.lifecycle.is_pending_operation(suspend));
+        rig.pause_following = false;
+        rig.event(AppEvent::SpotlightRuntime(
+            SpotlightEvent::FollowingApplied {
+                operation: suspend,
+                following: false,
+                result: Ok(()),
+            },
+        ));
+        rig.settle();
+        assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Annotation);
+    }
+
+    #[test]
+    fn spotlight_failure_does_not_stop_healthy_zoom_or_annotation_startup() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Zoom(ZoomCommand::On));
+        rig.event(AppEvent::SpotlightRuntime(SpotlightEvent::Exited(Err(
+            "injected spotlight failure".into(),
+        ))));
+        report_editing(&mut rig, true);
+        assert!(rig.app.lifecycle.is_zoom_active());
+        assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Annotation);
+        assert!(rig.app.spotlight_started);
+        assert!(!rig.app.spotlight_ready);
+    }
+
+    #[test]
+    fn denied_annotation_grab_keeps_following_suspended_and_zoom_healthy() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Zoom(ZoomCommand::On));
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        rig.following_requests.clear();
+        rig.pause_owner = true;
+        report_editing(&mut rig, true);
+        let NativeRequest::SetOwner {
+            operation,
+            window: Some(3),
+            ..
+        } = rig.held_owner.take().unwrap()
+        else {
+            panic!("expected annotation acquisition");
+        };
+        rig.event(AppEvent::Native(NativeEvent::Applied {
+            operation,
+            result: Err("grab denied".into()),
+        }));
+        rig.settle();
+        assert!(rig.app.lifecycle.is_zoom_active());
+        assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Desktop);
+        assert!(
+            rig.following_requests
+                .iter()
+                .all(|(_, following)| !following)
+        );
+    }
+
+    #[test]
+    fn failed_spotlight_initialization_does_not_gate_startup_annotation_command() {
+        let (mut app, _spot, _zoom, _native, annotation) = coordinator();
+        let mut config = Config::default();
+        config.annotation.enabled_on_start = true;
+        app.config = Arc::new(ConfigService::new(PathBuf::from("test.toml"), config));
+        app.zoom_ready = true;
+        app.native_ready = true;
+        app.annotation_started = true;
+        app.handle_event(AppEvent::SpotlightRuntime(SpotlightEvent::Exited(Err(
+            "unavailable X11 spotlight backend".into(),
+        ))))
+        .unwrap();
+        assert!(app.startup_applied);
+        assert!(matches!(
+            annotation.try_recv(),
+            Ok(AnnotationRequest::Command(
+                rpresent_annotation::AnnotationCommand::On
+            ))
+        ));
+    }
+
+    #[test]
+    fn wrong_state_failure_cannot_complete_the_pending_suspension() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        rig.pause_following = true;
+        report_editing(&mut rig, true);
+        let SpotlightRuntimeMessage::SetFollowing { operation, .. } =
+            rig.held_following.take().unwrap()
+        else {
+            panic!("expected suspension");
+        };
+        rig.event(AppEvent::SpotlightRuntime(
+            SpotlightEvent::FollowingApplied {
+                operation,
+                following: true,
+                result: Err("obsolete resume failed".into()),
+            },
+        ));
+        assert!(rig.app.lifecycle.is_pending_operation(operation));
+        assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Desktop);
+    }
+
+    #[test]
+    fn replacement_ready_discards_an_old_following_acknowledgment() {
+        for window in [2, 22] {
+            let mut rig = Rig::new();
+            rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+            rig.pause_following = true;
+            report_editing(&mut rig, true);
+            let SpotlightRuntimeMessage::SetFollowing { operation: old, .. } =
+                rig.held_following.take().unwrap()
+            else {
+                panic!("expected old suspension");
+            };
+            rig.event(AppEvent::SpotlightRuntime(SpotlightEvent::Ready { window }));
+            rig.settle();
+            let SpotlightRuntimeMessage::SetFollowing {
+                operation: new,
+                following: false,
+            } = rig.held_following.take().unwrap()
+            else {
+                panic!("expected replacement policy");
+            };
+            assert_ne!(old, new);
+            rig.event(AppEvent::SpotlightRuntime(
+                SpotlightEvent::FollowingApplied {
+                    operation: old,
+                    following: false,
+                    result: Ok(()),
+                },
+            ));
+            assert!(rig.app.lifecycle.is_pending_operation(new));
+            assert!(!rig.app.layers.spotlight.mapped);
+        }
+    }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "coordinator/native_tests.rs"]
+mod native_tests;

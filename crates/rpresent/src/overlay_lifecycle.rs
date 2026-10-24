@@ -153,6 +153,10 @@ pub enum Effect {
     CancelZoomMotion {
         operation: u64,
     },
+    SetSpotlightFollowing {
+        operation: u64,
+        following: bool,
+    },
 }
 
 impl Effect {
@@ -167,7 +171,8 @@ impl Effect {
             | Self::CommitZoom { operation }
             | Self::CloseZoom { operation }
             | Self::ResetZoom { operation }
-            | Self::CancelZoomMotion { operation } => *operation,
+            | Self::CancelZoomMotion { operation }
+            | Self::SetSpotlightFollowing { operation, .. } => *operation,
         }
     }
 }
@@ -183,6 +188,7 @@ pub enum Completion {
     ZoomClosed,
     ZoomReset,
     MotionCancelled,
+    SpotlightFollowing { following: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +254,21 @@ struct Outstanding {
     expect: Expect,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PendingFollowing {
+    operation: u64,
+    following: bool,
+    deadline: Instant,
+}
+
+#[derive(Debug, Default)]
+struct FollowingControl {
+    window: Option<u32>,
+    applied: Option<bool>,
+    pending: Option<PendingFollowing>,
+    blocked: Option<bool>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
     /// No zoom window and nothing suppressed.
@@ -310,6 +331,7 @@ pub struct WindowLifecycle {
     annotation_cancel_done: bool,
     capture_owner_released: bool,
     outstanding: Option<Outstanding>,
+    following: FollowingControl,
     deadline: Option<Instant>,
     present_blocked: [bool; 3],
     stack_blocked: bool,
@@ -349,6 +371,7 @@ impl WindowLifecycle {
             annotation_cancel_done: false,
             capture_owner_released: false,
             outstanding: None,
+            following: FollowingControl::default(),
             deadline: None,
             present_blocked: [false; 3],
             stack_blocked: false,
@@ -370,6 +393,9 @@ impl WindowLifecycle {
 
     pub fn next_deadline(&self) -> Option<Instant> {
         self.deadline
+            .into_iter()
+            .chain(self.following.pending.map(|p| p.deadline))
+            .min()
     }
 
     pub fn pending_operation(&self) -> Option<u64> {
@@ -379,7 +405,135 @@ impl WindowLifecycle {
     pub fn accepts_completion(&self, operation: u64, completion: Completion) -> bool {
         self.outstanding.is_some_and(|pending| {
             pending.operation == operation && pending.expect.matches(completion)
+        }) || self.following.pending.is_some_and(|pending| {
+            pending.operation == operation
+                && completion
+                    == (Completion::SpotlightFollowing {
+                        following: pending.following,
+                    })
         })
+    }
+
+    pub fn is_pending_operation(&self, operation: u64) -> bool {
+        self.pending_operation() == Some(operation)
+            || self
+                .following
+                .pending
+                .is_some_and(|p| p.operation == operation)
+    }
+
+    pub fn spotlight_restarted(&mut self) {
+        self.following = FollowingControl::default();
+        if matches!(
+            self.outstanding.map(|p| p.expect),
+            Some(Expect::Present {
+                layer: Layer::Spotlight,
+                ..
+            })
+        ) {
+            self.outstanding = None;
+            self.deadline = None;
+        }
+    }
+
+    pub fn annotation_input_allowed(&self, layers: &LayerSnapshot) -> bool {
+        let available = layers.spotlight.input_ready && layers.spotlight.window.is_some();
+        !available
+            || (self.following.window == layers.spotlight.window
+                && self.following.applied == Some(false)
+                && self.following.pending.is_none())
+    }
+
+    fn desired_following(&self, layers: &LayerSnapshot) -> bool {
+        let Some(window) = self.following.window else {
+            return false;
+        };
+        !self.suppressed
+            && !self.owner_blocked
+            && !self.owner_needs_confirmation
+            && layers.spotlight.mapped
+            && self.owner_window == Some(window)
+            && self.preferred_owner_window(layers) == Some(window)
+    }
+
+    fn reconcile_following(&mut self, layers: &LayerSnapshot, now: Instant) -> Vec<Effect> {
+        let window = layers
+            .spotlight
+            .window
+            .filter(|_| layers.spotlight.input_ready);
+        if self.following.window != window {
+            self.following = FollowingControl {
+                window,
+                ..Default::default()
+            };
+            if matches!(
+                self.outstanding.map(|p| p.expect),
+                Some(Expect::Present {
+                    layer: Layer::Spotlight,
+                    ..
+                })
+            ) {
+                self.outstanding = None;
+                self.deadline = None;
+            }
+        }
+        if window.is_none() {
+            return Vec::new();
+        }
+        let following = self.desired_following(layers);
+        if self
+            .following
+            .pending
+            .is_some_and(|p| p.following == following)
+        {
+            return Vec::new();
+        }
+        if self.following.pending.is_none() && self.following.applied == Some(following) {
+            return Vec::new();
+        }
+        if self.following.blocked == Some(following) {
+            return Vec::new();
+        }
+        let operation = self.next_operation();
+        self.following.applied = None;
+        self.following.blocked = None;
+        self.following.pending = Some(PendingFollowing {
+            operation,
+            following,
+            deadline: now + ACK_TIMEOUT,
+        });
+        vec![Effect::SetSpotlightFollowing {
+            operation,
+            following,
+        }]
+    }
+
+    fn finish_following(&mut self, result: Result<Completion, String>, layers: &LayerSnapshot) {
+        let pending = self
+            .following
+            .pending
+            .take()
+            .expect("a following control is pending");
+        match result {
+            Ok(Completion::SpotlightFollowing { following }) => {
+                self.following.applied = Some(following);
+            }
+            Err(error) => {
+                self.following.applied = None;
+                self.following.blocked = Some(pending.following);
+                self.errors
+                    .push(format!("spotlight following failed: {error}"));
+                if !pending.following {
+                    let had_owner = self.owner_window.is_some() || self.pending_owner.is_some();
+                    self.block_owner(layers);
+                    self.owner_cleanup_required |= had_owner;
+                    if !matches!(self.stage, Stage::Idle | Stage::Active | Stage::Stopping) {
+                        self.begin_stopping();
+                    }
+                }
+            }
+            _ => unreachable!("completion kind was checked before applying following"),
+        }
     }
 
     pub fn native_cleanup_failed(&self) -> bool {
@@ -470,6 +624,19 @@ impl WindowLifecycle {
         layers: LayerSnapshot,
         now: Instant,
     ) -> Vec<Effect> {
+        if self
+            .following
+            .pending
+            .is_some_and(|p| p.operation == operation)
+        {
+            if let Ok(completion) = result.as_ref()
+                && !self.accepts_completion(operation, *completion)
+            {
+                return Vec::new();
+            }
+            self.finish_following(result, &layers);
+            return self.pump(&layers, now);
+        }
         let Some(outstanding) = self.outstanding else {
             return Vec::new();
         };
@@ -558,7 +725,7 @@ impl WindowLifecycle {
 
     /// Abandon an overdue operation. Recovery continues from whichever step is
     /// still applicable, so overlays are never left suppressed.
-    pub fn expire(&mut self, layers: LayerSnapshot, now: Instant) -> Vec<Effect> {
+    pub fn expire_native(&mut self, layers: LayerSnapshot, now: Instant) -> Vec<Effect> {
         let Some(deadline) = self.deadline else {
             return Vec::new();
         };
@@ -595,6 +762,19 @@ impl WindowLifecycle {
             },
         }
 
+        self.pump(&layers, now)
+    }
+
+    pub fn expire(&mut self, layers: LayerSnapshot, now: Instant) -> Vec<Effect> {
+        if self.following.pending.is_some_and(|p| now >= p.deadline) {
+            self.finish_following(
+                Err("timed out waiting for acknowledgment".to_owned()),
+                &layers,
+            );
+        }
+        if self.deadline.is_some_and(|deadline| now >= deadline) {
+            return self.expire_native(layers, now);
+        }
         self.pump(&layers, now)
     }
 
@@ -640,6 +820,7 @@ impl WindowLifecycle {
 
     pub fn retry_owner(&mut self, layers: LayerSnapshot, now: Instant) -> Vec<Effect> {
         self.owner_blocked = false;
+        self.following.blocked = None;
         self.pump(&layers, now)
     }
 
@@ -771,6 +952,10 @@ impl WindowLifecycle {
     /// either waiting for an acknowledgment or settled.
     fn pump(&mut self, layers: &LayerSnapshot, now: Instant) -> Vec<Effect> {
         loop {
+            let effects = self.reconcile_following(layers, now);
+            if !effects.is_empty() {
+                return effects;
+            }
             if self.outstanding.is_some() {
                 return Vec::new();
             }
@@ -850,6 +1035,15 @@ impl WindowLifecycle {
                     }
                     match self.preferred_owner_window(layers) {
                         Some(window) => {
+                            if Some(window) == layers.annotation.window
+                                && !self.annotation_input_allowed(layers)
+                            {
+                                if self.following.blocked == Some(false) {
+                                    self.begin_stopping();
+                                    continue;
+                                }
+                                return Vec::new();
+                            }
                             self.stage = Stage::AcquiringOwner;
                             self.owner_action = OwnerAction::Commit;
                             self.pending_owner = Some(Some(window));
@@ -956,7 +1150,10 @@ impl WindowLifecycle {
                     self.stop_step = StopStep::Close;
                     return Vec::new();
                 }
-                let transfer = self.preferred_upper_window(layers);
+                let transfer = self.preferred_upper_window(layers).filter(|window| {
+                    Some(*window) != layers.annotation.window
+                        || self.annotation_input_allowed(layers)
+                });
                 if transfer == self.owner_window {
                     self.stop_step = StopStep::Close;
                     return Vec::new();
@@ -1010,6 +1207,20 @@ impl WindowLifecycle {
                 continue;
             }
             let desired = self.desired_visible(layer, layers);
+            if layer == Layer::Spotlight && desired {
+                let policy_applied = self.following.window == layers.spotlight.window
+                    && self.following.applied.is_some()
+                    && self.following.pending.is_none();
+                if !policy_applied {
+                    continue;
+                }
+                if self.preferred_owner_window(layers) == layers.annotation.window
+                    && layers.annotation.window.is_some()
+                    && !self.annotation_input_allowed(layers)
+                {
+                    continue;
+                }
+            }
             if self.mapped[layer.index()] != desired {
                 return self.emit(
                     Effect::Present {
@@ -1163,6 +1374,12 @@ impl WindowLifecycle {
         {
             return Some(effects);
         }
+        if preferred.is_some()
+            && preferred == layers.annotation.window
+            && !self.annotation_input_allowed(layers)
+        {
+            return None;
+        }
         self.owner_action = OwnerAction::Continue;
         self.pending_owner = Some(preferred);
         Some(self.emit(
@@ -1262,6 +1479,9 @@ mod tests {
             Effect::CloseZoom { .. } => "close".to_owned(),
             Effect::ResetZoom { .. } => "reset".to_owned(),
             Effect::CancelZoomMotion { .. } => "cancel-motion".to_owned(),
+            Effect::SetSpotlightFollowing { following, .. } => {
+                format!("following {following}")
+            }
         }
     }
 
@@ -1283,8 +1503,22 @@ mod tests {
         }
 
         fn request(&mut self, command: ZoomCommand) -> Vec<Effect> {
+            let initialize_following = self.lifecycle.following.window.is_none()
+                && self.layers.spotlight.window.is_some()
+                && self.layers.spotlight.input_ready;
             let effects = self.lifecycle.request_zoom(command, self.layers, self.now);
             self.record(&effects);
+            if initialize_following
+                && matches!(
+                    effects.as_slice(),
+                    [Effect::SetSpotlightFollowing {
+                        following: false,
+                        ..
+                    }]
+                )
+            {
+                return self.ack(&effects[0]);
+            }
             effects
         }
 
@@ -1323,6 +1557,9 @@ mod tests {
                 }
                 Effect::ResetZoom { .. } => Completion::ZoomReset,
                 Effect::CancelZoomMotion { .. } => Completion::MotionCancelled,
+                Effect::SetSpotlightFollowing { following, .. } => {
+                    Completion::SpotlightFollowing { following }
+                }
             };
             let effects =
                 self.lifecycle
@@ -1463,7 +1700,10 @@ mod tests {
         assert_eq!(describe(&effects[0]), "present spotlight off");
 
         // Nothing prepares zoom until the hide is acknowledged.
-        assert_eq!(driver.seen, ["select", "present spotlight off"]);
+        assert_eq!(
+            driver.seen,
+            ["following false", "select", "present spotlight off"]
+        );
 
         let effects = driver.ack(&effects[0]);
         assert!(matches!(effects.as_slice(), [Effect::PrepareZoom { .. }]));
@@ -1686,6 +1926,17 @@ mod tests {
             driver
                 .lifecycle
                 .visibility_changed(Layer::Spotlight, driver.layers, driver.now);
+        let effects = if matches!(
+            effects.as_slice(),
+            [Effect::SetSpotlightFollowing {
+                following: false,
+                ..
+            }]
+        ) {
+            driver.ack(&effects[0])
+        } else {
+            effects
+        };
         assert_eq!(
             describe(&effects[0]),
             format!("restack [None, Some({SPOTLIGHT}), None]")
@@ -1999,5 +2250,299 @@ mod tests {
                 .seen
                 .contains(&format!("owner Some({ZOOM}) restore_focus=false"))
         );
+    }
+
+    fn following_setup() -> (WindowLifecycle, LayerSnapshot, Instant) {
+        let mut lifecycle = WindowLifecycle::new();
+        let snapshot = layers((true, true), (true, true, ANNOTATION));
+        lifecycle.sync(&snapshot);
+        lifecycle.applied_order = snapshot.bottom_to_top();
+        lifecycle.following.window = Some(SPOTLIGHT);
+        lifecycle.following.applied = Some(true);
+        lifecycle.owner_window = Some(SPOTLIGHT);
+        (lifecycle, snapshot, Instant::now())
+    }
+
+    #[test]
+    fn annotation_waits_for_matching_suspension_acknowledgment() {
+        let (mut lifecycle, snapshot, now) = following_setup();
+        let effects = lifecycle.visibility_changed(Layer::Annotation, snapshot, now);
+        let [
+            Effect::SetSpotlightFollowing {
+                operation,
+                following: false,
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("expected suspension, got {effects:?}");
+        };
+        let operation = *operation;
+        assert!(!lifecycle.annotation_input_allowed(&snapshot));
+        assert!(
+            lifecycle
+                .complete(
+                    operation + 100,
+                    Ok(Completion::SpotlightFollowing { following: false }),
+                    snapshot,
+                    now
+                )
+                .is_empty()
+        );
+        assert!(!lifecycle.accepts_completion(
+            operation,
+            Completion::SpotlightFollowing { following: true }
+        ));
+        let effects = lifecycle.complete(
+            operation,
+            Ok(Completion::SpotlightFollowing { following: false }),
+            snapshot,
+            now,
+        );
+        assert!(lifecycle.annotation_input_allowed(&snapshot));
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::SetOwner {
+                window: Some(ANNOTATION),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn suspension_does_not_wait_for_an_unrelated_native_acknowledgment() {
+        let (mut lifecycle, snapshot, now) = following_setup();
+        let native = lifecycle.emit(
+            Effect::Restack {
+                operation: lifecycle.next_operation(),
+                bottom_to_top: snapshot.bottom_to_top(),
+            },
+            Expect::Restack,
+            now,
+        );
+        let effects = lifecycle.visibility_changed(Layer::Annotation, snapshot, now);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::SetSpotlightFollowing {
+                following: false,
+                ..
+            }]
+        ));
+        assert!(lifecycle.is_pending_operation(native[0].operation()));
+        assert!(lifecycle.is_pending_operation(effects[0].operation()));
+        assert!(!lifecycle.annotation_input_allowed(&snapshot));
+    }
+
+    #[test]
+    fn a_late_resume_cannot_override_a_new_suspension() {
+        let (mut lifecycle, mut snapshot, now) = following_setup();
+        snapshot.annotation_editing = false;
+        lifecycle.following.applied = Some(false);
+        let resume = lifecycle.visibility_changed(Layer::Annotation, snapshot, now);
+        assert!(matches!(
+            resume.as_slice(),
+            [Effect::SetSpotlightFollowing {
+                following: true,
+                ..
+            }]
+        ));
+        snapshot.annotation_editing = true;
+        let suspend = lifecycle.visibility_changed(Layer::Annotation, snapshot, now);
+        assert!(matches!(
+            suspend.as_slice(),
+            [Effect::SetSpotlightFollowing {
+                following: false,
+                ..
+            }]
+        ));
+        assert!(!lifecycle.is_pending_operation(resume[0].operation()));
+        assert!(
+            lifecycle
+                .complete(
+                    resume[0].operation(),
+                    Ok(Completion::SpotlightFollowing { following: true }),
+                    snapshot,
+                    now
+                )
+                .is_empty()
+        );
+        assert!(!lifecycle.annotation_input_allowed(&snapshot));
+    }
+
+    #[test]
+    fn failed_suspension_blocks_annotation_without_stopping_active_zoom() {
+        for timeout in [false, true] {
+            let (mut lifecycle, snapshot, now) = following_setup();
+            lifecycle.stage = Stage::Active;
+            lifecycle.committed = true;
+            lifecycle.zoom_window = Some(ZOOM);
+            lifecycle.zoom_mapped = true;
+            let suspend = lifecycle.visibility_changed(Layer::Annotation, snapshot, now);
+            let operation = suspend[0].operation();
+            let effects = if timeout {
+                lifecycle.expire(snapshot, now + ACK_TIMEOUT)
+            } else {
+                lifecycle.complete(operation, Err("suspension rejected".into()), snapshot, now)
+            };
+            assert!(lifecycle.is_zoom_active());
+            assert!(!lifecycle.annotation_input_allowed(&snapshot));
+            assert!(!effects.iter().any(|effect| matches!(
+                effect,
+                Effect::SetOwner {
+                    window: Some(ANNOTATION),
+                    ..
+                }
+            )));
+            assert!(!lifecycle.take_errors().is_empty());
+            assert!(!lifecycle.accepts_completion(
+                operation,
+                Completion::SpotlightFollowing { following: false }
+            ));
+            assert!(lifecycle.following.pending.is_none());
+            assert_eq!(lifecycle.following.blocked, Some(false));
+        }
+    }
+
+    #[test]
+    fn repeated_reconciliation_does_not_duplicate_a_control_or_extend_its_deadline() {
+        let (mut lifecycle, snapshot, now) = following_setup();
+        let first = lifecycle.visibility_changed(Layer::Annotation, snapshot, now);
+        let deadline = lifecycle.next_deadline();
+        for index in 1..10 {
+            let effects = lifecycle.visibility_changed(
+                Layer::Annotation,
+                snapshot,
+                now + Duration::from_millis(index),
+            );
+            assert!(effects.is_empty());
+            assert_eq!(lifecycle.next_deadline(), deadline);
+            assert!(lifecycle.is_pending_operation(first[0].operation()));
+        }
+    }
+
+    #[test]
+    fn ownership_loss_suspends_until_an_explicit_reconciliation_retry() {
+        let (mut lifecycle, mut snapshot, now) = following_setup();
+        snapshot.annotation_editing = false;
+        let effects = lifecycle.owner_lost(SPOTLIGHT, snapshot, now);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::SetSpotlightFollowing {
+                following: false,
+                ..
+            }]
+        ));
+        let effects = lifecycle.complete(
+            effects[0].operation(),
+            Ok(Completion::SpotlightFollowing { following: false }),
+            snapshot,
+            now,
+        );
+        assert!(!effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SetSpotlightFollowing {
+                following: true,
+                ..
+            }
+        )));
+        assert_eq!(lifecycle.following.applied, Some(false));
+        assert!(lifecycle.owner_blocked);
+    }
+
+    #[test]
+    fn unavailable_spotlight_does_not_block_annotation() {
+        let mut driver = Driver::new(layers((false, false), (true, true, ANNOTATION)));
+        driver.layers.spotlight = LayerState::default();
+        let effects =
+            driver
+                .lifecycle
+                .visibility_changed(Layer::Annotation, driver.layers, driver.now);
+        driver.run(effects);
+        assert_eq!(driver.lifecycle.owner_window, Some(ANNOTATION));
+        assert!(driver.lifecycle.annotation_input_allowed(&driver.layers));
+    }
+
+    #[test]
+    fn capture_restoration_never_resumes_while_annotation_is_preferred() {
+        let mut driver = Driver::new(layers((true, true), (true, true, ANNOTATION)));
+        let effects = driver.request(ZoomCommand::On);
+        driver.run(effects);
+        assert!(driver.lifecycle.is_zoom_active());
+        assert_eq!(driver.lifecycle.owner_window, Some(ANNOTATION));
+        assert_eq!(driver.lifecycle.following.applied, Some(false));
+        assert!(!driver.seen.iter().any(|seen| seen == "following true"));
+        assert!(
+            driver
+                .seen
+                .iter()
+                .any(|seen| seen == "present spotlight off")
+        );
+        assert!(
+            driver
+                .seen
+                .iter()
+                .any(|seen| seen == "present spotlight on")
+        );
+    }
+
+    #[test]
+    fn editing_enabled_during_capture_controls_the_restored_frame() {
+        let mut driver = Driver::new(layers((true, true), (true, true, ANNOTATION)));
+        driver.layers.annotation_editing = false;
+        let mut effects = driver.request(ZoomCommand::On);
+        loop {
+            assert_eq!(effects.len(), 1);
+            if matches!(effects[0], Effect::PrepareZoom { .. }) {
+                break;
+            }
+            effects = driver.ack(&effects[0]);
+        }
+        let prepare = effects.remove(0);
+        driver.layers.annotation_editing = true;
+        assert!(
+            driver
+                .lifecycle
+                .visibility_changed(Layer::Annotation, driver.layers, driver.now)
+                .is_empty()
+        );
+        let effects = driver.ack(&prepare);
+        driver.run(effects);
+        assert_eq!(driver.lifecycle.owner_window, Some(ANNOTATION));
+        assert_eq!(driver.lifecycle.following.applied, Some(false));
+        assert!(!driver.seen.iter().any(|seen| seen == "following true"));
+    }
+
+    #[test]
+    fn a_replacement_spotlight_requires_policy_before_presentation() {
+        let (mut lifecycle, mut snapshot, now) = following_setup();
+        snapshot.spotlight.window = Some(SPOTLIGHT + 10);
+        snapshot.spotlight.mapped = false;
+        let effects = lifecycle.visibility_changed(Layer::Spotlight, snapshot, now);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::SetSpotlightFollowing {
+                following: false,
+                ..
+            }]
+        ));
+        assert!(!lifecycle.annotation_input_allowed(&snapshot));
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Present { .. }))
+        );
+        let effects = lifecycle.complete(
+            effects[0].operation(),
+            Ok(Completion::SpotlightFollowing { following: false }),
+            snapshot,
+            now,
+        );
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Present {
+                layer: Layer::Spotlight,
+                visible: true,
+                ..
+            }]
+        ));
     }
 }
