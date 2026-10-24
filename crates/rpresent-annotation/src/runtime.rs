@@ -315,6 +315,80 @@ impl AnnotationRuntime {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub fn run_overlay(
+    config: Arc<ConfigService>,
+    mut inbox: crate::transport::AnnotationInbox,
+    events: AnnotationEventSink,
+) -> Result<(), OverlayError> {
+    let factory: BackendFactory = Box::new(|| {
+        Ok(Box::new(crate::x11::X11AnnotationBackend::new()?) as Box<dyn AnnotationBackend>)
+    });
+    let mut runtime = AnnotationRuntime::new(config, factory, Arc::clone(&events))?;
+    loop {
+        let _ = inbox.drain_wake();
+        loop {
+            match inbox.try_recv() {
+                Ok(request) => runtime.process(request, Instant::now()),
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    runtime.process(AnnotationRequest::Shutdown, Instant::now());
+                    break;
+                }
+            }
+        }
+        runtime.flush(Instant::now());
+        if runtime.is_exited() {
+            return Ok(());
+        }
+        wait_for_events(&inbox, &runtime);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_events(
+    inbox: &crate::transport::AnnotationInbox,
+    runtime: &AnnotationRuntime,
+) {
+    let mut descriptors = [
+        libc::pollfd {
+            fd: inbox.wake_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: runtime.connection_fd().unwrap_or(-1),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    let count = if descriptors[1].fd >= 0 { 2 } else { 1 };
+    let timeout = runtime
+        .next_deadline()
+        .map(|deadline| {
+            deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis()
+                .min(i32::MAX as u128) as i32
+        })
+        .unwrap_or(-1);
+    // SAFETY: the descriptor array is valid for the duration of the call.
+    unsafe {
+        libc::poll(descriptors.as_mut_ptr(), count, timeout);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn run_overlay(
+    _config: Arc<ConfigService>,
+    _inbox: crate::transport::AnnotationInbox,
+    events: AnnotationEventSink,
+) -> Result<(), OverlayError> {
+    let error = OverlayError::UnsupportedPlatform;
+    events(AnnotationEvent::Exited(Err(error.to_string())));
+    Err(error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
