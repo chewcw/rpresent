@@ -1,6 +1,7 @@
 pub mod capture;
 pub mod command;
 pub mod controller;
+pub mod navigation;
 pub mod overlay;
 
 #[cfg(target_os = "linux")]
