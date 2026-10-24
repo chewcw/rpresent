@@ -7,3 +7,4 @@ edition = "2024"
 rpresent-config = { path = "../rpresent-config" }
 tracing = { workspace = true }
 thiserror = "2"
+cosmic-text = "0.19"
