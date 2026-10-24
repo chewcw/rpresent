@@ -1,4 +1,5 @@
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -16,6 +17,8 @@ pub enum IpcError {
     Command(#[from] AppCommandParseError),
     #[error("could not resolve a user config directory")]
     NoConfigDirectory,
+    #[error("no daemon listening at IPC socket {socket_path}; start `rpresent` first")]
+    DaemonNotRunning { socket_path: PathBuf },
 }
 
 pub fn encode_command(command: AppCommand) -> String {
@@ -31,7 +34,22 @@ pub fn read_command(stream: &mut impl Read) -> Result<AppCommand, IpcError> {
 
 pub fn send_command(socket_path: &Path, command: AppCommand) -> Result<(), IpcError> {
     tracing::debug!(socket_path = %socket_path.display(), command = %command, "sending IPC command");
-    let mut stream = UnixStream::connect(socket_path)?;
+
+    let mut stream = match UnixStream::connect(socket_path) {
+        Ok(stream) => stream,
+        Err(error) => {
+            // A file exists at the path but nothing accepted the connection:
+            // either a stale socket left by a crashed daemon or a non-socket file.
+            // Surface a clear, actionable error instead of a raw IO error.
+            if socket_path.exists() {
+                return Err(IpcError::DaemonNotRunning {
+                    socket_path: socket_path.to_path_buf(),
+                });
+            }
+            return Err(error.into());
+        }
+    };
+
     stream.write_all(encode_command(command).as_bytes())?;
     stream.flush()?;
     Ok(())
@@ -49,13 +67,47 @@ pub fn serve(socket_path: &Path, tx: Sender<AppCommand>) -> Result<(), IpcError>
         std::fs::create_dir_all(parent)?;
     }
 
+    // Remove a stale IPC socket left by a previous daemon instance. Only remove
+    // regular files or sockets; a directory or other special file at the path is
+    // a configuration problem, not something to silently delete.
     if socket_path.exists() {
-        tracing::debug!(socket_path = %socket_path.display(), "removing stale IPC socket");
-        std::fs::remove_file(socket_path)?;
+        match socket_path.metadata() {
+            Ok(metadata) => {
+                let file_type = metadata.file_type();
+                if file_type.is_socket() || file_type.is_file() {
+                    tracing::debug!(
+                        socket_path = %socket_path.display(),
+                        "removing stale IPC socket"
+                    );
+                    std::fs::remove_file(socket_path)?;
+                } else {
+                    return Err(std::io::Error::other(format!(
+                        "IPC socket path exists and is not a socket or regular file: {}",
+                        socket_path.display()
+                    ))
+                    .into());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // File vanished between exists() and metadata(); proceed to bind.
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
 
     tracing::debug!(socket_path = %socket_path.display(), "binding IPC listener");
-    let listener = UnixListener::bind(socket_path)?;
+    // Bind once; if another instance created the socket in the meantime, remove it
+    // and retry once so a transient race does not fail startup.
+    let listener = match UnixListener::bind(socket_path) {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            if socket_path.exists() {
+                let _ = std::fs::remove_file(socket_path);
+            }
+            UnixListener::bind(socket_path)?
+        }
+        Err(error) => return Err(error.into()),
+    };
     tracing::debug!(socket_path = %socket_path.display(), "IPC server started");
 
     for connection in listener.incoming() {
