@@ -1,6 +1,6 @@
 use cosmic_text::{
     Action, Attrs, Buffer, BufferRef, Change, Cursor, Edit, Editor, Family, FontSystem, Metrics,
-    Selection, Shaping, SwashCache, Wrap,
+    Motion, Selection, Shaping, SwashCache, Wrap,
 };
 
 use crate::document::{Object, ObjectData};
@@ -213,10 +213,51 @@ impl TextDraft {
         true
     }
 
-    /// Apply one editing action such as a caret motion or a deletion.
-    pub fn action(&mut self, action: Action, fonts: &mut TextSystem) {
+    /// Apply one editing action such as a deletion. A text change becomes one
+    /// reversible draft change; pure caret movement records nothing.
+    pub fn perform(&mut self, action: Action, fonts: &mut TextSystem) {
+        let before = (self.editor.cursor(), self.editor.selection());
+        self.editor.start_change();
         self.editor.action(fonts.font_system_mut(), action);
+        let after = (self.editor.cursor(), self.editor.selection());
+        if let Some(change) = self.editor.finish_change() {
+            self.undo.push(DraftChange {
+                change,
+                before,
+                after,
+            });
+            self.redo.clear();
+        }
         self.editor.shape_as_needed(fonts.font_system_mut(), true);
+    }
+
+    /// Move the caret, extending the selection when `extend_selection` is set.
+    pub fn move_caret(
+        &mut self,
+        motion: Motion,
+        extend_selection: bool,
+        fonts: &mut TextSystem,
+    ) {
+        let anchor = match self.editor.selection() {
+            Selection::Normal(anchor) => Some(anchor),
+            _ => None,
+        };
+        let before = self.editor.cursor();
+        self.editor
+            .action(fonts.font_system_mut(), Action::Motion(motion));
+        if extend_selection {
+            self.editor
+                .set_selection(Selection::Normal(anchor.unwrap_or(before)));
+        } else if anchor.is_some() {
+            self.editor.set_selection(Selection::None);
+        }
+        self.editor.shape_as_needed(fonts.font_system_mut(), true);
+    }
+
+    pub fn select_all(&mut self) {
+        let end = end_cursor(&self.editor);
+        self.editor.set_cursor(Cursor::new(0, 0));
+        self.editor.set_selection(Selection::Normal(end));
     }
 
     pub fn copy_selection(&self) -> Option<String> {

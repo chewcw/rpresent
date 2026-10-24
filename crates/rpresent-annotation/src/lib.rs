@@ -5,6 +5,7 @@ mod document;
 mod geometry;
 mod history;
 mod overlay;
+mod session;
 mod text;
 mod undo;
 
@@ -13,6 +14,7 @@ pub use command::{AnnotationCommand, AnnotationCommandParseError};
 pub use controller::{AnnotationController, AnnotationState};
 pub use document::{Document, Object, ObjectData, ObjectId, Point};
 pub use geometry::Rect;
+pub use session::{KeyInput, Modifiers, PointerInput, Session, SessionStatus};
 pub use text::{TextDraft, TextSystem};
 pub use history::{Stroke, StrokeHistory};
 pub use overlay::{OverlayError, run_overlay};

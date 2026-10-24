@@ -1,0 +1,1430 @@
+use std::time::Duration;
+
+use cosmic_text::{Action, Motion};
+use rpresent_config::{AnnotationConfig, AnnotationTool, ConfigError};
+
+use crate::catalog::{Preset, Rgb, cycle_index, parse_rgb};
+use crate::command::AnnotationCommand;
+use crate::document::{Document, Object, ObjectData, ObjectId, Point};
+use crate::geometry::{
+    Rect, point_rect_distance, point_segment_distance, segment_rect_distance,
+    segment_segment_distance,
+};
+use crate::text::{TextDraft, TextSystem};
+
+/// Extra screen pixels accepted around a visible path when hit testing.
+pub(crate) const HIT_TOLERANCE_PX: f64 = 4.0;
+/// Maximum distance between two clicks that can form a double click.
+pub(crate) const DOUBLE_CLICK_SLOP_PX: i32 = 4;
+pub(crate) const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+/// Movement needed before a selected object starts moving.
+pub(crate) const DRAG_THRESHOLD_PX: i32 = 4;
+pub(crate) const DEFAULT_TEXT_FAMILY: &str = "sans-serif";
+pub(crate) const TEXT_BOX_PADDING_PX: i32 = 4;
+
+const KEY_ENTER: u32 = 0xff0d;
+const KEY_KP_ENTER: u32 = 0xff8d;
+const KEY_ESCAPE: u32 = 0xff1b;
+const KEY_BACKSPACE: u32 = 0xff08;
+const KEY_DELETE: u32 = 0xffff;
+const KEY_LEFT: u32 = 0xff51;
+const KEY_UP: u32 = 0xff52;
+const KEY_RIGHT: u32 = 0xff53;
+const KEY_DOWN: u32 = 0xff54;
+const KEY_HOME: u32 = 0xff50;
+const KEY_END: u32 = 0xff57;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerInput {
+    Down { root: Point, time: Duration },
+    Move { root: Point, time: Duration },
+    Up { root: Point, time: Duration },
+}
+
+impl PointerInput {
+    pub fn root(&self) -> Point {
+        match self {
+            PointerInput::Down { root, .. }
+            | PointerInput::Move { root, .. }
+            | PointerInput::Up { root, .. } => *root,
+        }
+    }
+
+    pub fn time(&self) -> Duration {
+        match self {
+            PointerInput::Down { time, .. }
+            | PointerInput::Move { time, .. }
+            | PointerInput::Up { time, .. } => *time,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub super_key: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyInput {
+    pub keysym: u32,
+    pub text: Option<char>,
+    pub modifiers: Modifiers,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionStatus {
+    pub editing_requested: bool,
+    pub has_content: bool,
+    pub text_editing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Gesture {
+    Pen {
+        origin: Point,
+        points: Vec<Point>,
+    },
+    Line {
+        origin: Point,
+        end: Point,
+    },
+    Move {
+        id: ObjectId,
+        start: Point,
+        offset: Point,
+        moved: bool,
+    },
+    Erase {
+        hidden: Vec<ObjectId>,
+        last: Point,
+    },
+}
+
+pub(crate) struct TextEdit {
+    pub object: Option<ObjectId>,
+    pub origin: Point,
+    pub color: Rgb,
+    pub draft: TextDraft,
+}
+
+pub struct Session {
+    editing_requested: bool,
+    owner_epoch: Option<u64>,
+    tool: AnnotationTool,
+    colors: Vec<Rgb>,
+    color_index: usize,
+    widths: Vec<u32>,
+    width_index: usize,
+    text_sizes: Vec<u32>,
+    text_size_index: usize,
+    document: Document,
+    pub(crate) text_system: TextSystem,
+    selection: Option<ObjectId>,
+    pub(crate) gesture: Option<Gesture>,
+    pub(crate) text_edit: Option<TextEdit>,
+    pub(crate) damage: Option<Rect>,
+    last_click: Option<(ObjectId, Duration, Point)>,
+    next_draft_id: u64,
+}
+
+impl Session {
+    pub fn new(config: &AnnotationConfig) -> Result<Self, ConfigError> {
+        config.validate()?;
+        let colors: Vec<Rgb> = config
+            .colors
+            .iter()
+            .map(|text| parse_rgb(text).expect("validated annotation color"))
+            .collect();
+        let initial_color = parse_rgb(&config.color).expect("validated annotation color");
+        let color_index = colors
+            .iter()
+            .position(|color| *color == initial_color)
+            .expect("validated annotation color selection");
+        let width_index = config
+            .stroke_widths_px
+            .iter()
+            .position(|width| *width == config.stroke_width_px)
+            .expect("validated stroke width selection");
+        let text_size_index = config
+            .text_sizes_px
+            .iter()
+            .position(|size| *size == config.text_size_px)
+            .expect("validated text size selection");
+        Ok(Self {
+            editing_requested: false,
+            owner_epoch: None,
+            tool: config.default_tool,
+            colors,
+            color_index,
+            widths: config.stroke_widths_px.clone(),
+            width_index,
+            text_sizes: config.text_sizes_px.clone(),
+            text_size_index,
+            document: Document::new(config.history_depth),
+            text_system: TextSystem::new(),
+            selection: None,
+            gesture: None,
+            text_edit: None,
+            damage: None,
+            last_click: None,
+            next_draft_id: 1,
+        })
+    }
+
+    pub fn document(&self) -> &Document {
+        &self.document
+    }
+
+    pub fn status(&self) -> SessionStatus {
+        SessionStatus {
+            editing_requested: self.editing_requested,
+            has_content: !self.document.objects().is_empty(),
+            text_editing: self.text_edit.is_some(),
+        }
+    }
+
+    pub fn selection(&self) -> Option<ObjectId> {
+        self.selection
+    }
+
+    pub fn tool(&self) -> AnnotationTool {
+        self.tool
+    }
+
+    pub fn color(&self) -> Rgb {
+        self.colors[self.color_index]
+    }
+
+    pub fn width_px(&self) -> u32 {
+        self.widths[self.width_index]
+    }
+
+    pub fn text_size_px(&self) -> u32 {
+        self.text_sizes[self.text_size_index]
+    }
+
+    pub fn command(&mut self, command: AnnotationCommand) -> Result<(), String> {
+        match command {
+            AnnotationCommand::On => {
+                self.editing_requested = true;
+            }
+            AnnotationCommand::Off => {
+                self.cancel();
+                self.selection = None;
+                self.editing_requested = false;
+            }
+            AnnotationCommand::Toggle => {
+                if self.editing_requested {
+                    self.cancel();
+                    self.selection = None;
+                }
+                self.editing_requested = !self.editing_requested;
+            }
+            AnnotationCommand::Clear => {
+                self.cancel();
+                self.selection = None;
+                self.document.clear();
+            }
+            AnnotationCommand::Undo => {
+                self.cancel();
+                self.selection = None;
+                self.document.undo();
+            }
+            AnnotationCommand::Redo => {
+                self.cancel();
+                self.selection = None;
+                self.document.redo();
+            }
+            AnnotationCommand::Delete => {
+                self.cancel();
+                if let Some(id) = self.selection.take() {
+                    self.document.delete(&[id]);
+                }
+            }
+            AnnotationCommand::Tool(tool) => {
+                self.cancel_transient();
+                self.tool = tool;
+            }
+            AnnotationCommand::Color(preset) => {
+                let (_, index) = resolve_preset(preset, &self.colors, self.color_index)?;
+                self.cancel_transient();
+                self.color_index = index;
+            }
+            AnnotationCommand::Width(preset) => {
+                let (_, index) = resolve_preset(preset, &self.widths, self.width_index)?;
+                self.cancel_transient();
+                self.width_index = index;
+            }
+            AnnotationCommand::TextSize(preset) => {
+                let (_, index) = resolve_preset(preset, &self.text_sizes, self.text_size_index)?;
+                self.cancel_transient();
+                self.text_size_index = index;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn pointer(&mut self, epoch: u64, input: PointerInput) {
+        if self.owner_epoch != Some(epoch) || !self.editing_requested {
+            return;
+        }
+        if self.text_edit.is_some() {
+            if self.draft_pointer(input) {
+                return;
+            }
+        }
+        match input {
+            PointerInput::Down { root, time } => self.pointer_down(root, time),
+            PointerInput::Move { root, .. } => self.pointer_move(root),
+            PointerInput::Up { root, .. } => self.pointer_up(root),
+        }
+    }
+
+    pub fn ownership(&mut self, epoch: Option<u64>) {
+        if self.owner_epoch == epoch {
+            return;
+        }
+        self.owner_epoch = epoch;
+        if epoch.is_none() {
+            self.cancel();
+        }
+    }
+
+    pub fn cancel(&mut self) {
+        self.gesture = None;
+        self.text_edit = None;
+        self.last_click = None;
+    }
+
+    fn cancel_transient(&mut self) {
+        self.gesture = None;
+        self.text_edit = None;
+        self.last_click = None;
+    }
+
+    pub fn key(&mut self, epoch: u64, input: KeyInput) {
+        if self.owner_epoch != Some(epoch) || !self.editing_requested {
+            return;
+        }
+        if self.text_edit.is_some() {
+            self.draft_key(input);
+            return;
+        }
+        if input.modifiers.ctrl || input.modifiers.super_key || input.modifiers.alt {
+            self.document_shortcut(input);
+            return;
+        }
+        self.tool_key(input);
+    }
+
+    fn document_shortcut(&mut self, input: KeyInput) {
+        let Some(letter) = lower_letter(input.keysym) else {
+            return;
+        };
+        if !input.modifiers.ctrl {
+            return;
+        }
+        match letter {
+            'z' if input.modifiers.shift => {
+                self.cancel_transient();
+                self.document.redo();
+            }
+            'z' => {
+                self.cancel_transient();
+                self.document.undo();
+            }
+            'y' => {
+                self.cancel_transient();
+                self.document.redo();
+            }
+            _ => {}
+        }
+    }
+
+    fn tool_key(&mut self, input: KeyInput) {
+        let Some(letter) = lower_letter(input.keysym) else {
+            match input.keysym {
+                0x5b => {
+                    self.cycle_width(false);
+                }
+                0x5d => {
+                    self.cycle_width(true);
+                }
+                0x2d => {
+                    self.cycle_text_size(false);
+                }
+                0x3d => {
+                    self.cycle_text_size(true);
+                }
+                _ => {}
+            }
+            return;
+        };
+        match letter {
+            'v' => self.set_tool(AnnotationTool::Select),
+            'p' => self.set_tool(AnnotationTool::Pen),
+            'l' => self.set_tool(AnnotationTool::Line),
+            'e' => self.set_tool(AnnotationTool::Eraser),
+            't' => self.set_tool(AnnotationTool::Text),
+            'c' => self.cycle_color(!input.modifiers.shift),
+            _ => {}
+        }
+    }
+
+    fn set_tool(&mut self, tool: AnnotationTool) {
+        if self.tool != tool {
+            self.cancel_transient();
+            self.tool = tool;
+        }
+    }
+
+    fn cycle_color(&mut self, forward: bool) {
+        let index = cycle_index(self.color_index, self.colors.len(), forward);
+        self.cancel_transient();
+        self.color_index = index;
+    }
+
+    fn cycle_width(&mut self, forward: bool) {
+        let index = cycle_index(self.width_index, self.widths.len(), forward);
+        self.cancel_transient();
+        self.width_index = index;
+    }
+
+    fn cycle_text_size(&mut self, forward: bool) {
+        let index = cycle_index(self.text_size_index, self.text_sizes.len(), forward);
+        self.cancel_transient();
+        self.text_size_index = index;
+    }
+
+    fn draft_key(&mut self, input: KeyInput) {
+        let ctrl = input.modifiers.ctrl;
+        let shift = input.modifiers.shift;
+        if ctrl {
+            match lower_letter(input.keysym) {
+                Some('z') if shift => {
+                    if let Some(edit) = self.text_edit.as_mut() {
+                        edit.draft.redo();
+                    }
+                }
+                Some('z') => {
+                    if let Some(edit) = self.text_edit.as_mut() {
+                        edit.draft.undo();
+                    }
+                }
+                Some('y') => {
+                    if let Some(edit) = self.text_edit.as_mut() {
+                        edit.draft.redo();
+                    }
+                }
+                Some('a') => {
+                    if let Some(edit) = self.text_edit.as_mut() {
+                        edit.draft.select_all();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        match input.keysym {
+            KEY_ENTER | KEY_KP_ENTER => {
+                if shift {
+                    self.draft_insert("\n");
+                } else {
+                    self.commit_text();
+                }
+            }
+            KEY_ESCAPE => self.cancel_text(),
+            KEY_BACKSPACE => self.draft_action(Action::Backspace),
+            KEY_DELETE => self.draft_action(Action::Delete),
+            KEY_LEFT => self.draft_motion(Motion::Left, shift),
+            KEY_RIGHT => self.draft_motion(Motion::Right, shift),
+            KEY_UP => self.draft_motion(Motion::Up, shift),
+            KEY_DOWN => self.draft_motion(Motion::Down, shift),
+            KEY_HOME => self.draft_motion(Motion::Home, shift),
+            KEY_END => self.draft_motion(Motion::End, shift),
+            _ => {
+                if let Some(character) = input.text {
+                    self.draft_insert(&character.to_string());
+                }
+            }
+        }
+    }
+
+    fn draft_insert(&mut self, text: &str) {
+        if let Some(edit) = self.text_edit.as_mut() {
+            edit.draft.insert(text, &mut self.text_system);
+        }
+    }
+
+    fn draft_action(&mut self, action: Action) {
+        if let Some(edit) = self.text_edit.as_mut() {
+            edit.draft.perform(action, &mut self.text_system);
+        }
+    }
+
+    fn draft_motion(&mut self, motion: Motion, extend_selection: bool) {
+        if let Some(edit) = self.text_edit.as_mut() {
+            edit.draft
+                .move_caret(motion, extend_selection, &mut self.text_system);
+        }
+    }
+
+    /// Route pointer input to the draft. Returns false when the pointer is
+    /// outside the editing box, in which case the draft is committed first.
+    fn draft_pointer(&mut self, input: PointerInput) -> bool {
+        let root = input.root();
+        let (origin, bounds) = {
+            let Some(edit) = self.text_edit.as_mut() else {
+                return false;
+            };
+            let origin = edit.origin;
+            let bounds = edit
+                .draft
+                .bounds(origin, &mut self.text_system)
+                .padded(TEXT_BOX_PADDING_PX);
+            (origin, bounds)
+        };
+        if matches!(input, PointerInput::Down { .. }) && !bounds.contains(root) {
+            self.commit_text();
+            return false;
+        }
+        if !bounds.contains(root) {
+            return true;
+        }
+        let local = Point {
+            x: root.x - origin.x,
+            y: root.y - origin.y,
+        };
+        let action = match input {
+            PointerInput::Down { .. } => Action::Click {
+                x: local.x,
+                y: local.y,
+            },
+            PointerInput::Move { .. } => Action::Drag {
+                x: local.x,
+                y: local.y,
+            },
+            PointerInput::Up { .. } => return true,
+        };
+        if let Some(edit) = self.text_edit.as_mut() {
+            edit.draft.perform(action, &mut self.text_system);
+        }
+        true
+    }
+
+    fn pointer_down(&mut self, root: Point, time: Duration) {
+        match self.tool {
+            AnnotationTool::Pen => {
+                self.gesture = Some(Gesture::Pen {
+                    origin: root,
+                    points: vec![Point::default()],
+                });
+            }
+            AnnotationTool::Line => {
+                self.gesture = Some(Gesture::Line {
+                    origin: root,
+                    end: Point::default(),
+                });
+            }
+            AnnotationTool::Eraser => {
+                let hidden = self.erase_hits(root, root);
+                self.gesture = Some(Gesture::Erase { hidden, last: root });
+            }
+            AnnotationTool::Select => self.select_down(root, time),
+            AnnotationTool::Text => self.text_down(root, time),
+        }
+    }
+
+    fn pointer_move(&mut self, root: Point) {
+        match &mut self.gesture {
+            Some(Gesture::Pen { origin, points }) => {
+                let local = Point {
+                    x: root.x - origin.x,
+                    y: root.y - origin.y,
+                };
+                if points.last() != Some(&local) {
+                    points.push(local);
+                }
+            }
+            Some(Gesture::Line { origin, end }) => {
+                *end = Point {
+                    x: root.x - origin.x,
+                    y: root.y - origin.y,
+                };
+            }
+            Some(Gesture::Move {
+                start,
+                offset,
+                moved,
+                ..
+            }) => {
+                let delta = Point {
+                    x: root.x - start.x,
+                    y: root.y - start.y,
+                };
+                if !*moved
+                    && (delta.x.abs() > DRAG_THRESHOLD_PX || delta.y.abs() > DRAG_THRESHOLD_PX)
+                {
+                    *moved = true;
+                }
+                if *moved {
+                    *offset = delta;
+                }
+            }
+            Some(Gesture::Erase { .. }) => {
+                let last = match &self.gesture {
+                    Some(Gesture::Erase { last, .. }) => *last,
+                    _ => return,
+                };
+                let hits = self.erase_hits(last, root);
+                if let Some(Gesture::Erase { hidden, last }) = &mut self.gesture {
+                    for id in hits {
+                        if !hidden.contains(&id) {
+                            hidden.push(id);
+                        }
+                    }
+                    *last = root;
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn pointer_up(&mut self, root: Point) {
+        match self.gesture.take() {
+            Some(Gesture::Pen {
+                origin,
+                mut points,
+            }) => {
+                let local = Point {
+                    x: root.x - origin.x,
+                    y: root.y - origin.y,
+                };
+                if points.last() != Some(&local) {
+                    points.push(local);
+                }
+                let width_px = self.width_px();
+                let color = self.color();
+                self.document.insert(
+                    origin,
+                    color,
+                    ObjectData::Pen { points, width_px },
+                );
+            }
+            Some(Gesture::Line { origin, .. }) => {
+                let end = Point {
+                    x: root.x - origin.x,
+                    y: root.y - origin.y,
+                };
+                let width_px = self.width_px();
+                let color = self.color();
+                self.document
+                    .insert(origin, color, ObjectData::Line { end, width_px });
+            }
+            Some(Gesture::Move {
+                id,
+                start,
+                moved,
+                ..
+            }) => {
+                let delta = Point {
+                    x: root.x - start.x,
+                    y: root.y - start.y,
+                };
+                let dragged =
+                    moved || delta.x.abs() > DRAG_THRESHOLD_PX || delta.y.abs() > DRAG_THRESHOLD_PX;
+                if dragged {
+                    self.document.move_by(id, delta);
+                }
+            }
+            Some(Gesture::Erase {
+                mut hidden, last, ..
+            }) => {
+                for id in self.erase_hits(last, root) {
+                    if !hidden.contains(&id) {
+                        hidden.push(id);
+                    }
+                }
+                if !hidden.is_empty() {
+                    self.document.delete(&hidden);
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn select_down(&mut self, root: Point, time: Duration) {
+        let Some(id) = self.hit_object(root) else {
+            self.selection = None;
+            self.last_click = None;
+            return;
+        };
+        self.selection = Some(id);
+        let double = self.register_click(id, time, root);
+        if double && self.is_text(id) {
+            self.open_text(id);
+            return;
+        }
+        self.gesture = Some(Gesture::Move {
+            id,
+            start: root,
+            offset: Point::default(),
+            moved: false,
+        });
+    }
+
+    fn text_down(&mut self, root: Point, time: Duration) {
+        if let Some(id) = self.hit_object(root) {
+            self.selection = Some(id);
+            let double = self.register_click(id, time, root);
+            if double && self.is_text(id) {
+                self.open_text(id);
+            }
+            return;
+        }
+        self.selection = None;
+        self.last_click = None;
+        self.start_text_draft(root);
+    }
+
+    fn register_click(&mut self, id: ObjectId, time: Duration, root: Point) -> bool {
+        let double = match self.last_click {
+            Some((last_id, last_time, last_point)) => {
+                last_id == id
+                    && time.saturating_sub(last_time) <= DOUBLE_CLICK_INTERVAL
+                    && (root.x - last_point.x).abs() <= DOUBLE_CLICK_SLOP_PX
+                    && (root.y - last_point.y).abs() <= DOUBLE_CLICK_SLOP_PX
+            }
+            None => false,
+        };
+        self.last_click = if double {
+            None
+        } else {
+            Some((id, time, root))
+        };
+        double
+    }
+
+    fn start_text_draft(&mut self, origin: Point) {
+        let size_px = self.text_size_px();
+        let draft = TextDraft::new(
+            self.next_draft_id,
+            "",
+            DEFAULT_TEXT_FAMILY,
+            size_px,
+            &mut self.text_system,
+        );
+        self.next_draft_id += 1;
+        self.gesture = None;
+        self.text_edit = Some(TextEdit {
+            object: None,
+            origin,
+            color: self.color(),
+            draft,
+        });
+    }
+
+    fn open_text(&mut self, id: ObjectId) {
+        let Some(object) = self.document.objects().iter().find(|object| object.id == id) else {
+            return;
+        };
+        let ObjectData::Text {
+            text,
+            family,
+            size_px,
+        } = object.data.clone()
+        else {
+            return;
+        };
+        let origin = object.origin;
+        let color = object.color;
+        let draft = TextDraft::new(
+            self.next_draft_id,
+            &text,
+            &family,
+            size_px,
+            &mut self.text_system,
+        );
+        self.next_draft_id += 1;
+        self.gesture = None;
+        self.selection = Some(id);
+        self.text_edit = Some(TextEdit {
+            object: Some(id),
+            origin,
+            color,
+            draft,
+        });
+    }
+
+    fn commit_text(&mut self) {
+        let Some(edit) = self.text_edit.take() else {
+            return;
+        };
+        let text = edit.draft.plain_text();
+        let family = edit.draft.family().to_owned();
+        let size_px = edit.draft.size_px();
+        let data = ObjectData::Text {
+            text: text.clone(),
+            family,
+            size_px,
+        };
+        match edit.object {
+            Some(id) => {
+                if text.is_empty() {
+                    self.document.delete(&[id]);
+                    self.selection = None;
+                } else if self.document.replace(id, edit.origin, edit.color, data) {
+                    self.selection = Some(id);
+                }
+            }
+            None => {
+                if !text.is_empty() {
+                    let id = self.document.insert(edit.origin, edit.color, data);
+                    self.selection = Some(id);
+                }
+            }
+        }
+    }
+
+    fn cancel_text(&mut self) {
+        self.text_edit = None;
+    }
+
+    fn is_text(&self, id: ObjectId) -> bool {
+        self.document
+            .objects()
+            .iter()
+            .any(|object| object.id == id && matches!(object.data, ObjectData::Text { .. }))
+    }
+
+    fn hit_object(&mut self, point: Point) -> Option<ObjectId> {
+        let text_system = &mut self.text_system;
+        self.document
+            .objects()
+            .iter()
+            .rev()
+            .find(|object| object_hit(text_system, object, point))
+            .map(|object| object.id)
+    }
+
+    fn erase_hits(&mut self, start: Point, end: Point) -> Vec<ObjectId> {
+        let text_system = &mut self.text_system;
+        self.document
+            .objects()
+            .iter()
+            .filter(|object| object_touched(text_system, object, start, end))
+            .map(|object| object.id)
+            .collect()
+    }
+
+    /// Take the union of paint bounds changed since the last redraw.
+    pub fn take_damage(&mut self) -> Option<Rect> {
+        self.damage.take()
+    }
+}
+
+fn object_hit(text_system: &mut TextSystem, object: &Object, point: Point) -> bool {
+    match &object.data {
+        ObjectData::Pen { points, width_px } => {
+            let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
+            if points.len() <= 1 {
+                let local = points.first().copied().unwrap_or_default();
+                let absolute = object.point(local);
+                let dx = (point.x - absolute.x) as f64;
+                let dy = (point.y - absolute.y) as f64;
+                return dx.hypot(dy) <= tolerance;
+            }
+            points
+                .windows(2)
+                .any(|pair| point_segment_distance(point, object.point(pair[0]), object.point(pair[1])) <= tolerance)
+        }
+        ObjectData::Line { end, width_px } => {
+            let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
+            point_segment_distance(point, object.origin, object.point(*end)) <= tolerance
+        }
+        ObjectData::Text { .. } => text_system.bounds(object).contains(point),
+    }
+}
+
+fn object_touched(
+    text_system: &mut TextSystem,
+    object: &Object,
+    start: Point,
+    end: Point,
+) -> bool {
+    match &object.data {
+        ObjectData::Pen { points, width_px } => {
+            let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
+            if points.len() <= 1 {
+                let local = points.first().copied().unwrap_or_default();
+                let absolute = object.point(local);
+                return segment_segment_distance(absolute, absolute, start, end) <= tolerance;
+            }
+            points.windows(2).any(|pair| {
+                segment_segment_distance(
+                    object.point(pair[0]),
+                    object.point(pair[1]),
+                    start,
+                    end,
+                ) <= tolerance
+            })
+        }
+        ObjectData::Line { end: line_end, width_px } => {
+            let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
+            segment_segment_distance(object.origin, object.point(*line_end), start, end) <= tolerance
+        }
+        ObjectData::Text { .. } => {
+            let bounds = text_system.bounds(object);
+            segment_rect_distance(start, end, &bounds) == 0.0
+                || point_rect_distance(start, &bounds) == 0.0
+        }
+    }
+}
+
+fn resolve_preset<T: Copy + PartialEq>(
+    preset: Preset<T>,
+    values: &[T],
+    index: usize,
+) -> Result<(T, usize), String> {
+    let next_index = match preset {
+        Preset::Value(value) => values
+            .iter()
+            .position(|candidate| *candidate == value)
+            .ok_or_else(|| "value is not in the configured catalog".to_owned())?,
+        Preset::Next => cycle_index(index, values.len(), true),
+        Preset::Prev => cycle_index(index, values.len(), false),
+    };
+    Ok((values[next_index], next_index))
+}
+
+fn lower_letter(keysym: u32) -> Option<char> {
+    match keysym {
+        0x41..=0x5a => char::from_u32(keysym + 0x20),
+        0x61..=0x7a => char::from_u32(keysym),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> AnnotationConfig {
+        AnnotationConfig::default()
+    }
+
+    fn ready_session() -> Session {
+        let mut session = Session::new(&config()).unwrap();
+        session.command(AnnotationCommand::On).unwrap();
+        session.ownership(Some(1));
+        session
+    }
+
+    fn pointer(session: &mut Session, input: PointerInput) {
+        session.pointer(1, input);
+    }
+
+    fn drag(session: &mut Session, from: Point, to: Point) {
+        pointer(
+            session,
+            PointerInput::Down {
+                root: from,
+                time: Duration::ZERO,
+            },
+        );
+        pointer(
+            session,
+            PointerInput::Move {
+                root: to,
+                time: Duration::from_millis(10),
+            },
+        );
+        pointer(
+            session,
+            PointerInput::Up {
+                root: to,
+                time: Duration::from_millis(20),
+            },
+        );
+    }
+
+    fn click(session: &mut Session, at: Point, time: Duration) {
+        pointer(
+            session,
+            PointerInput::Down {
+                root: at,
+                time,
+            },
+        );
+        pointer(
+            session,
+            PointerInput::Up {
+                root: at,
+                time: time + Duration::from_millis(10),
+            },
+        );
+    }
+
+    fn key(session: &mut Session, keysym: u32, text: Option<char>, modifiers: Modifiers) {
+        session.key(
+            1,
+            KeyInput {
+                keysym,
+                text,
+                modifiers,
+            },
+        );
+    }
+
+    fn type_text(session: &mut Session, text: &str) {
+        for character in text.chars() {
+            key(session, character as u32, Some(character), Modifiers::default());
+        }
+    }
+
+    fn press_enter(session: &mut Session) {
+        key(session, KEY_ENTER, None, Modifiers::default());
+    }
+
+    fn text_bounds(session: &mut Session, id: ObjectId) -> Rect {
+        let object = session
+            .document()
+            .objects()
+            .iter()
+            .find(|object| object.id == id)
+            .unwrap()
+            .clone();
+        session.text_system.bounds(&object)
+    }
+
+    #[test]
+    fn off_keeps_committed_objects_and_rejects_stale_input() {
+        let mut session = Session::new(&config()).unwrap();
+        session.command(AnnotationCommand::On).unwrap();
+        session.ownership(Some(7));
+        let root = Point { x: 10, y: 20 };
+        session.pointer(
+            7,
+            PointerInput::Down {
+                root,
+                time: Duration::ZERO,
+            },
+        );
+        session.pointer(
+            7,
+            PointerInput::Up {
+                root,
+                time: Duration::from_millis(20),
+            },
+        );
+        session.command(AnnotationCommand::Off).unwrap();
+        assert!(session.status().has_content);
+        assert!(!session.status().editing_requested);
+        session.pointer(
+            7,
+            PointerInput::Down {
+                root,
+                time: Duration::from_millis(30),
+            },
+        );
+        assert_eq!(session.document().objects().len(), 1);
+    }
+
+    #[test]
+    fn pen_click_creates_a_dot() {
+        let mut session = ready_session();
+        assert_eq!(session.tool(), AnnotationTool::Pen);
+        click(&mut session, Point { x: 5, y: 6 }, Duration::ZERO);
+        let objects = session.document().objects();
+        assert_eq!(objects.len(), 1);
+        match &objects[0].data {
+            ObjectData::Pen { points, width_px } => {
+                assert_eq!(points, &vec![Point::default()]);
+                assert_eq!(*width_px, 6);
+            }
+            other => panic!("unexpected object {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancelled_move_restores_the_original_position() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Line))
+            .unwrap();
+        drag(&mut session, Point { x: 10, y: 20 }, Point { x: 70, y: 20 });
+        let id = session.document().objects()[0].id;
+        let origin = session.document().objects()[0].origin;
+
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Select))
+            .unwrap();
+        pointer(
+            &mut session,
+            PointerInput::Down {
+                root: Point { x: 40, y: 20 },
+                time: Duration::from_millis(100),
+            },
+        );
+        pointer(
+            &mut session,
+            PointerInput::Move {
+                root: Point { x: 55, y: 20 },
+                time: Duration::from_millis(120),
+            },
+        );
+        key(
+            &mut session,
+            KEY_ESCAPE,
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(session.document().objects()[0].id, id);
+        assert_eq!(session.document().objects()[0].origin, origin);
+    }
+
+    #[test]
+    fn up_applies_the_final_move_without_a_move_event() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Line))
+            .unwrap();
+        drag(&mut session, Point { x: 10, y: 20 }, Point { x: 70, y: 20 });
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Select))
+            .unwrap();
+        pointer(
+            &mut session,
+            PointerInput::Down {
+                root: Point { x: 40, y: 20 },
+                time: Duration::from_millis(100),
+            },
+        );
+        pointer(
+            &mut session,
+            PointerInput::Up {
+                root: Point { x: 60, y: 40 },
+                time: Duration::from_millis(180),
+            },
+        );
+        assert_eq!(
+            session.document().objects()[0].origin,
+            Point { x: 30, y: 40 }
+        );
+    }
+
+    #[test]
+    fn grouped_erase_is_one_reversible_operation() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Line))
+            .unwrap();
+        drag(&mut session, Point { x: 10, y: 20 }, Point { x: 60, y: 20 });
+        drag(&mut session, Point { x: 10, y: 40 }, Point { x: 60, y: 40 });
+
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Eraser))
+            .unwrap();
+        drag(&mut session, Point { x: 30, y: 5 }, Point { x: 30, y: 55 });
+        assert!(session.document().objects().is_empty());
+
+        session.command(AnnotationCommand::Undo).unwrap();
+        assert_eq!(session.document().objects().len(), 2);
+    }
+
+    #[test]
+    fn fast_erase_crossing_a_stroke_uses_the_release_segment() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Line))
+            .unwrap();
+        drag(&mut session, Point { x: 10, y: 20 }, Point { x: 80, y: 20 });
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Eraser))
+            .unwrap();
+        pointer(
+            &mut session,
+            PointerInput::Down {
+                root: Point { x: 40, y: 0 },
+                time: Duration::from_millis(100),
+            },
+        );
+        pointer(
+            &mut session,
+            PointerInput::Up {
+                root: Point { x: 40, y: 60 },
+                time: Duration::from_millis(110),
+            },
+        );
+        assert!(session.document().objects().is_empty());
+    }
+
+    #[test]
+    fn text_can_be_reopened_by_double_click_without_duplication() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Text))
+            .unwrap();
+        click(&mut session, Point { x: 50, y: 60 }, Duration::ZERO);
+        type_text(&mut session, "Hi");
+        press_enter(&mut session);
+        assert_eq!(session.document().objects().len(), 1);
+        let id = session.document().objects()[0].id;
+        let bounds = text_bounds(&mut session, id);
+        let target = Point {
+            x: bounds.x + 2,
+            y: bounds.y + 2,
+        };
+
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Select))
+            .unwrap();
+        click(&mut session, target, Duration::from_millis(1000));
+        click(&mut session, target, Duration::from_millis(1200));
+        assert!(session.status().text_editing);
+        type_text(&mut session, "!");
+        press_enter(&mut session);
+        assert_eq!(session.document().objects().len(), 1);
+        match &session.document().objects()[0].data {
+            ObjectData::Text { text, .. } => assert_eq!(text, "Hi!"),
+            other => panic!("unexpected object {other:?}"),
+        }
+    }
+
+    #[test]
+    fn committing_empty_replacement_deletes_the_text_object() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Text))
+            .unwrap();
+        click(&mut session, Point { x: 30, y: 30 }, Duration::ZERO);
+        type_text(&mut session, "Hello");
+        press_enter(&mut session);
+        let id = session.document().objects()[0].id;
+        let bounds = text_bounds(&mut session, id);
+
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Text))
+            .unwrap();
+        click(
+            &mut session,
+            Point {
+                x: bounds.x + 1,
+                y: bounds.y + 1,
+            },
+            Duration::from_millis(1000),
+        );
+        click(
+            &mut session,
+            Point {
+                x: bounds.x + 1,
+                y: bounds.y + 1,
+            },
+            Duration::from_millis(1200),
+        );
+        assert!(session.status().text_editing);
+        key(
+            &mut session,
+            0x61,
+            Some('a'),
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        );
+        key(&mut session, KEY_BACKSPACE, None, Modifiers::default());
+        press_enter(&mut session);
+        assert!(session.document().objects().is_empty());
+        session.command(AnnotationCommand::Undo).unwrap();
+        assert_eq!(session.document().objects().len(), 1);
+    }
+
+    #[test]
+    fn unchanged_text_commit_creates_no_history_entry() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Text))
+            .unwrap();
+        click(&mut session, Point { x: 20, y: 20 }, Duration::ZERO);
+        type_text(&mut session, "Same");
+        press_enter(&mut session);
+        let id = session.document().objects()[0].id;
+        let bounds = text_bounds(&mut session, id);
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Text))
+            .unwrap();
+        let target = Point {
+            x: bounds.x + 1,
+            y: bounds.y + 1,
+        };
+        click(&mut session, target, Duration::from_millis(1000));
+        click(&mut session, target, Duration::from_millis(1200));
+        press_enter(&mut session);
+        session.command(AnnotationCommand::Undo).unwrap();
+        assert!(session.document().objects().is_empty());
+    }
+
+    #[test]
+    fn escape_cancels_a_draft_before_clearing_selection() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Text))
+            .unwrap();
+        click(&mut session, Point { x: 10, y: 10 }, Duration::ZERO);
+        type_text(&mut session, "draft");
+        key(&mut session, KEY_ESCAPE, None, Modifiers::default());
+        assert!(!session.status().text_editing);
+        assert!(session.status().editing_requested);
+        assert!(session.document().objects().is_empty());
+    }
+
+    #[test]
+    fn presets_cycle_and_reject_values_outside_the_catalog() {
+        let mut session = ready_session();
+        assert_eq!(session.color(), [255, 0, 0]);
+        session
+            .command(AnnotationCommand::Color(Preset::Next))
+            .unwrap();
+        assert_eq!(session.color(), [255, 255, 0]);
+        session
+            .command(AnnotationCommand::Color(Preset::Prev))
+            .unwrap();
+        assert_eq!(session.color(), [255, 0, 0]);
+        assert!(session
+            .command(AnnotationCommand::Width(Preset::Value(7)))
+            .is_err());
+        assert_eq!(session.width_px(), 6);
+        assert!(session
+            .command(AnnotationCommand::TextSize(Preset::Value(0)))
+            .is_err());
+        assert_eq!(session.text_size_px(), 24);
+        session
+            .command(AnnotationCommand::Width(Preset::Value(10)))
+            .unwrap();
+        assert_eq!(session.width_px(), 10);
+    }
+
+    #[test]
+    fn preset_changes_cancel_a_draft_after_resolving_the_value() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Text))
+            .unwrap();
+        click(&mut session, Point { x: 10, y: 10 }, Duration::ZERO);
+        type_text(&mut session, "abc");
+        assert!(session.status().text_editing);
+        assert!(session
+            .command(AnnotationCommand::Color(Preset::Value([1, 2, 3])))
+            .is_err());
+        assert!(session.status().text_editing);
+        session
+            .command(AnnotationCommand::Width(Preset::Value(2)))
+            .unwrap();
+        assert!(!session.status().text_editing);
+        assert_eq!(session.width_px(), 2);
+    }
+
+    #[test]
+    fn object_styles_are_copied_at_creation_time() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Width(Preset::Value(2)))
+            .unwrap();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Line))
+            .unwrap();
+        drag(&mut session, Point { x: 0, y: 0 }, Point { x: 10, y: 0 });
+        session
+            .command(AnnotationCommand::Width(Preset::Value(10)))
+            .unwrap();
+        drag(&mut session, Point { x: 0, y: 10 }, Point { x: 10, y: 10 });
+        let objects = session.document().objects();
+        match (&objects[0].data, &objects[1].data) {
+            (
+                ObjectData::Line { width_px: first, .. },
+                ObjectData::Line {
+                    width_px: second, ..
+                },
+            ) => {
+                assert_eq!(*first, 2);
+                assert_eq!(*second, 10);
+            }
+            other => panic!("unexpected objects {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_removes_the_selected_object_in_one_operation() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Line))
+            .unwrap();
+        drag(&mut session, Point { x: 0, y: 0 }, Point { x: 50, y: 0 });
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Select))
+            .unwrap();
+        click(&mut session, Point { x: 25, y: 0 }, Duration::from_millis(500));
+        assert!(session.selection().is_some());
+        session.command(AnnotationCommand::Delete).unwrap();
+        assert!(session.document().objects().is_empty());
+        session.command(AnnotationCommand::Undo).unwrap();
+        assert_eq!(session.document().objects().len(), 1);
+    }
+
+    #[test]
+    fn stale_epochs_cannot_edit_the_document() {
+        let mut session = ready_session();
+        session.pointer(
+            99,
+            PointerInput::Down {
+                root: Point { x: 1, y: 1 },
+                time: Duration::ZERO,
+            },
+        );
+        session.pointer(
+            99,
+            PointerInput::Up {
+                root: Point { x: 1, y: 1 },
+                time: Duration::from_millis(10),
+            },
+        );
+        assert!(session.document().objects().is_empty());
+        session.ownership(None);
+        session.pointer(
+            1,
+            PointerInput::Down {
+                root: Point { x: 1, y: 1 },
+                time: Duration::from_millis(20),
+            },
+        );
+        assert!(session.document().objects().is_empty());
+    }
+
+    #[test]
+    fn shift_enter_inserts_a_newline_and_enter_commits() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Text))
+            .unwrap();
+        click(&mut session, Point { x: 15, y: 15 }, Duration::ZERO);
+        type_text(&mut session, "one");
+        key(
+            &mut session,
+            KEY_ENTER,
+            None,
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        );
+        type_text(&mut session, "two");
+        press_enter(&mut session);
+        match &session.document().objects()[0].data {
+            ObjectData::Text { text, .. } => assert_eq!(text, "one\ntwo"),
+            other => panic!("unexpected object {other:?}"),
+        }
+    }
+}
