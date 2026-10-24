@@ -106,10 +106,12 @@ When the daemon starts without a command it enters an idle loop — no overlay a
 
 Activation captures the monitor under the pointer once, before the opaque zoom window is shown. The image remains fixed until zoom is closed. Moving the pointer alone does not move the image.
 
-Spotlight and zoom can be active together. The visual order is fixed: annotation, spotlight, zoom, then the desktop. Spotlight remains the same on-screen size while zoom pans or changes scale, and its transparent input region lets zoom receive gestures. The two features can be toggled independently.
+Spotlight and zoom can be active together. Visual and mouse-input priority follow annotation editing, spotlight, zoom, then the desktop. Finished annotation artwork remains visible and click-through when editing is off.
+
+When spotlight is active, the configured modifier-wheel gesture resizes spotlight. Spotlight consumes left-button dragging and other unsupported mouse actions. Disable spotlight to use zoom wheel and drag controls.
 
 **Change zoom level:**
-While zoom is active, hold the configured wheel modifier (the default is `Ctrl`) and scroll the mouse wheel. Wheel direction reverses immediately, and the pointer position stays anchored in the screenshot. Hold the left mouse button to pan; releasing it continues the pan with time-based inertia.
+While zoom owns input, hold the configured wheel modifier (the default is `Ctrl`) and scroll the mouse wheel. Wheel direction reverses immediately, and the pointer position stays anchored in the screenshot. Hold the left mouse button to pan; releasing it continues the pan with time-based inertia.
 
 **Reset zoom:**
 ```bash
@@ -117,7 +119,7 @@ cargo run -p rpresent -- zoom=reset
 ```
 Restores the initial scale and re-centers the magnified view without capturing again. The next activation captures a fresh screenshot.
 
-With zoom active, the configured wheel gesture controls zoom only (Ctrl+wheel by default). With zoom inactive, the same gesture retains the existing spotlight resize behavior and selected-mode rule.
+Activating spotlight or annotation editing cancels the current zoom drag and its remaining pan or scale motion. Input returns to zoom after the higher layer releases it. A new button press is required before zoom can pan again. Global mode shortcuts and explicit CLI/IPC commands remain available.
 
 ## Annotations
 
@@ -129,7 +131,7 @@ Press the configured annotation shortcut (the default is `Ctrl+2`) to start edit
 - Press Enter to commit text, Shift+Enter to insert a newline, and Escape to cancel the draft.
 - `Ctrl+V` pastes clipboard text into the current text draft.
 - The eraser deletes whole objects, and drag with the Select tool moves one object.
-- Turning annotation off keeps finished artwork visible but click-through, and releases input to zoom or the desktop.
+- Turning annotation off keeps finished artwork visible but click-through. Input returns to spotlight if it is active, then zoom, then the desktop.
 
 Colors can also be selected from the command line; quote the value so the shell keeps the `#`:
 

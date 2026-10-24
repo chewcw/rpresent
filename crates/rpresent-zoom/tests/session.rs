@@ -141,6 +141,54 @@ fn dragging_marks_dirty_but_idle_pointer_motion_does_not() {
 }
 
 #[test]
+fn cancel_stops_drag_pan_and_scale_without_resetting_the_camera() {
+    for release_before_cancel in [false, true] {
+        let mut session = ZoomSession::new(NavigationConfig::default());
+        session.activated(monitor());
+        session.pointer(PointerInput::Down {
+            local: (10.0, 20.0),
+            time: Duration::ZERO,
+        });
+        session.pointer(PointerInput::Move {
+            local: (70.0, 20.0),
+            time: Duration::from_millis(40),
+        });
+        if release_before_cancel {
+            session.pointer(PointerInput::Up {
+                time: Duration::from_millis(40),
+            });
+        }
+        session.request(ZoomRequest::Scroll {
+            delta: 1.0,
+            root: (monitor().x + 100, monitor().y + 100),
+        });
+        session.advance(Duration::from_millis(16));
+        let before = (
+            session.camera().unwrap().scale(),
+            session.camera().unwrap().translation(),
+        );
+        session.pointer(PointerInput::Cancel);
+        assert!(!session.camera().unwrap().is_dragging());
+        assert_eq!(session.camera().unwrap().pan_velocity(), (0.0, 0.0));
+        assert_eq!(session.camera().unwrap().zoom_velocity(), 0.0);
+        assert!(!session.is_animating());
+        assert!(!session.advance(Duration::from_secs(1)));
+        session.pointer(PointerInput::Move {
+            local: (300.0, 400.0),
+            time: Duration::from_secs(2),
+        });
+        assert_eq!(
+            (
+                session.camera().unwrap().scale(),
+                session.camera().unwrap().translation(),
+            ),
+            before
+        );
+        assert!(session.is_active());
+    }
+}
+
+#[test]
 fn reset_clears_motion_without_reactivating() {
     let mut session = ZoomSession::new(NavigationConfig::default());
     session.activated(monitor());

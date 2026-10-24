@@ -8,7 +8,7 @@ use rpresent_config::ConfigService;
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
-    ButtonIndex, ChangeWindowAttributesAux, ConnectionExt, EventMask, GrabMode, GrabStatus,
+    Allow, ButtonIndex, ChangeWindowAttributesAux, ConnectionExt, EventMask, GrabMode, GrabStatus,
     InputFocus, KeyButMask, ModMask, StackMode, Window,
 };
 use x11rb::rust_connection::RustConnection;
@@ -52,6 +52,7 @@ fn run_input_loop(
     let x11_fd = connection.stream().as_raw_fd();
     let mut owner = None;
     let mut saved_focus = None;
+    let mut pending_wheel = None;
 
     loop {
         inbox.drain_wake()?;
@@ -70,6 +71,9 @@ fn run_input_loop(
                     window,
                     restore_focus,
                 }) => {
+                    if let Some(time) = pending_wheel {
+                        resolve_wheel(&connection, &mut pending_wheel, time, false)?;
+                    }
                     let result = set_owner(
                         &connection,
                         &mut owner,
@@ -81,15 +85,33 @@ fn run_input_loop(
                     .map_err(|error| error.to_string());
                     events(NativeEvent::Applied { operation, result });
                 }
+                Ok(NativeRequest::ResolveWheel { time, replay }) => {
+                    resolve_wheel(&connection, &mut pending_wheel, time, replay)?;
+                }
                 Err(crossbeam_channel::TryRecvError::Empty) => break,
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    if let Some(time) = pending_wheel {
+                        resolve_wheel(&connection, &mut pending_wheel, time, false)?;
+                    }
                     release_owner(&connection, &mut owner, &mut saved_focus, true);
                     return Ok(());
                 }
             }
         }
 
-        while let Some(event) = connection.poll_for_event()? {
+        loop {
+            let Some(event) = (match connection.poll_for_event() {
+                Ok(event) => event,
+                Err(error) => {
+                    if let Some(time) = pending_wheel {
+                        let _ = resolve_wheel(&connection, &mut pending_wheel, time, false);
+                    }
+                    release_owner(&connection, &mut owner, &mut saved_focus, true);
+                    return Err(error.into());
+                }
+            }) else {
+                break;
+            };
             translate_event(
                 &event,
                 &connection,
@@ -98,9 +120,16 @@ fn run_input_loop(
                 &events,
                 &mut owner,
                 &mut saved_focus,
+                &mut pending_wheel,
             );
         }
-        connection.flush()?;
+        if let Err(error) = connection.flush() {
+            if let Some(time) = pending_wheel {
+                let _ = resolve_wheel(&connection, &mut pending_wheel, time, false);
+            }
+            release_owner(&connection, &mut owner, &mut saved_focus, true);
+            return Err(error.into());
+        }
 
         let mut descriptors = [
             libc::pollfd {
@@ -172,7 +201,7 @@ fn install_passive_grabs(
                     false,
                     root,
                     EventMask::BUTTON_PRESS,
-                    GrabMode::ASYNC,
+                    GrabMode::SYNC,
                     GrabMode::ASYNC,
                     0_u32,
                     0_u32,
@@ -182,6 +211,30 @@ fn install_passive_grabs(
                 .check()?;
         }
     }
+    Ok(())
+}
+
+fn resolve_wheel(
+    connection: &RustConnection,
+    pending: &mut Option<u32>,
+    time: u32,
+    replay: bool,
+) -> Result<(), Box<dyn Error>> {
+    if *pending != Some(time) {
+        return Ok(());
+    }
+    connection
+        .allow_events(
+            if replay {
+                Allow::REPLAY_POINTER
+            } else {
+                Allow::ASYNC_POINTER
+            },
+            time,
+        )?
+        .check()?;
+    connection.flush()?;
+    *pending = None;
     Ok(())
 }
 
@@ -250,10 +303,18 @@ fn set_owner(
     if reply.status != GrabStatus::SUCCESS {
         return Err(format!("pointer grab failed with status {:?}", reply.status).into());
     }
-    connection
-        .set_input_focus(InputFocus::NONE, window, x11rb::CURRENT_TIME)?
-        .check()?;
-    connection.flush()?;
+    let finish: Result<(), Box<dyn Error>> = (|| {
+        connection
+            .set_input_focus(InputFocus::NONE, window, x11rb::CURRENT_TIME)?
+            .check()?;
+        connection.flush()?;
+        Ok(())
+    })();
+    if let Err(error) = finish {
+        let _ = connection.ungrab_pointer(x11rb::CURRENT_TIME);
+        let _ = connection.flush();
+        return Err(error);
+    }
     *owner = Some(Owner { window, epoch });
     Ok(())
 }
@@ -304,12 +365,19 @@ fn translate_event(
     events: &NativeEventSink,
     owner: &mut Option<Owner>,
     saved_focus: &mut Option<Window>,
+    pending_wheel: &mut Option<u32>,
 ) {
     match event {
         Event::ButtonPress(event)
             if event.detail == BUTTON_WHEEL_UP || event.detail == BUTTON_WHEEL_DOWN =>
         {
+            let epoch = owner.as_ref().map(|owner| owner.epoch);
+            if epoch.is_none() {
+                *pending_wheel = Some(event.time);
+            }
             events(NativeEvent::Wheel {
+                epoch,
+                time: event.time,
                 modifier: modifier_from_state(event.state).to_owned(),
                 delta: if event.detail == BUTTON_WHEEL_UP {
                     1.0
@@ -382,18 +450,26 @@ fn translate_event(
             if focused == Some(event.event) {
                 return;
             }
-            let epoch = owner.take().map_or(0, |owner| owner.epoch);
+            let lost = *owner
+                .as_ref()
+                .expect("the focus event matched the native owner");
             release_owner(connection, owner, saved_focus, true);
             events(NativeEvent::Lost {
-                epoch,
+                epoch: lost.epoch,
+                window: lost.window,
+                destroyed: false,
                 reason: "owned window lost focus".to_owned(),
             });
         }
         Event::DestroyNotify(event) if owner.is_some_and(|owner| owner.window == event.window) => {
-            let epoch = owner.take().map_or(0, |owner| owner.epoch);
+            let lost = *owner
+                .as_ref()
+                .expect("the destroy event matched the native owner");
             release_owner(connection, owner, saved_focus, true);
             events(NativeEvent::Lost {
-                epoch,
+                epoch: lost.epoch,
+                window: lost.window,
+                destroyed: true,
                 reason: "owned window was destroyed".to_owned(),
             });
         }
@@ -482,4 +558,385 @@ fn shortcut_from_keypress(
     }
     let modifier = modifier_from_state(state);
     (!modifier.is_empty()).then(|| format!("{modifier}+{digit}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rpresent_config::ShortcutConfig;
+    use x11rb::protocol::shape::{ConnectionExt as ShapeExt, SK, SO};
+    use x11rb::protocol::xproto::{
+        BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ClipOrdering, CreateWindowAux, KEY_PRESS_EVENT,
+        KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, WindowClass,
+    };
+    use x11rb::protocol::xtest::ConnectionExt as XTestExt;
+
+    fn connect_test() -> (RustConnection, u32) {
+        assert_eq!(
+            std::env::var("RPRESENT_NATIVE_TEST").as_deref(),
+            Ok("1"),
+            "run native input tests through the private xvfb-run command"
+        );
+        let (connection, screen) = x11rb::connect(None).unwrap();
+        let root = connection.setup().roots[screen].root;
+        (connection, root)
+    }
+
+    fn window(connection: &RustConnection, root: u32, empty_input: bool) -> u32 {
+        let id = connection.generate_id().unwrap();
+        connection
+            .create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                id,
+                root,
+                0,
+                0,
+                240,
+                240,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                x11rb::COPY_FROM_PARENT,
+                &CreateWindowAux::new().event_mask(
+                    EventMask::BUTTON_PRESS
+                        | EventMask::BUTTON_RELEASE
+                        | EventMask::POINTER_MOTION
+                        | EventMask::FOCUS_CHANGE
+                        | EventMask::STRUCTURE_NOTIFY,
+                ),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        if empty_input {
+            connection
+                .shape_rectangles(SO::SET, SK::INPUT, ClipOrdering::UNSORTED, id, 0, 0, &[])
+                .unwrap()
+                .check()
+                .unwrap();
+        }
+        connection.map_window(id).unwrap().check().unwrap();
+        connection.flush().unwrap();
+        id
+    }
+
+    fn inject(connection: &RustConnection, root: u32, kind: u8, detail: u8, x: i16, y: i16) {
+        connection
+            .xtest_fake_input(kind, detail, x11rb::CURRENT_TIME, root, x, y, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        connection.flush().unwrap();
+    }
+
+    fn drain(connection: &RustConnection) -> Vec<Event> {
+        connection.get_input_focus().unwrap().reply().unwrap();
+        let mut events = Vec::new();
+        while let Some(event) = connection.poll_for_event().unwrap() {
+            events.push(event);
+        }
+        events
+    }
+
+    fn wait_for(connection: &RustConnection, predicate: impl Fn(&Event) -> bool) -> Vec<Event> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut collected = Vec::new();
+        loop {
+            collected.extend(drain(connection));
+            if collected.iter().any(&predicate) {
+                return collected;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native event timed out"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn control_key(connection: &RustConnection) -> u8 {
+        let setup = connection.setup();
+        let mapping = connection
+            .get_keyboard_mapping(setup.min_keycode, setup.max_keycode - setup.min_keycode + 1)
+            .unwrap()
+            .reply()
+            .unwrap();
+        let width = usize::from(mapping.keysyms_per_keycode);
+        mapping
+            .keysyms
+            .chunks(width)
+            .enumerate()
+            .find(|(_, symbols)| symbols.contains(&0xffe3))
+            .map(|(offset, _)| setup.min_keycode + offset as u8)
+            .expect("private X server must have Control_L")
+    }
+
+    #[test]
+    #[ignore = "requires a private Xvfb display"]
+    fn native_empty_shape_grab_consumes_pointer_and_releases() {
+        let (observer, root) = connect_test();
+        let desktop = window(&observer, root, false);
+        let (connection, owner_root) = connect_test();
+        let spot = window(&connection, owner_root, true);
+        observer
+            .set_input_focus(InputFocus::NONE, desktop, x11rb::CURRENT_TIME)
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let mut owner = None;
+        let mut saved = None;
+        set_owner(&connection, &mut owner, &mut saved, Some(spot), false, 41).unwrap();
+        let competing = observer
+            .grab_pointer(
+                false,
+                desktop,
+                EventMask::BUTTON_PRESS,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+                0_u32,
+                0_u32,
+                x11rb::CURRENT_TIME,
+            )
+            .unwrap()
+            .reply()
+            .unwrap();
+        assert_ne!(competing.status, GrabStatus::SUCCESS);
+
+        drain(&observer);
+        drain(&connection);
+        inject(&connection, root, MOTION_NOTIFY_EVENT, 0, 50, 50);
+        for button in [1, 3, 4, 5, 6, 7] {
+            inject(&connection, root, BUTTON_PRESS_EVENT, button, 0, 0);
+            inject(&connection, root, BUTTON_RELEASE_EVENT, button, 0, 0);
+        }
+        let events = wait_for(
+            &connection,
+            |event| matches!(event, Event::ButtonRelease(event) if event.detail == 7),
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| { matches!(event, Event::ButtonPress(event) if event.detail == 1) })
+        );
+        assert!(
+            !drain(&observer)
+                .iter()
+                .any(|event| { matches!(event, Event::ButtonPress(_) | Event::ButtonRelease(_)) })
+        );
+
+        release_owner(&connection, &mut owner, &mut saved, true);
+        assert!(owner.is_none());
+        assert_eq!(
+            observer.get_input_focus().unwrap().reply().unwrap().focus,
+            desktop
+        );
+        let after = observer
+            .grab_pointer(
+                false,
+                desktop,
+                EventMask::BUTTON_PRESS,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+                0_u32,
+                0_u32,
+                x11rb::CURRENT_TIME,
+            )
+            .unwrap()
+            .reply()
+            .unwrap();
+        assert_eq!(after.status, GrabStatus::SUCCESS);
+        observer
+            .ungrab_pointer(x11rb::CURRENT_TIME)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a private Xvfb display"]
+    fn native_desktop_wheel_replays_once() {
+        let (observer, root) = connect_test();
+        let desktop = window(&observer, root, false);
+        let (connection, _) = connect_test();
+        let bindings = InputBindings::from(&ShortcutConfig::default());
+        install_passive_grabs(&connection, root, &HashMap::new(), &bindings).unwrap();
+        connection.flush().unwrap();
+        let ctrl = control_key(&connection);
+
+        inject(&connection, root, MOTION_NOTIFY_EVENT, 0, 50, 50);
+        inject(&connection, root, KEY_PRESS_EVENT, ctrl, 0, 0);
+        inject(&connection, root, BUTTON_PRESS_EVENT, 4, 0, 0);
+        let root_events = wait_for(
+            &connection,
+            |event| matches!(event, Event::ButtonPress(event) if event.detail == 4),
+        );
+        let time = root_events
+            .iter()
+            .find_map(|event| {
+                if let Event::ButtonPress(event) = event {
+                    (event.detail == 4).then_some(event.time)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        let mut pending = Some(time);
+        resolve_wheel(&connection, &mut pending, time, true).unwrap();
+        assert_eq!(pending, None);
+
+        inject(&connection, root, BUTTON_RELEASE_EVENT, 4, 0, 0);
+        inject(&connection, root, KEY_RELEASE_EVENT, ctrl, 0, 0);
+        let delivered = wait_for(
+            &observer,
+            |event| matches!(event, Event::ButtonRelease(event) if event.detail == 4),
+        );
+        assert_eq!(
+            delivered
+                .iter()
+                .filter(|event| {
+                    matches!(event, Event::ButtonPress(event)
+                        if event.event == desktop && event.detail == 4)
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a private Xvfb display"]
+    fn native_stale_resolution_cannot_thaw_another_wheel() {
+        let (connection, _) = connect_test();
+        let mut pending = Some(200);
+        resolve_wheel(&connection, &mut pending, 199, true).unwrap();
+        assert_eq!(pending, Some(200));
+    }
+
+    #[test]
+    #[ignore = "requires a private Xvfb display"]
+    fn native_denied_grab_does_not_publish_an_owner() {
+        let (competitor, root) = connect_test();
+        let desktop = window(&competitor, root, false);
+        let (connection, _) = connect_test();
+        let spot = window(&connection, root, true);
+        let held = competitor
+            .grab_pointer(
+                false,
+                desktop,
+                EventMask::BUTTON_PRESS,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+                0_u32,
+                0_u32,
+                x11rb::CURRENT_TIME,
+            )
+            .unwrap()
+            .reply()
+            .unwrap();
+        assert_eq!(held.status, GrabStatus::SUCCESS);
+        let mut owner = None;
+        let mut saved = None;
+        assert!(set_owner(&connection, &mut owner, &mut saved, Some(spot), false, 42,).is_err());
+        assert!(owner.is_none());
+        competitor
+            .ungrab_pointer(x11rb::CURRENT_TIME)
+            .unwrap()
+            .check()
+            .unwrap();
+        set_owner(&connection, &mut owner, &mut saved, Some(spot), false, 43).unwrap();
+        assert_eq!(owner.as_ref().unwrap().epoch, 43);
+        release_owner(&connection, &mut owner, &mut saved, true);
+    }
+
+    #[test]
+    #[ignore = "requires a private Xvfb display"]
+    fn native_loss_releases_the_pointer_before_reporting() {
+        let (observer, root) = connect_test();
+        let (connection, _) = connect_test();
+        for destroyed in [false, true] {
+            let desktop = window(&observer, root, false);
+            let spot = window(&connection, root, true);
+            observer
+                .set_input_focus(InputFocus::NONE, desktop, x11rb::CURRENT_TIME)
+                .unwrap()
+                .check()
+                .unwrap();
+            let mut owner = None;
+            let mut saved = None;
+            set_owner(&connection, &mut owner, &mut saved, Some(spot), false, 44).unwrap();
+            drain(&connection);
+            if destroyed {
+                connection.destroy_window(spot).unwrap().check().unwrap();
+            } else {
+                observer
+                    .set_input_focus(InputFocus::NONE, desktop, x11rb::CURRENT_TIME)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+            }
+            let native_events = wait_for(&connection, |event| {
+                if destroyed {
+                    matches!(event, Event::DestroyNotify(event) if event.window == spot)
+                } else {
+                    matches!(event, Event::FocusOut(event) if event.event == spot)
+                }
+            });
+            let loss = native_events
+                .iter()
+                .find(|event| {
+                    if destroyed {
+                        matches!(event, Event::DestroyNotify(event) if event.window == spot)
+                    } else {
+                        matches!(event, Event::FocusOut(event) if event.event == spot)
+                    }
+                })
+                .unwrap();
+            let reported = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let capture = Arc::clone(&reported);
+            let sink: NativeEventSink = Arc::new(move |event| {
+                capture.lock().unwrap().push(event);
+            });
+            let mut keycodes = HashMap::new();
+            let mut keys = NativeKeys::new().unwrap();
+            let mut pending = None;
+            translate_event(
+                loss,
+                &connection,
+                &mut keycodes,
+                &mut keys,
+                &sink,
+                &mut owner,
+                &mut saved,
+                &mut pending,
+            );
+            assert!(owner.is_none());
+            assert!(reported.lock().unwrap().iter().any(|event| {
+                matches!(event, NativeEvent::Lost {
+                    epoch: 44,
+                    window,
+                    destroyed: actual,
+                    ..
+                } if *window == spot && *actual == destroyed)
+            }));
+            let next = observer
+                .grab_pointer(
+                    false,
+                    desktop,
+                    EventMask::BUTTON_PRESS,
+                    GrabMode::ASYNC,
+                    GrabMode::ASYNC,
+                    0_u32,
+                    0_u32,
+                    x11rb::CURRENT_TIME,
+                )
+                .unwrap()
+                .reply()
+                .unwrap();
+            assert_eq!(next.status, GrabStatus::SUCCESS);
+            observer
+                .ungrab_pointer(x11rb::CURRENT_TIME)
+                .unwrap()
+                .check()
+                .unwrap();
+        }
+    }
 }

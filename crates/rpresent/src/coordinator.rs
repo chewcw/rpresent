@@ -129,13 +129,19 @@ impl Coordinator {
     fn handle_command(&mut self, command: AppCommand) -> Result<(), String> {
         match command {
             AppCommand::Spotlight(command) => {
+                let retry = matches!(command, rpresent_spotlight::SpotlightCommand::On)
+                    && matches!(self.spotlight.state(), SpotlightState::On);
                 if self.spotlight.apply(command) {
                     self.layers.spotlight.requested =
                         matches!(self.spotlight.state(), SpotlightState::On);
                     self.reconcile(Layer::Spotlight)?;
+                } else if retry {
+                    let effects = self.lifecycle.retry_owner(self.layers, Instant::now());
+                    self.dispatch_effects(effects)?;
                 }
             }
             AppCommand::Annotation(command) => {
+                let retry = matches!(command, rpresent_annotation::AnnotationCommand::On);
                 if matches!(command, rpresent_annotation::AnnotationCommand::On)
                     && self.annotation_ready
                 {
@@ -146,6 +152,10 @@ impl Coordinator {
                     .annotation
                     .send(AnnotationRequest::Command(command))
                     .map_err(|error| error.to_string())?;
+                if retry {
+                    let effects = self.lifecycle.retry_owner(self.layers, Instant::now());
+                    self.dispatch_effects(effects)?;
+                }
             }
             AppCommand::Zoom(command) => {
                 match command {
@@ -156,11 +166,17 @@ impl Coordinator {
                     }
                     rpresent_zoom::ZoomCommand::Reset => {}
                 }
+                if matches!(command, rpresent_zoom::ZoomCommand::Off)
+                    || matches!(command, rpresent_zoom::ZoomCommand::Toggle)
+                        && !self.layers.zoom.requested
+                {
+                    self.pending_wheels.clear();
+                }
                 let effects = self
                     .lifecycle
                     .request_zoom(command, self.layers, Instant::now());
                 self.dispatch_effects(effects)?;
-                self.update_input_status();
+                self.refresh_input()?;
             }
         }
         Ok(())
@@ -179,10 +195,33 @@ impl Coordinator {
     }
 
     fn dispatch_effects(&mut self, effects: Vec<Effect>) -> Result<(), String> {
+        self.prune_pending();
+        self.refresh_input()?;
+        self.drain_lifecycle_diagnostics();
+        if self.lifecycle.native_cleanup_failed() {
+            return Err("native input ownership cleanup failed".to_owned());
+        }
         for effect in effects {
             self.dispatch_effect(effect)?;
         }
         Ok(())
+    }
+
+    fn accepts(&self, operation: u64, completion: Completion) -> bool {
+        self.pending.contains_key(&operation)
+            && self.lifecycle.accepts_completion(operation, completion)
+    }
+
+    fn prune_pending(&mut self) {
+        let current = self.lifecycle.pending_operation();
+        self.pending
+            .retain(|operation, _| Some(*operation) == current);
+    }
+
+    fn drain_lifecycle_diagnostics(&mut self) {
+        for error in self.lifecycle.take_errors() {
+            tracing::warn!(%error, "overlay coordination failed");
+        }
     }
 
     fn dispatch_effect(&mut self, effect: Effect) -> Result<(), String> {
@@ -267,21 +306,18 @@ impl Coordinator {
                 .zoom
                 .send(ZoomRuntimeRequest::Reset { operation })
                 .map_err(|error| error.to_string()),
-            Effect::CancelZoomMotion { .. } => self
-                .outputs
-                .zoom
-                .send(ZoomRuntimeRequest::CancelMotion { operation })
-                .map_err(|error| error.to_string()),
+            Effect::CancelZoomMotion { .. } => {
+                if self.input.confirmed_target() == PointerOwner::Zoom {
+                    self.input.revoke_owner();
+                }
+                self.outputs
+                    .zoom
+                    .send(ZoomRuntimeRequest::CancelMotion { operation })
+                    .map_err(|error| error.to_string())
+            }
         };
         if let Err(error) = send_result {
-            self.pending.remove(&operation);
-            let effects = self.lifecycle.complete(
-                operation,
-                Err(error.to_string()),
-                self.layers,
-                Instant::now(),
-            );
-            self.dispatch_effects(effects)?;
+            return self.complete(operation, Err(error));
         }
         Ok(())
     }
@@ -291,12 +327,25 @@ impl Coordinator {
         operation: u64,
         result: Result<Completion, String>,
     ) -> Result<(), String> {
-        if self.pending.remove(&operation).is_none() {
+        if self.lifecycle.pending_operation() != Some(operation)
+            || !self.pending.contains_key(&operation)
+        {
             return Ok(());
         }
+        if let Ok(completion) = &result
+            && !self.lifecycle.accepts_completion(operation, *completion)
+        {
+            return Ok(());
+        }
+        self.pending.remove(&operation);
         let effects = self
             .lifecycle
             .complete(operation, result, self.layers, Instant::now());
+        self.refresh_input()?;
+        self.drain_lifecycle_diagnostics();
+        if self.lifecycle.native_cleanup_failed() {
+            return Err("native input ownership cleanup failed".to_owned());
+        }
         self.dispatch_effects(effects)
     }
 
@@ -305,6 +354,8 @@ impl Coordinator {
             SpotlightEvent::Ready { window } => {
                 self.spotlight_ready = true;
                 self.layers.spotlight.window = Some(window);
+                self.layers.spotlight.input_ready = true;
+                self.refresh_input()?;
                 self.maybe_startup()
             }
             SpotlightEvent::Presented {
@@ -312,6 +363,32 @@ impl Coordinator {
                 visible,
                 result,
             } => {
+                if self.lifecycle.pending_operation() != Some(operation)
+                    || !self.pending.contains_key(&operation)
+                {
+                    return Ok(());
+                }
+                if !matches!(
+                    self.pending.get(&operation),
+                    Some(Effect::Present {
+                        layer: Layer::Spotlight,
+                        visible: expected,
+                        ..
+                    }) if *expected == visible
+                ) {
+                    return Ok(());
+                }
+                if result.is_ok()
+                    && !self.accepts(
+                        operation,
+                        Completion::Presented {
+                            layer: Layer::Spotlight,
+                            visible,
+                        },
+                    )
+                {
+                    return Ok(());
+                }
                 if result.is_ok() {
                     self.layers.spotlight.mapped = visible;
                 }
@@ -325,6 +402,11 @@ impl Coordinator {
             }
             SpotlightEvent::Exited(result) => {
                 self.spotlight_ready = false;
+                self.layers.spotlight.mapped = false;
+                self.layers.spotlight.window = None;
+                self.layers.spotlight.input_ready = false;
+                self.refresh_input()?;
+                self.reconcile(Layer::Spotlight)?;
                 result.map_err(|error| format!("spotlight runtime exited: {error}"))
             }
         }
@@ -334,21 +416,18 @@ impl Coordinator {
         match event {
             ZoomEvent::Ready => {
                 self.zoom_ready = true;
+                self.refresh_input()?;
                 self.maybe_startup()
             }
             ZoomEvent::Selected { operation, monitor } => {
+                if !self.accepts(operation, Completion::MonitorSelected(monitor)) {
+                    return Ok(());
+                }
                 self.zoom_monitor = Some(monitor);
                 self.complete(operation, Ok(Completion::MonitorSelected(monitor)))
             }
             ZoomEvent::Prepared { operation, window } => {
-                if !matches!(
-                    self.pending.get(&operation),
-                    Some(Effect::PrepareZoom { .. })
-                ) {
-                    self.outputs
-                        .zoom
-                        .send(ZoomRuntimeRequest::Close { operation })
-                        .map_err(|error| error.to_string())?;
+                if !self.accepts(operation, Completion::ZoomPrepared { window }) {
                     return Ok(());
                 }
                 self.layers.zoom.window = Some(window);
@@ -356,29 +435,41 @@ impl Coordinator {
                 self.complete(operation, Ok(Completion::ZoomPrepared { window }))
             }
             ZoomEvent::Committed { operation } => {
+                if !self.accepts(operation, Completion::ZoomCommitted) {
+                    return Ok(());
+                }
                 self.complete(operation, Ok(Completion::ZoomCommitted))?;
-                self.update_input_status();
                 self.flush_wheels()
             }
             ZoomEvent::Closed { operation } => {
+                if !self.accepts(operation, Completion::ZoomClosed) {
+                    return Ok(());
+                }
                 self.layers.zoom = LayerState::default();
+                self.pending_wheels.clear();
                 self.complete(operation, Ok(Completion::ZoomClosed))?;
-                self.update_input_status();
                 Ok(())
             }
             ZoomEvent::Reset { operation } => self.complete(operation, Ok(Completion::ZoomReset)),
             ZoomEvent::MotionCancelled { operation } => {
                 self.complete(operation, Ok(Completion::MotionCancelled))
             }
-            ZoomEvent::Failed { operation, error } => self.complete(operation, Err(error)),
+            ZoomEvent::Failed { operation, error } => {
+                self.pending_wheels.clear();
+                self.complete(operation, Err(error))
+            }
             ZoomEvent::CloseRequested => {
                 self.handle_command(AppCommand::Zoom(rpresent_zoom::ZoomCommand::Off))
             }
             ZoomEvent::Exited(result) => {
+                let requested = self.layers.zoom.requested;
                 self.zoom_ready = false;
                 self.zoom_worker_failed = result.is_err();
-                self.update_input_status();
-                if result.is_err() && self.layers.zoom.requested {
+                self.layers.zoom.window = None;
+                self.layers.zoom.mapped = false;
+                self.refresh_input()?;
+                self.pending_wheels.clear();
+                if result.is_err() && requested {
                     self.layers.zoom.requested = false;
                     let effects = self.lifecycle.request_zoom(
                         rpresent_zoom::ZoomCommand::Off,
@@ -387,6 +478,7 @@ impl Coordinator {
                     );
                     self.dispatch_effects(effects)?;
                 }
+                self.reconcile(Layer::Zoom)?;
                 result.map_err(|error| format!("zoom runtime exited: {error}"))
             }
         }
@@ -403,10 +495,15 @@ impl Coordinator {
                     Some(Effect::SetOwner { window, .. }) => Some(*window),
                     _ => None,
                 };
+                if result.is_ok() && !self.accepts(operation, Completion::NativeApplied) {
+                    return Ok(());
+                }
                 if result.is_ok() {
                     if let Some(Some(window)) = owner_window {
                         let owner = if window == self.layers.annotation.window.unwrap_or(0) {
                             PointerOwner::Annotation
+                        } else if window == self.layers.spotlight.window.unwrap_or(0) {
+                            PointerOwner::Spotlight
                         } else if window == self.layers.zoom.window.unwrap_or(0) {
                             PointerOwner::Zoom
                         } else {
@@ -428,20 +525,16 @@ impl Coordinator {
                             .annotation
                             .send(AnnotationRequest::Ownership { epoch: None });
                     }
-                } else if let Some(Some(window)) = owner_window
-                    && Some(window) == self.layers.annotation.window
-                {
-                    // Failed annotation grabs clear editing eligibility until the
-                    // runtime confirms a new state; the backend stays usable.
-                    self.input.revoke_owner();
-                    self.outputs
-                        .annotation
-                        .send(AnnotationRequest::Command(
-                            rpresent_annotation::AnnotationCommand::Off,
-                        ))
-                        .map_err(|error| error.to_string())?;
                 }
-                self.complete(operation, result.map(|()| Completion::NativeApplied))
+                if result.is_err() && owner_window.is_some() {
+                    self.pending_wheels.clear();
+                }
+                let success = result.is_ok();
+                self.complete(operation, result.map(|()| Completion::NativeApplied))?;
+                if success && owner_window.is_some() {
+                    self.flush_wheels()?;
+                }
+                Ok(())
             }
             NativeEvent::Pointer { epoch, input } => {
                 if let Some((owner, input)) = self.input.handle_pointer(epoch, input) {
@@ -455,6 +548,7 @@ impl Coordinator {
                                 })
                                 .map_err(|error| error.to_string())?;
                         }
+                        PointerOwner::Spotlight => {}
                         PointerOwner::Zoom => {
                             let Some(monitor) = self.zoom_monitor else {
                                 return Ok(());
@@ -470,10 +564,12 @@ impl Coordinator {
                 Ok(())
             }
             NativeEvent::Wheel {
+                epoch,
+                time,
                 modifier,
                 delta,
                 root,
-            } => self.handle_wheel(&modifier, delta, root),
+            } => self.handle_native_wheel(epoch, time, &modifier, delta, root),
             NativeEvent::Key(shortcut) => {
                 if let Some(command) = self.input.handle_key(&shortcut) {
                     self.handle_command(command)?;
@@ -481,12 +577,17 @@ impl Coordinator {
                 Ok(())
             }
             NativeEvent::AnnotationKey { epoch, input } => {
-                if self.input.owns_epoch(PointerOwner::Annotation, epoch) {
+                let Some(owner) = self.input.confirmed_owner(epoch) else {
+                    return Ok(());
+                };
+                if owner == PointerOwner::Annotation
+                    && self.input.owns_epoch(PointerOwner::Annotation, epoch)
+                {
                     self.outputs
                         .annotation
                         .send(AnnotationRequest::Key { epoch, input })
                         .map_err(|error| error.to_string())
-                } else if input.keysym == 0xff1b {
+                } else if input.keysym == 0xff1b && self.input.owns_epoch(owner, epoch) {
                     self.handle_command(AppCommand::Zoom(rpresent_zoom::ZoomCommand::Off))
                 } else {
                     Ok(())
@@ -495,20 +596,12 @@ impl Coordinator {
             NativeEvent::Escape => {
                 self.handle_command(AppCommand::Zoom(rpresent_zoom::ZoomCommand::Off))
             }
-            NativeEvent::Lost { epoch, reason } => {
-                if self.input.owns_epoch(PointerOwner::Annotation, epoch) {
-                    tracing::warn!(%reason, "annotation input ownership was lost");
-                    self.input.revoke_owner();
-                    let _ = self
-                        .outputs
-                        .annotation
-                        .send(AnnotationRequest::Ownership { epoch: None });
-                    Ok(())
-                } else {
-                    self.input.cancel_gesture();
-                    self.handle_command(AppCommand::Zoom(rpresent_zoom::ZoomCommand::Off))
-                }
-            }
+            NativeEvent::Lost {
+                epoch,
+                window,
+                destroyed,
+                reason,
+            } => self.handle_owner_loss(epoch, window, destroyed, &reason),
             NativeEvent::Exited(result) => {
                 self.native_ready = false;
                 result.map_err(|error| format!("native input exited: {error}"))
@@ -516,16 +609,112 @@ impl Coordinator {
         }
     }
 
-    fn handle_wheel(&mut self, modifier: &str, delta: f32, root: (i16, i16)) -> Result<(), String> {
-        if self.layers.zoom.requested && !self.lifecycle.is_zoom_active() {
-            if self
-                .input
-                .handle_wheel(modifier, delta, root.0, root.1)
-                .is_some()
-            {
-                self.pending_wheels
-                    .push_back((modifier.to_owned(), delta, root));
+    fn handle_native_wheel(
+        &mut self,
+        epoch: Option<u64>,
+        time: u32,
+        modifier: &str,
+        delta: f32,
+        root: (i16, i16),
+    ) -> Result<(), String> {
+        let target = self.input.preferred_owner();
+        if let Some(epoch) = epoch {
+            if !self.input.owns_epoch(target, epoch) {
+                return Ok(());
             }
+            return self.handle_wheel(modifier, delta, root);
+        }
+
+        let replay = target == PointerOwner::Desktop
+            && !self.layers.zoom.requested
+            && !self.annotation_editing;
+        self.outputs
+            .native
+            .send(NativeRequest::ResolveWheel { time, replay })
+            .map_err(|error| error.to_string())?;
+        if replay || self.annotation_editing {
+            return Ok(());
+        }
+        if self.lifecycle.is_suppressed() && self.layers.zoom.requested {
+            return self.handle_wheel(modifier, delta, root);
+        }
+        Ok(())
+    }
+
+    fn handle_owner_loss(
+        &mut self,
+        epoch: u64,
+        window: u32,
+        destroyed: bool,
+        reason: &str,
+    ) -> Result<(), String> {
+        let Some(owner) = self.input.confirmed_owner(epoch) else {
+            return Ok(());
+        };
+        let expected_window = match owner {
+            PointerOwner::Annotation => self.layers.annotation.window,
+            PointerOwner::Spotlight => self.layers.spotlight.window,
+            PointerOwner::Zoom => self.layers.zoom.window,
+            PointerOwner::Desktop => None,
+        };
+        if expected_window != Some(window) {
+            return Ok(());
+        }
+        tracing::warn!(%reason, ?owner, "native input ownership was lost");
+        self.input.revoke_owner();
+        if owner == PointerOwner::Annotation {
+            self.outputs
+                .annotation
+                .send(AnnotationRequest::Ownership { epoch: None })
+                .map_err(|error| error.to_string())?;
+        }
+        let destroyed_layer = if destroyed {
+            match owner {
+                PointerOwner::Spotlight => {
+                    self.layers.spotlight = LayerState::default();
+                    Some(Layer::Spotlight)
+                }
+                PointerOwner::Annotation => {
+                    self.layers.annotation = LayerState::default();
+                    self.annotation_editing = false;
+                    Some(Layer::Annotation)
+                }
+                PointerOwner::Zoom | PointerOwner::Desktop => None,
+            }
+        } else {
+            None
+        };
+        self.refresh_input()?;
+        let effects = self
+            .lifecycle
+            .owner_lost(window, self.layers, Instant::now());
+        self.dispatch_effects(effects)?;
+        if let Some(layer) = destroyed_layer {
+            let effects = self
+                .lifecycle
+                .visibility_changed(layer, self.layers, Instant::now());
+            self.dispatch_effects(effects)?;
+        }
+        if owner == PointerOwner::Zoom {
+            return self.handle_command(AppCommand::Zoom(rpresent_zoom::ZoomCommand::Off));
+        }
+        Ok(())
+    }
+
+    fn handle_wheel(&mut self, modifier: &str, delta: f32, root: (i16, i16)) -> Result<(), String> {
+        if !self.input.matches_wheel_modifier(modifier) {
+            return Ok(());
+        }
+        let target = self.input.preferred_owner();
+        if target == PointerOwner::Annotation {
+            return Ok(());
+        }
+        if self.lifecycle.is_suppressed() && self.layers.zoom.requested {
+            self.pending_wheels
+                .push_back((modifier.to_owned(), delta, root));
+            return Ok(());
+        }
+        if target == PointerOwner::Desktop || self.input.confirmed_target() != target {
             return Ok(());
         }
         if let Some(action) = self.input.handle_wheel(modifier, delta, root.0, root.1) {
@@ -535,6 +724,13 @@ impl Coordinator {
     }
 
     fn dispatch_input(&mut self, action: InputAction) -> Result<(), String> {
+        let target = match &action {
+            InputAction::SpotlightWheel { .. } => PointerOwner::Spotlight,
+            InputAction::ZoomWheel { .. } => PointerOwner::Zoom,
+        };
+        if self.input.preferred_owner() != target || self.input.confirmed_target() != target {
+            return Ok(());
+        }
         match action {
             InputAction::SpotlightWheel { delta } => self
                 .outputs
@@ -559,10 +755,20 @@ impl Coordinator {
     }
 
     fn flush_wheels(&mut self) -> Result<(), String> {
-        while let Some((modifier, delta, root)) = self.pending_wheels.pop_front() {
-            if let Some(action) = self.input.handle_wheel(&modifier, delta, root.0, root.1) {
-                self.dispatch_input(action)?;
-            }
+        if self.lifecycle.is_suppressed() {
+            return Ok(());
+        }
+        let target = self.input.preferred_owner();
+        if target == PointerOwner::Annotation {
+            self.pending_wheels.clear();
+            return Ok(());
+        }
+        if target == PointerOwner::Desktop || self.input.confirmed_target() != target {
+            return Ok(());
+        }
+        let queued = std::mem::take(&mut self.pending_wheels);
+        for (modifier, delta, root) in queued {
+            self.handle_wheel(&modifier, delta, root)?;
         }
         Ok(())
     }
@@ -609,6 +815,32 @@ impl Coordinator {
                 if generation != self.annotation_generation {
                     return Ok(());
                 }
+                if self.lifecycle.pending_operation() != Some(operation)
+                    || !self.pending.contains_key(&operation)
+                {
+                    return Ok(());
+                }
+                if !matches!(
+                    self.pending.get(&operation),
+                    Some(Effect::Present {
+                        layer: Layer::Annotation,
+                        visible: expected,
+                        ..
+                    }) if *expected == visible
+                ) {
+                    return Ok(());
+                }
+                if result.is_ok()
+                    && !self.accepts(
+                        operation,
+                        Completion::Presented {
+                            layer: Layer::Annotation,
+                            visible,
+                        },
+                    )
+                {
+                    return Ok(());
+                }
                 let result = match result {
                     Ok(()) => {
                         self.layers.annotation.mapped = visible;
@@ -625,6 +857,9 @@ impl Coordinator {
                 self.dispatch_effects(effects)
             }
             AnnotationEvent::Cancelled { operation } => {
+                if !self.accepts(operation, Completion::AnnotationCancelled) {
+                    return Ok(());
+                }
                 let effects = self.lifecycle.complete(
                     operation,
                     Ok(Completion::AnnotationCancelled),
@@ -646,8 +881,8 @@ impl Coordinator {
                     self.layers.annotation.requested = false;
                     self.layers.annotation.window = None;
                     self.layers.annotation.mapped = false;
-                    self.input.revoke_owner();
-                    self.update_input_status();
+                    self.pending_wheels.clear();
+                    self.refresh_input()?;
                     let effects = self.lifecycle.visibility_changed(
                         Layer::Annotation,
                         self.layers,
@@ -660,6 +895,10 @@ impl Coordinator {
             AnnotationEvent::Exited(result) => {
                 self.annotation_ready = false;
                 self.layers.annotation.input_ready = false;
+                self.layers.annotation.window = None;
+                self.layers.annotation.mapped = false;
+                self.refresh_input()?;
+                self.reconcile(Layer::Annotation)?;
                 match result {
                     Ok(()) => tracing::debug!("annotation runtime exited"),
                     Err(error) => tracing::warn!(%error, "annotation runtime exited"),
@@ -670,6 +909,10 @@ impl Coordinator {
     }
 
     fn annotation_status(&mut self, status: AnnotationStatus) -> Result<(), String> {
+        if self.annotation_generation != status.generation {
+            self.layers.annotation.mapped = false;
+            self.layers.annotation.window = None;
+        }
         self.annotation_generation = status.generation;
         self.annotation_ready = status.ready;
         self.annotation_editing = status.editing_requested;
@@ -684,9 +927,8 @@ impl Coordinator {
         if !status.ready {
             self.layers.annotation.mapped = false;
             self.annotation_editing = false;
-            self.input.revoke_owner();
         }
-        self.update_input_status();
+        self.refresh_input()?;
         let first = !self.annotation_started;
         self.annotation_started = true;
         let effects =
@@ -703,12 +945,41 @@ impl Coordinator {
         let _ = self.outputs.annotation.send(AnnotationRequest::Shutdown);
     }
 
+    fn refresh_input(&mut self) -> Result<(), String> {
+        let previous = self.input.preferred_owner();
+        self.update_input_status();
+        let preferred = self.input.preferred_owner();
+
+        if self.lifecycle.is_zoom_active()
+            && preferred != previous
+            && matches!(
+                preferred,
+                PointerOwner::Spotlight | PointerOwner::Annotation
+            )
+        {
+            self.outputs
+                .zoom
+                .send(ZoomRuntimeRequest::Pointer(PointerInput::Cancel))
+                .map_err(|error| error.to_string())?;
+        }
+        let confirmed = self.input.confirmed_target();
+        let prepared_zoom = confirmed == PointerOwner::Zoom
+            && !self.lifecycle.is_zoom_active()
+            && self.layers.zoom.requested
+            && self.layers.zoom.mapped;
+        if confirmed != PointerOwner::Desktop && confirmed != preferred && !prepared_zoom {
+            self.lifecycle.invalidate_delivery();
+            self.input.revoke_owner();
+        }
+        Ok(())
+    }
+
     fn update_input_status(&mut self) {
         self.input.set_status(InputStatus {
-            zoom_ready: self.zoom_ready && !self.zoom_worker_failed,
-            zoom_active: self.lifecycle.is_zoom_active(),
-            annotation_enabled: self.annotation_editing,
-            annotation_ready: self.layers.annotation.input_ready,
+            ..self.layers.input_status(
+                self.zoom_ready && !self.zoom_worker_failed,
+                self.lifecycle.is_zoom_active(),
+            )
         });
     }
 }
@@ -802,6 +1073,165 @@ mod tests {
             y: 0,
             width: 1920,
             height: 1080,
+        }
+    }
+
+    struct Rig {
+        app: Coordinator,
+        spot: mpsc::Receiver<SpotlightRuntimeMessage>,
+        zoom: rpresent_zoom::ZoomInbox,
+        native: crate::native_input::NativeInbox,
+        annotation: rpresent_annotation::AnnotationInbox,
+        zoom_inputs: Vec<ZoomRuntimeRequest>,
+        annotation_inputs: Vec<AnnotationRequest>,
+        resizes: Vec<f32>,
+        resolutions: Vec<(u32, bool)>,
+        owners: Vec<(u64, Option<u32>)>,
+        pause_owner: bool,
+        held_owner: Option<NativeRequest>,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            let (mut app, spot, zoom, native, annotation) = coordinator();
+            app.spotlight_ready = true;
+            app.zoom_ready = true;
+            app.native_ready = true;
+            app.annotation_started = true;
+            app.startup_applied = true;
+            app.annotation_generation = 1;
+            app.layers.spotlight.window = Some(2);
+            app.layers.spotlight.input_ready = true;
+            app.layers.annotation.window = Some(3);
+            app.layers.annotation.input_ready = true;
+            app.update_input_status();
+            Self {
+                app,
+                spot,
+                zoom,
+                native,
+                annotation,
+                zoom_inputs: Vec::new(),
+                annotation_inputs: Vec::new(),
+                resizes: Vec::new(),
+                resolutions: Vec::new(),
+                owners: Vec::new(),
+                pause_owner: false,
+                held_owner: None,
+            }
+        }
+
+        fn event(&mut self, event: AppEvent) {
+            self.app.handle_event(event).unwrap();
+        }
+
+        fn command(&mut self, command: AppCommand) {
+            self.event(AppEvent::Command(command));
+            self.settle();
+        }
+
+        fn settle(&mut self) {
+            for _ in 0..128 {
+                if !self.step() {
+                    return;
+                }
+            }
+            panic!("coordinator requests did not settle");
+        }
+
+        fn step(&mut self) -> bool {
+            if let Ok(request) = self.spot.try_recv() {
+                match request {
+                    SpotlightRuntimeMessage::Present { operation, visible } => {
+                        self.event(AppEvent::SpotlightRuntime(SpotlightEvent::Presented {
+                            operation,
+                            visible,
+                            result: Ok(()),
+                        }));
+                    }
+                    SpotlightRuntimeMessage::ResizeBy(delta) => self.resizes.push(delta),
+                }
+                return true;
+            }
+            if let Ok(request) = self.zoom.try_recv() {
+                let event = match request {
+                    ZoomRuntimeRequest::SelectMonitor { operation } => Some(ZoomEvent::Selected {
+                        operation,
+                        monitor: monitor(),
+                    }),
+                    ZoomRuntimeRequest::Prepare { operation, .. } => Some(ZoomEvent::Prepared {
+                        operation,
+                        window: 4,
+                    }),
+                    ZoomRuntimeRequest::Commit { operation } => {
+                        Some(ZoomEvent::Committed { operation })
+                    }
+                    ZoomRuntimeRequest::Close { operation } => {
+                        Some(ZoomEvent::Closed { operation })
+                    }
+                    ZoomRuntimeRequest::Reset { operation } => Some(ZoomEvent::Reset { operation }),
+                    ZoomRuntimeRequest::CancelMotion { operation } => {
+                        Some(ZoomEvent::MotionCancelled { operation })
+                    }
+                    ZoomRuntimeRequest::Pointer(_) | ZoomRuntimeRequest::Scroll { .. } => {
+                        self.zoom_inputs.push(request);
+                        None
+                    }
+                };
+                if let Some(event) = event {
+                    self.event(AppEvent::ZoomRuntime(event));
+                }
+                return true;
+            }
+            if let Ok(request) = self.annotation.try_recv() {
+                match request {
+                    AnnotationRequest::Present { operation, visible } => {
+                        self.event(AppEvent::AnnotationRuntime(AnnotationEvent::Presented {
+                            operation,
+                            generation: 1,
+                            visible,
+                            result: Ok(()),
+                        }));
+                    }
+                    AnnotationRequest::Cancel { operation } => {
+                        self.event(AppEvent::AnnotationRuntime(AnnotationEvent::Cancelled {
+                            operation,
+                        }));
+                    }
+                    AnnotationRequest::Ownership { .. } => {}
+                    other => self.annotation_inputs.push(other),
+                }
+                return true;
+            }
+            if let Ok(request) = self.native.try_recv() {
+                let operation = match request {
+                    NativeRequest::Restack { operation, .. } => operation,
+                    NativeRequest::SetOwner {
+                        operation, window, ..
+                    } => {
+                        if self.pause_owner {
+                            self.held_owner = Some(request);
+                            return false;
+                        }
+                        self.owners.push((operation, window));
+                        operation
+                    }
+                    NativeRequest::ResolveWheel { time, replay } => {
+                        self.resolutions.push((time, replay));
+                        return true;
+                    }
+                };
+                self.event(AppEvent::Native(NativeEvent::Applied {
+                    operation,
+                    result: Ok(()),
+                }));
+                return true;
+            }
+            false
+        }
+
+        fn epoch(&self) -> u64 {
+            self.owners.last().expect("a native owner was confirmed").0
         }
     }
 
@@ -1009,6 +1439,16 @@ mod tests {
             }))
             .unwrap();
 
+        let NativeRequest::SetOwner { operation, .. } = native_events.try_recv().unwrap() else {
+            panic!("spotlight should acquire input after restacking");
+        };
+        coordinator
+            .handle_event(AppEvent::Native(NativeEvent::Applied {
+                operation,
+                result: Ok(()),
+            }))
+            .unwrap();
+
         coordinator
             .handle_event(AppEvent::Command(AppCommand::Zoom(ZoomCommand::On)))
             .unwrap();
@@ -1020,6 +1460,21 @@ mod tests {
             .handle_event(AppEvent::ZoomRuntime(ZoomEvent::Selected {
                 operation,
                 monitor: monitor(),
+            }))
+            .unwrap();
+
+        let NativeRequest::SetOwner {
+            operation: release_operation,
+            window: None,
+            ..
+        } = native_events.try_recv().unwrap()
+        else {
+            panic!("capture should release spotlight input before hiding it");
+        };
+        coordinator
+            .handle_event(AppEvent::Native(NativeEvent::Applied {
+                operation: release_operation,
+                result: Ok(()),
             }))
             .unwrap();
 
@@ -1046,5 +1501,434 @@ mod tests {
             zoom_events.try_recv().unwrap(),
             ZoomRuntimeRequest::Prepare { .. }
         ));
+    }
+
+    #[test]
+    fn spotlight_drag_does_not_reach_lower_workers() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Zoom(ZoomCommand::On));
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        rig.zoom_inputs.clear();
+        rig.annotation_inputs.clear();
+        let epoch = rig.epoch();
+        for input in [
+            RawPointer::Down {
+                root: (10, 20),
+                time: std::time::Duration::ZERO,
+            },
+            RawPointer::Move {
+                root: (30, 40),
+                time: std::time::Duration::from_millis(10),
+            },
+            RawPointer::Up {
+                root: (30, 40),
+                time: std::time::Duration::from_millis(20),
+            },
+        ] {
+            rig.event(AppEvent::Native(NativeEvent::Pointer { epoch, input }));
+        }
+        rig.settle();
+        assert!(rig.zoom_inputs.is_empty());
+        assert!(rig.annotation_inputs.is_empty());
+        assert!(rig.app.lifecycle.is_zoom_active());
+    }
+
+    #[test]
+    fn spotlight_blocks_zoom_before_native_transfer_is_acknowledged() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Zoom(ZoomCommand::On));
+        let old_epoch = rig.epoch();
+        rig.event(AppEvent::Native(NativeEvent::Pointer {
+            epoch: old_epoch,
+            input: RawPointer::Down {
+                root: (10, 20),
+                time: std::time::Duration::ZERO,
+            },
+        }));
+        rig.settle();
+        rig.zoom_inputs.clear();
+        rig.pause_owner = true;
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        assert!(rig.held_owner.is_some());
+        rig.event(AppEvent::Native(NativeEvent::Pointer {
+            epoch: old_epoch,
+            input: RawPointer::Move {
+                root: (300, 400),
+                time: std::time::Duration::from_millis(10),
+            },
+        }));
+        rig.settle();
+        assert!(rig.zoom_inputs.iter().any(|request| {
+            matches!(request, ZoomRuntimeRequest::Pointer(PointerInput::Cancel))
+        }));
+        assert!(!rig.zoom_inputs.iter().any(|request| {
+            matches!(
+                request,
+                ZoomRuntimeRequest::Pointer(PointerInput::Move { .. })
+            )
+        }));
+    }
+
+    #[test]
+    fn denied_spotlight_grab_keeps_zoom_active_and_waits_for_retry() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Zoom(ZoomCommand::On));
+        rig.pause_owner = true;
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        let NativeRequest::SetOwner { operation, .. } = rig.held_owner.take().unwrap() else {
+            panic!("expected a paused owner acquisition");
+        };
+        rig.event(AppEvent::Native(NativeEvent::Applied {
+            operation,
+            result: Err("grab denied".to_owned()),
+        }));
+        rig.settle();
+        assert!(rig.app.lifecycle.is_zoom_active());
+        assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Desktop);
+        assert_eq!(rig.app.input.preferred_owner(), PointerOwner::Spotlight);
+        assert!(rig.native.try_recv().is_err());
+    }
+
+    #[test]
+    fn obsolete_owner_ack_cannot_restore_a_revoked_epoch() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Zoom(ZoomCommand::On));
+        rig.pause_owner = true;
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        let NativeRequest::SetOwner { operation, .. } = rig.held_owner.take().unwrap() else {
+            panic!("expected owner acquisition");
+        };
+        rig.event(AppEvent::Command(AppCommand::Zoom(ZoomCommand::Off)));
+        rig.event(AppEvent::Native(NativeEvent::Applied {
+            operation,
+            result: Ok(()),
+        }));
+        assert_eq!(rig.app.input.confirmed_owner(operation), None);
+    }
+
+    #[test]
+    fn idle_wheel_is_replayed_and_stale_overlay_wheel_is_ignored() {
+        let mut rig = Rig::new();
+        rig.event(AppEvent::Native(NativeEvent::Wheel {
+            epoch: None,
+            time: 123,
+            modifier: "Ctrl".to_owned(),
+            delta: 1.0,
+            root: (10, 20),
+        }));
+        rig.settle();
+        assert_eq!(rig.resolutions, vec![(123, true)]);
+        assert!(rig.resizes.is_empty());
+
+        rig.command(AppCommand::Zoom(ZoomCommand::On));
+        let stale = rig.epoch();
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        rig.zoom_inputs.clear();
+        rig.event(AppEvent::Native(NativeEvent::Wheel {
+            epoch: Some(stale),
+            time: 124,
+            modifier: "Ctrl".to_owned(),
+            delta: 1.0,
+            root: (10, 20),
+        }));
+        rig.settle();
+        assert!(rig.resizes.is_empty());
+        assert!(rig.zoom_inputs.is_empty());
+    }
+
+    #[test]
+    fn confirmed_spotlight_wheel_changes_radius_only() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Zoom(ZoomCommand::On));
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        rig.zoom_inputs.clear();
+        rig.event(AppEvent::Native(NativeEvent::Wheel {
+            epoch: Some(rig.epoch()),
+            time: 125,
+            modifier: "Control".to_owned(),
+            delta: -1.0,
+            root: (-100, 200),
+        }));
+        rig.settle();
+        assert_eq!(rig.resizes, vec![-rig.app.config.spotlight().wheel_speed]);
+        assert!(rig.zoom_inputs.is_empty());
+    }
+
+    #[test]
+    fn stale_loss_and_escape_leave_the_current_spotlight_owner_unchanged() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Zoom(ZoomCommand::On));
+        let stale = rig.epoch();
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        let current = rig.epoch();
+        rig.event(AppEvent::Native(NativeEvent::Lost {
+            epoch: stale,
+            window: 4,
+            destroyed: true,
+            reason: "obsolete".to_owned(),
+        }));
+        rig.event(AppEvent::Native(NativeEvent::AnnotationKey {
+            epoch: stale,
+            input: rpresent_annotation::KeyInput {
+                keysym: 0xff1b,
+                text: None,
+                modifiers: rpresent_annotation::Modifiers::default(),
+            },
+        }));
+        assert_eq!(
+            rig.app.input.confirmed_owner(current),
+            Some(PointerOwner::Spotlight)
+        );
+        assert!(rig.app.lifecycle.is_zoom_active());
+    }
+
+    #[test]
+    fn spotlight_focus_loss_preserves_zoom_and_waits_for_retry() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Zoom(ZoomCommand::On));
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        rig.event(AppEvent::Native(NativeEvent::Lost {
+            epoch: rig.epoch(),
+            window: 2,
+            destroyed: false,
+            reason: "focus lost".to_owned(),
+        }));
+        rig.settle();
+        assert!(rig.app.lifecycle.is_zoom_active());
+        assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Desktop);
+        assert!(rig.native.try_recv().is_err());
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Spotlight);
+    }
+
+    #[test]
+    fn annotation_editing_consumes_wheel_and_viewing_returns_to_spotlight() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Zoom(ZoomCommand::On));
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        rig.event(AppEvent::AnnotationRuntime(AnnotationEvent::Status(
+            AnnotationStatus {
+                generation: 1,
+                window: Some(3),
+                ready: true,
+                editing_requested: true,
+                has_content: true,
+                text_editing: false,
+            },
+        )));
+        rig.settle();
+        assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Annotation);
+        rig.zoom_inputs.clear();
+        rig.event(AppEvent::Native(NativeEvent::Wheel {
+            epoch: Some(rig.epoch()),
+            time: 201,
+            modifier: "Ctrl".to_owned(),
+            delta: 1.0,
+            root: (100, 200),
+        }));
+        rig.settle();
+        assert!(rig.resizes.is_empty());
+        assert!(rig.zoom_inputs.is_empty());
+        rig.event(AppEvent::AnnotationRuntime(AnnotationEvent::Status(
+            AnnotationStatus {
+                generation: 1,
+                window: Some(3),
+                ready: true,
+                editing_requested: false,
+                has_content: true,
+                text_editing: false,
+            },
+        )));
+        rig.settle();
+        assert!(rig.app.layers.annotation.mapped);
+        assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Spotlight);
+    }
+
+    #[test]
+    fn buffered_wheel_uses_spotlight_priority_after_capture_restoration() {
+        let mut rig = Rig::new();
+        rig.event(AppEvent::Command(AppCommand::Zoom(ZoomCommand::On)));
+        rig.event(AppEvent::Native(NativeEvent::Wheel {
+            epoch: None,
+            time: 202,
+            modifier: "Ctrl".to_owned(),
+            delta: 1.0,
+            root: (100, 200),
+        }));
+        assert_eq!(rig.app.pending_wheels.len(), 1);
+        rig.event(AppEvent::Command(AppCommand::Spotlight(
+            SpotlightCommand::On,
+        )));
+        rig.settle();
+        assert!(rig.app.pending_wheels.is_empty());
+        assert_eq!(rig.resizes, vec![rig.app.config.spotlight().wheel_speed]);
+        assert!(
+            !rig.zoom_inputs
+                .iter()
+                .any(|request| { matches!(request, ZoomRuntimeRequest::Scroll { .. }) })
+        );
+    }
+
+    #[test]
+    fn annotation_consumed_wheel_does_not_enter_capture_queue() {
+        let mut rig = Rig::new();
+        rig.event(AppEvent::Command(AppCommand::Zoom(ZoomCommand::On)));
+        rig.event(AppEvent::AnnotationRuntime(AnnotationEvent::Status(
+            AnnotationStatus {
+                generation: 1,
+                window: Some(3),
+                ready: true,
+                editing_requested: true,
+                has_content: false,
+                text_editing: false,
+            },
+        )));
+        rig.event(AppEvent::Native(NativeEvent::Wheel {
+            epoch: None,
+            time: 203,
+            modifier: "Ctrl".to_owned(),
+            delta: 1.0,
+            root: (100, 200),
+        }));
+        assert!(rig.app.pending_wheels.is_empty());
+        rig.settle();
+        assert!(rig.resizes.is_empty());
+        assert!(
+            !rig.zoom_inputs
+                .iter()
+                .any(|request| { matches!(request, ZoomRuntimeRequest::Scroll { .. }) })
+        );
+    }
+
+    #[test]
+    fn cancelling_capture_clears_buffered_wheel() {
+        let mut rig = Rig::new();
+        rig.event(AppEvent::Command(AppCommand::Zoom(ZoomCommand::On)));
+        rig.event(AppEvent::Native(NativeEvent::Wheel {
+            epoch: None,
+            time: 204,
+            modifier: "Ctrl".to_owned(),
+            delta: 1.0,
+            root: (100, 200),
+        }));
+        assert_eq!(rig.app.pending_wheels.len(), 1);
+        rig.event(AppEvent::Command(AppCommand::Zoom(ZoomCommand::Off)));
+        assert!(rig.app.pending_wheels.is_empty());
+        rig.settle();
+        assert!(!rig.app.lifecycle.is_zoom_active());
+        assert!(rig.resizes.is_empty());
+    }
+
+    #[test]
+    fn failed_preparation_clears_buffered_wheel() {
+        let mut rig = Rig::new();
+        rig.event(AppEvent::Command(AppCommand::Zoom(ZoomCommand::On)));
+        let ZoomRuntimeRequest::SelectMonitor { operation } = rig.zoom.try_recv().unwrap() else {
+            panic!("expected monitor selection");
+        };
+        rig.event(AppEvent::ZoomRuntime(ZoomEvent::Selected {
+            operation,
+            monitor: monitor(),
+        }));
+        let ZoomRuntimeRequest::Prepare { operation, .. } = rig.zoom.try_recv().unwrap() else {
+            panic!("expected capture preparation");
+        };
+        rig.event(AppEvent::Native(NativeEvent::Wheel {
+            epoch: None,
+            time: 205,
+            modifier: "Ctrl".to_owned(),
+            delta: 1.0,
+            root: (100, 200),
+        }));
+        assert_eq!(rig.app.pending_wheels.len(), 1);
+        rig.event(AppEvent::ZoomRuntime(ZoomEvent::Failed {
+            operation,
+            error: "capture failed".to_owned(),
+        }));
+        assert!(rig.app.pending_wheels.is_empty());
+        rig.settle();
+        assert!(!rig.app.lifecycle.is_zoom_active());
+    }
+
+    #[test]
+    fn closing_zoom_keeps_spotlight_delivery_confirmed() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Zoom(ZoomCommand::On));
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        rig.command(AppCommand::Zoom(ZoomCommand::Off));
+        let epoch = rig.epoch();
+        assert!(rig.app.input.owns_epoch(PointerOwner::Spotlight, epoch));
+        rig.event(AppEvent::Native(NativeEvent::Wheel {
+            epoch: Some(epoch),
+            time: 206,
+            modifier: "Ctrl".to_owned(),
+            delta: 1.0,
+            root: (100, 200),
+        }));
+        rig.settle();
+        assert_eq!(rig.resizes.len(), 1);
+    }
+
+    #[test]
+    fn prepared_zoom_owner_becomes_usable_after_commit() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Zoom(ZoomCommand::On));
+        assert!(rig.app.lifecycle.is_zoom_active());
+        assert!(rig.app.input.owns_epoch(PointerOwner::Zoom, rig.epoch()));
+    }
+
+    #[test]
+    fn hide_keeps_spotlight_priority_until_its_acknowledgment() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Zoom(ZoomCommand::On));
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        rig.event(AppEvent::Command(AppCommand::Spotlight(
+            SpotlightCommand::Off,
+        )));
+        assert!(rig.app.layers.spotlight.mapped);
+        assert_eq!(rig.app.input.preferred_owner(), PointerOwner::Spotlight);
+        rig.settle();
+        assert!(!rig.app.layers.spotlight.mapped);
+        assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Zoom);
+    }
+
+    #[test]
+    fn reversed_takeover_reconfirms_zoom_in_a_new_epoch() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Zoom(ZoomCommand::On));
+        let old = rig.epoch();
+        rig.event(AppEvent::Command(AppCommand::Spotlight(
+            SpotlightCommand::On,
+        )));
+        let SpotlightRuntimeMessage::Present { operation, visible } = rig.spot.try_recv().unwrap()
+        else {
+            panic!("expected spotlight presentation");
+        };
+        rig.event(AppEvent::SpotlightRuntime(SpotlightEvent::Presented {
+            operation,
+            visible,
+            result: Ok(()),
+        }));
+        rig.event(AppEvent::Command(AppCommand::Spotlight(
+            SpotlightCommand::Off,
+        )));
+        rig.settle();
+        assert!(rig.app.input.owns_epoch(PointerOwner::Zoom, rig.epoch()));
+        assert_ne!(rig.epoch(), old);
+    }
+
+    #[test]
+    fn direct_input_actions_cannot_bypass_spotlight_priority() {
+        let mut rig = Rig::new();
+        rig.command(AppCommand::Zoom(ZoomCommand::On));
+        rig.command(AppCommand::Spotlight(SpotlightCommand::On));
+        rig.zoom_inputs.clear();
+        rig.event(AppEvent::Input(InputAction::ZoomWheel {
+            delta: 1.0,
+            cursor_x: 100,
+            cursor_y: 200,
+        }));
+        rig.settle();
+        assert!(rig.zoom_inputs.is_empty());
     }
 }

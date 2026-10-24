@@ -13,6 +13,10 @@ pub enum NativeRequest {
         window: Option<u32>,
         restore_focus: bool,
     },
+    ResolveWheel {
+        time: u32,
+        replay: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +31,8 @@ pub enum NativeEvent {
         input: RawPointer,
     },
     Wheel {
+        epoch: Option<u64>,
+        time: u32,
         modifier: String,
         delta: f32,
         root: (i16, i16),
@@ -39,6 +45,8 @@ pub enum NativeEvent {
     Escape,
     Lost {
         epoch: u64,
+        window: u32,
+        destroyed: bool,
         reason: String,
     },
     Exited(Result<(), String>),

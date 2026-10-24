@@ -59,6 +59,7 @@ pub enum AppEvent {
 pub struct InputStatus {
     pub zoom_ready: bool,
     pub zoom_active: bool,
+    pub spotlight_active: bool,
     pub annotation_enabled: bool,
     pub annotation_ready: bool,
 }
@@ -67,6 +68,7 @@ pub struct InputStatus {
 pub enum PointerOwner {
     #[default]
     Desktop,
+    Spotlight,
     Zoom,
     Annotation,
 }
@@ -81,7 +83,9 @@ pub enum RawPointer {
 pub fn preferred_pointer_owner(status: InputStatus) -> PointerOwner {
     if status.annotation_enabled && status.annotation_ready {
         PointerOwner::Annotation
-    } else if status.zoom_ready {
+    } else if status.spotlight_active {
+        PointerOwner::Spotlight
+    } else if status.zoom_ready && status.zoom_active {
         PointerOwner::Zoom
     } else {
         PointerOwner::Desktop
@@ -134,6 +138,14 @@ impl InputCoordinator {
         self.owner == owner && self.epoch == epoch && self.owner_accepts_gestures()
     }
 
+    pub fn confirmed_owner(&self, epoch: u64) -> Option<PointerOwner> {
+        (epoch == self.epoch && self.owner != PointerOwner::Desktop).then_some(self.owner)
+    }
+
+    pub fn confirmed_target(&self) -> PointerOwner {
+        self.owner
+    }
+
     /// Drop confirmed ownership before the native layer changes its grab.
     /// Events stay rejected until another native confirmation arrives.
     pub fn revoke_owner(&mut self) {
@@ -164,11 +176,15 @@ impl InputCoordinator {
         if epoch != self.epoch {
             return None;
         }
+        if !self.owner_accepts_gestures() {
+            self.cancel_gesture();
+            return None;
+        }
 
         match input {
             RawPointer::Down { .. } => {
                 self.cancelled = false;
-                if self.button_down || !self.owner_accepts_gestures() {
+                if self.button_down {
                     return None;
                 }
                 self.button_down = true;
@@ -191,13 +207,7 @@ impl InputCoordinator {
     }
 
     fn owner_accepts_gestures(&self) -> bool {
-        match self.owner {
-            PointerOwner::Desktop => false,
-            PointerOwner::Annotation => {
-                self.status.annotation_enabled && self.status.annotation_ready
-            }
-            PointerOwner::Zoom => self.status.zoom_ready && self.status.zoom_active,
-        }
+        self.owner != PointerOwner::Desktop && self.owner == self.preferred_owner()
     }
 
     pub fn handle_key(&mut self, shortcut: &str) -> Option<AppCommand> {
@@ -206,7 +216,11 @@ impl InputCoordinator {
 
     pub fn handle_wheel(&self, modifier: &str, delta: f32, x: i16, y: i16) -> Option<InputAction> {
         self.router
-            .handle_wheel_with_zoom(modifier, delta, x, y, self.status.zoom_active)
+            .handle_wheel_for_owner(modifier, delta, x, y, self.preferred_owner())
+    }
+
+    pub fn matches_wheel_modifier(&self, modifier: &str) -> bool {
+        self.router.matches_wheel_modifier(modifier)
     }
 
     pub fn active_mode(&self) -> ActiveMode {
@@ -249,40 +263,29 @@ impl InputRouter {
         None
     }
 
-    pub fn handle_wheel(
-        &self,
-        modifier: &str,
-        delta: f32,
-        cursor_x: i16,
-        cursor_y: i16,
-    ) -> Option<InputAction> {
-        self.handle_wheel_with_zoom(modifier, delta, cursor_x, cursor_y, false)
+    pub fn matches_wheel_modifier(&self, modifier: &str) -> bool {
+        normalize_modifier(modifier) == normalize_modifier(&self.bindings.wheel_modifier)
     }
 
-    pub fn handle_wheel_with_zoom(
+    pub fn handle_wheel_for_owner(
         &self,
         modifier: &str,
         delta: f32,
         cursor_x: i16,
         cursor_y: i16,
-        zoom_active: bool,
+        owner: PointerOwner,
     ) -> Option<InputAction> {
-        let active_modifier = normalize_modifier(modifier);
-        // wheel_modifier governs both spotlight and zoom wheel resize/zoom
-        let configured_modifier = normalize_modifier(&self.bindings.wheel_modifier);
-
-        if zoom_active && active_modifier == configured_modifier {
-            Some(InputAction::ZoomWheel {
+        if !self.matches_wheel_modifier(modifier) {
+            return None;
+        }
+        match owner {
+            PointerOwner::Spotlight => Some(InputAction::SpotlightWheel { delta }),
+            PointerOwner::Zoom => Some(InputAction::ZoomWheel {
                 delta,
                 cursor_x,
                 cursor_y,
-            })
-        } else if self.active_mode == ActiveMode::Spotlight
-            && active_modifier == configured_modifier
-        {
-            Some(InputAction::SpotlightWheel { delta })
-        } else {
-            None
+            }),
+            PointerOwner::Annotation | PointerOwner::Desktop => None,
         }
     }
 }

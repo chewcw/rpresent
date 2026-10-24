@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 
 use rpresent_zoom::{MonitorRect, ZoomCommand};
 
+use crate::input::{InputStatus, PointerOwner, preferred_pointer_owner};
+
 /// How long one native acknowledgment may take before the operation is
 /// abandoned and recovery starts. This is an implementation bound, not a
 /// configuration field.
@@ -90,6 +92,20 @@ impl LayerSnapshot {
             mapped_window(self.spotlight),
             mapped_window(self.annotation),
         ]
+    }
+
+    pub fn input_status(&self, zoom_ready: bool, zoom_active: bool) -> InputStatus {
+        InputStatus {
+            spotlight_active: self.spotlight.input_ready
+                && self.spotlight.mapped
+                && self.spotlight.window.is_some(),
+            zoom_ready,
+            zoom_active,
+            annotation_enabled: self.annotation_editing,
+            annotation_ready: self.annotation.input_ready
+                && self.annotation.mapped
+                && self.annotation.window.is_some(),
+        }
     }
 }
 
@@ -181,6 +197,8 @@ enum Expect {
     Close,
     Reset,
     CancelMotion,
+    TransferMotion,
+    OwnerCleanup,
 }
 
 impl Expect {
@@ -196,6 +214,8 @@ impl Expect {
             Self::Close => "zoom close",
             Self::Reset => "zoom reset",
             Self::CancelMotion => "zoom motion cancellation",
+            Self::TransferMotion => "input transfer motion cancellation",
+            Self::OwnerCleanup => "input ownership cleanup",
         }
     }
 
@@ -208,7 +228,8 @@ impl Expect {
             | (Self::Commit, Completion::ZoomCommitted)
             | (Self::Close, Completion::ZoomClosed)
             | (Self::Reset, Completion::ZoomReset)
-            | (Self::CancelMotion, Completion::MotionCancelled) => true,
+            | (Self::CancelMotion | Self::TransferMotion, Completion::MotionCancelled)
+            | (Self::OwnerCleanup, Completion::NativeApplied) => true,
             (
                 Self::Present { layer, visible },
                 Completion::Presented {
@@ -280,6 +301,12 @@ pub struct WindowLifecycle {
     owner_window: Option<u32>,
     pending_owner: Option<Option<u32>>,
     owner_action: OwnerAction,
+    transfer_motion_cancelled: bool,
+    owner_needs_confirmation: bool,
+    owner_blocked: bool,
+    owner_failure_eligibility: [Option<u32>; 2],
+    owner_cleanup_required: bool,
+    native_cleanup_failed: bool,
     annotation_cancel_done: bool,
     capture_owner_released: bool,
     outstanding: Option<Outstanding>,
@@ -313,6 +340,12 @@ impl WindowLifecycle {
             owner_window: None,
             pending_owner: None,
             owner_action: OwnerAction::Continue,
+            transfer_motion_cancelled: false,
+            owner_needs_confirmation: false,
+            owner_blocked: false,
+            owner_failure_eligibility: [None; 2],
+            owner_cleanup_required: false,
+            native_cleanup_failed: false,
             annotation_cancel_done: false,
             capture_owner_released: false,
             outstanding: None,
@@ -339,6 +372,24 @@ impl WindowLifecycle {
         self.deadline
     }
 
+    pub fn pending_operation(&self) -> Option<u64> {
+        self.outstanding.map(|pending| pending.operation)
+    }
+
+    pub fn accepts_completion(&self, operation: u64, completion: Completion) -> bool {
+        self.outstanding.is_some_and(|pending| {
+            pending.operation == operation && pending.expect.matches(completion)
+        })
+    }
+
+    pub fn native_cleanup_failed(&self) -> bool {
+        self.native_cleanup_failed
+    }
+
+    pub fn invalidate_delivery(&mut self) {
+        self.owner_needs_confirmation = true;
+    }
+
     /// Drain diagnostics collected from failed and abandoned operations.
     pub fn take_errors(&mut self) -> Vec<String> {
         std::mem::take(&mut self.errors)
@@ -358,7 +409,7 @@ impl WindowLifecycle {
                     self.begin_activation();
                     true
                 }
-                Stage::Active => false,
+                Stage::Active => return self.retry_owner(layers, now),
                 Stage::Stopping | Stage::Resetting => {
                     self.queued.push_back(ZoomCommand::On);
                     false
@@ -441,29 +492,49 @@ impl WindowLifecycle {
                 self.deadline = None;
                 self.errors
                     .push(format!("{} failed: {error}", outstanding.expect.describe()));
-                match self.stage {
-                    Stage::Stopping => {
-                        if self.stop_step == StopStep::Restore {
-                            // Keep restoring the items that still can succeed.
-                            self.block_failed(outstanding.expect);
-                        } else {
-                            self.advance_stop_step();
+                match outstanding.expect {
+                    Expect::OwnerCleanup => {
+                        self.native_cleanup_failed = true;
+                    }
+                    Expect::TransferMotion => {
+                        self.begin_stopping();
+                    }
+                    Expect::Owner => {
+                        self.block_owner(&layers);
+                        match self.stage {
+                            Stage::Stopping => {
+                                if self.stop_step == StopStep::Restore {
+                                    self.block_failed(outstanding.expect);
+                                } else {
+                                    self.advance_stop_step();
+                                }
+                            }
+                            Stage::Idle | Stage::Active => {}
+                            _ => self.begin_stopping(),
                         }
                     }
-                    Stage::Idle | Stage::Active => match outstanding.expect {
-                        // A missing annotation input owner must not stop zoom.
-                        Expect::Owner => {}
-                        // Keep viewing artwork even when one presentation fails.
-                        Expect::Present {
-                            layer: Layer::Annotation,
-                            ..
-                        } => {
-                            self.present_blocked[Layer::Annotation.index()] = true;
+                    _ => match self.stage {
+                        Stage::Stopping => {
+                            if self.stop_step == StopStep::Restore {
+                                // Keep restoring the items that still can succeed.
+                                self.block_failed(outstanding.expect);
+                            } else {
+                                self.advance_stop_step();
+                            }
                         }
-                        Expect::CancelAnnotation => {}
+                        Stage::Idle | Stage::Active => match outstanding.expect {
+                            // Keep viewing artwork even when one presentation fails.
+                            Expect::Present {
+                                layer: Layer::Annotation,
+                                ..
+                            } => {
+                                self.present_blocked[Layer::Annotation.index()] = true;
+                            }
+                            Expect::CancelAnnotation => {}
+                            _ => self.begin_stopping(),
+                        },
                         _ => self.begin_stopping(),
                     },
-                    _ => self.begin_stopping(),
                 }
             }
         }
@@ -479,6 +550,9 @@ impl WindowLifecycle {
         layers: LayerSnapshot,
         now: Instant,
     ) -> Vec<Effect> {
+        if self.owner_blocked && self.upper_eligibility(&layers) != self.owner_failure_eligibility {
+            self.owner_blocked = false;
+        }
         self.pump(&layers, now)
     }
 
@@ -492,19 +566,33 @@ impl WindowLifecycle {
             return Vec::new();
         }
 
-        let description = self
-            .outstanding
-            .map_or("native acknowledgment", |outstanding| {
-                outstanding.expect.describe()
-            });
+        let outstanding = self.outstanding;
+        let description = outstanding.map_or("native acknowledgment", |outstanding| {
+            outstanding.expect.describe()
+        });
         self.errors
             .push(format!("timed out waiting for {description}"));
         self.outstanding = None;
         self.deadline = None;
 
-        match self.stage {
-            Stage::Idle | Stage::Active => {}
-            _ => self.begin_stopping(),
+        match outstanding.map(|outstanding| outstanding.expect) {
+            Some(Expect::Owner) => {
+                self.block_owner(&layers);
+                self.owner_cleanup_required = true;
+                if !matches!(self.stage, Stage::Idle | Stage::Active | Stage::Stopping) {
+                    self.begin_stopping();
+                }
+            }
+            Some(Expect::OwnerCleanup) => {
+                self.native_cleanup_failed = true;
+            }
+            Some(Expect::TransferMotion) => {
+                self.begin_stopping();
+            }
+            _ => match self.stage {
+                Stage::Idle | Stage::Active => {}
+                _ => self.begin_stopping(),
+            },
         }
 
         self.pump(&layers, now)
@@ -514,6 +602,7 @@ impl WindowLifecycle {
         self.suppressed = true;
         self.annotation_cancel_done = false;
         self.capture_owner_released = false;
+        self.transfer_motion_cancelled = false;
         self.owner_action = OwnerAction::Continue;
         self.committed = false;
         self.selected_monitor = None;
@@ -532,11 +621,34 @@ impl WindowLifecycle {
     fn begin_stopping(&mut self) {
         self.suppressed = false;
         self.annotation_cancel_done = false;
+        self.transfer_motion_cancelled = false;
         self.committed = false;
         self.stage = Stage::Stopping;
         self.stop_step = StopStep::CancelMotion;
         self.outstanding = None;
         self.deadline = None;
+    }
+
+    fn block_owner(&mut self, layers: &LayerSnapshot) {
+        self.owner_window = None;
+        self.pending_owner = None;
+        self.transfer_motion_cancelled = false;
+        self.owner_needs_confirmation = false;
+        self.owner_blocked = true;
+        self.owner_failure_eligibility = self.upper_eligibility(layers);
+    }
+
+    pub fn retry_owner(&mut self, layers: LayerSnapshot, now: Instant) -> Vec<Effect> {
+        self.owner_blocked = false;
+        self.pump(&layers, now)
+    }
+
+    pub fn owner_lost(&mut self, window: u32, layers: LayerSnapshot, now: Instant) -> Vec<Effect> {
+        if self.owner_window != Some(window) {
+            return Vec::new();
+        }
+        self.block_owner(&layers);
+        self.pump(&layers, now)
     }
 
     /// Keep recovery moving when one restore step cannot complete.
@@ -581,6 +693,8 @@ impl WindowLifecycle {
             }
             (Expect::Owner, Completion::NativeApplied) => {
                 self.owner_window = self.pending_owner.take().flatten();
+                self.transfer_motion_cancelled = false;
+                self.owner_needs_confirmation = false;
                 match self.owner_action {
                     OwnerAction::Continue => {}
                     OwnerAction::Commit => self.stage = Stage::Committing,
@@ -590,6 +704,14 @@ impl WindowLifecycle {
                         }
                     }
                 }
+            }
+            (Expect::TransferMotion, Completion::MotionCancelled) => {
+                self.transfer_motion_cancelled = true;
+            }
+            (Expect::OwnerCleanup, Completion::NativeApplied) => {
+                self.owner_window = None;
+                self.pending_owner = None;
+                self.owner_cleanup_required = false;
             }
             (Expect::CancelAnnotation, Completion::AnnotationCancelled) => {}
             (Expect::Commit, Completion::ZoomCommitted) => {
@@ -621,6 +743,30 @@ impl WindowLifecycle {
         }
     }
 
+    fn maybe_cancel_zoom_transfer(
+        &mut self,
+        layers: &LayerSnapshot,
+        now: Instant,
+    ) -> Option<Vec<Effect>> {
+        let preferred = self.preferred_owner_window(layers);
+        if self.owner_blocked
+            || self.transfer_motion_cancelled
+            || self.zoom_window.is_none()
+            || self.owner_window != self.zoom_window
+            || preferred.is_none()
+            || preferred == self.zoom_window
+        {
+            return None;
+        }
+        Some(self.emit(
+            Effect::CancelZoomMotion {
+                operation: self.next_operation(),
+            },
+            Expect::TransferMotion,
+            now,
+        ))
+    }
+
     /// Return the next effect to emit, or nothing when the current stage is
     /// either waiting for an acknowledgment or settled.
     fn pump(&mut self, layers: &LayerSnapshot, now: Instant) -> Vec<Effect> {
@@ -628,11 +774,28 @@ impl WindowLifecycle {
             if self.outstanding.is_some() {
                 return Vec::new();
             }
+            if self.native_cleanup_failed {
+                return Vec::new();
+            }
+            if self.owner_cleanup_required {
+                return self.emit(
+                    Effect::SetOwner {
+                        operation: self.next_operation(),
+                        window: None,
+                        restore_focus: true,
+                    },
+                    Expect::OwnerCleanup,
+                    now,
+                );
+            }
 
             match self.stage {
                 Stage::Idle | Stage::Active => {
                     if self.drain_next_command() {
                         continue;
+                    }
+                    if let Some(effects) = self.maybe_cancel_zoom_transfer(layers, now) {
+                        return effects;
                     }
                     let effects = self.reconcile(layers, now, true);
                     if !effects.is_empty() {
@@ -793,9 +956,11 @@ impl WindowLifecycle {
                     self.stop_step = StopStep::Close;
                     return Vec::new();
                 }
-                // Transfer to a ready annotation window, or give focus back to
-                // the desktop window that held it before zoom.
-                let transfer = self.eligible_annotation_window(layers);
+                let transfer = self.preferred_upper_window(layers);
+                if transfer == self.owner_window {
+                    self.stop_step = StopStep::Close;
+                    return Vec::new();
+                }
                 if transfer != layers.annotation.window
                     && self.owner_window == layers.annotation.window
                     && let Some(effects) = self.maybe_cancel_annotation(layers, now)
@@ -908,22 +1073,35 @@ impl WindowLifecycle {
         order
     }
 
-    /// Annotation takes drawing priority once it is ready; otherwise zoom owns
-    /// input for the activation.
     fn preferred_owner_window(&self, layers: &LayerSnapshot) -> Option<u32> {
-        self.eligible_annotation_window(layers).or(self.zoom_window)
+        let status = layers.input_status(self.zoom_window.is_some(), self.zoom_mapped);
+        match preferred_pointer_owner(status) {
+            PointerOwner::Annotation => layers.annotation.window,
+            PointerOwner::Spotlight => layers.spotlight.window,
+            PointerOwner::Zoom => self.zoom_window,
+            PointerOwner::Desktop => None,
+        }
     }
 
-    fn eligible_annotation_window(&self, layers: &LayerSnapshot) -> Option<u32> {
-        if layers.annotation_editing
-            && layers.annotation.requested
-            && layers.annotation.input_ready
-            && layers.annotation.mapped
-        {
-            layers.annotation.window
-        } else {
-            None
+    fn preferred_upper_window(&self, layers: &LayerSnapshot) -> Option<u32> {
+        match preferred_pointer_owner(layers.input_status(false, false)) {
+            PointerOwner::Annotation => layers.annotation.window,
+            PointerOwner::Spotlight => layers.spotlight.window,
+            PointerOwner::Zoom | PointerOwner::Desktop => None,
         }
+    }
+
+    fn upper_eligibility(&self, layers: &LayerSnapshot) -> [Option<u32>; 2] {
+        let status = layers.input_status(false, false);
+        [
+            (status.annotation_enabled && status.annotation_ready)
+                .then_some(layers.annotation.window)
+                .flatten(),
+            status
+                .spotlight_active
+                .then_some(layers.spotlight.window)
+                .flatten(),
+        ]
     }
 
     /// Transfer ownership only after the current annotation edit is cancelled.
@@ -969,8 +1147,14 @@ impl WindowLifecycle {
 
     /// Reconcile ownership while zoom is idle or already active.
     fn reconcile_owner(&mut self, layers: &LayerSnapshot, now: Instant) -> Option<Vec<Effect>> {
+        if self.owner_blocked {
+            return None;
+        }
         let preferred = self.preferred_owner_window(layers);
-        if preferred == self.owner_window {
+        if preferred == self.owner_window
+            && !self.owner_needs_confirmation
+            && !self.transfer_motion_cancelled
+        {
             return None;
         }
         if preferred != layers.annotation.window
@@ -1046,7 +1230,7 @@ mod tests {
                 requested: spot_requested,
                 window: Some(SPOTLIGHT),
                 mapped: spot_mapped,
-                input_ready: false,
+                input_ready: true,
             },
             annotation: LayerState {
                 requested: annotation_requested,
@@ -1538,5 +1722,282 @@ mod tests {
                 .is_empty()
         );
         assert!(!driver.lifecycle.is_zoom_active());
+    }
+
+    #[test]
+    fn spotlight_transfer_cancels_once_before_owner_acquisition() {
+        let mut driver = Driver::new(layers((false, false), (false, false, ANNOTATION)));
+        let start = driver.request(ZoomCommand::On);
+        driver.run(start);
+        driver.seen.clear();
+
+        driver.layers.spotlight.requested = true;
+        let effects =
+            driver
+                .lifecycle
+                .visibility_changed(Layer::Spotlight, driver.layers, driver.now);
+        let cancel = driver.run_until(effects, "cancel-motion");
+        assert!(
+            !driver
+                .seen
+                .iter()
+                .any(|seen| { seen == &format!("owner Some({SPOTLIGHT}) restore_focus=false") })
+        );
+        let remaining = driver.ack(&cancel[0]);
+        driver.run(remaining);
+        assert_eq!(
+            driver
+                .seen
+                .iter()
+                .filter(|seen| *seen == "cancel-motion")
+                .count(),
+            1
+        );
+        assert!(
+            driver
+                .seen
+                .contains(&format!("owner Some({SPOTLIGHT}) restore_focus=false"))
+        );
+        assert!(driver.lifecycle.is_zoom_active());
+        assert!(!driver.seen.iter().any(|seen| seen == "close"));
+    }
+
+    #[test]
+    fn transfer_uses_the_latest_annotation_destination() {
+        let mut driver = Driver::new(layers((false, false), (false, false, ANNOTATION)));
+        let start = driver.request(ZoomCommand::On);
+        driver.run(start);
+        driver.layers.spotlight.requested = true;
+        let effects =
+            driver
+                .lifecycle
+                .visibility_changed(Layer::Spotlight, driver.layers, driver.now);
+        let cancel = driver.run_until(effects, "cancel-motion");
+        driver.layers.annotation.requested = true;
+        driver.layers.annotation.input_ready = true;
+        driver.layers.annotation_editing = true;
+        driver.seen.clear();
+        let effects = driver.ack(&cancel[0]);
+        driver.run(effects);
+        assert!(
+            driver
+                .seen
+                .contains(&format!("owner Some({ANNOTATION}) restore_focus=false"))
+        );
+        assert!(
+            !driver
+                .seen
+                .contains(&format!("owner Some({SPOTLIGHT}) restore_focus=false"))
+        );
+    }
+
+    #[test]
+    fn failed_spotlight_grab_waits_for_an_explicit_retry() {
+        let mut driver = Driver::new(layers((true, true), (false, false, ANNOTATION)));
+        let effects =
+            driver
+                .lifecycle
+                .visibility_changed(Layer::Spotlight, driver.layers, driver.now);
+        let owner = driver.run_until(effects, "owner Some(");
+        let effects = driver.fail(&owner[0], "grab denied");
+        assert!(effects.is_empty());
+        assert!(driver.lifecycle.owner_blocked);
+        assert_eq!(driver.lifecycle.owner_window, None);
+        assert!(!driver.lifecycle.take_errors().is_empty());
+        let effects = driver.lifecycle.retry_owner(driver.layers, driver.now);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::SetOwner {
+                window: Some(SPOTLIGHT),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn uncertain_owner_is_released_before_retry() {
+        let mut driver = Driver::new(layers((true, true), (false, false, ANNOTATION)));
+        let effects =
+            driver
+                .lifecycle
+                .visibility_changed(Layer::Spotlight, driver.layers, driver.now);
+        let owner = driver.run_until(effects, "owner Some(");
+        driver.now += ACK_TIMEOUT + Duration::from_millis(1);
+        let cleanup = driver.lifecycle.expire(driver.layers, driver.now);
+        assert!(matches!(
+            cleanup.as_slice(),
+            [Effect::SetOwner { window: None, .. }]
+        ));
+        assert!(
+            driver
+                .lifecycle
+                .complete(
+                    owner[0].operation(),
+                    Ok(Completion::NativeApplied),
+                    driver.layers,
+                    driver.now,
+                )
+                .is_empty()
+        );
+        let effects = driver.ack(&cleanup[0]);
+        assert!(effects.is_empty());
+        assert!(driver.lifecycle.owner_blocked);
+        assert_eq!(driver.lifecycle.owner_window, None);
+    }
+
+    #[test]
+    fn spotlight_only_acquires_input_without_a_capture() {
+        let mut driver = Driver::new(layers((true, true), (false, false, ANNOTATION)));
+        let effects =
+            driver
+                .lifecycle
+                .visibility_changed(Layer::Spotlight, driver.layers, driver.now);
+        driver.run(effects);
+        assert_eq!(driver.lifecycle.owner_window, Some(SPOTLIGHT));
+        assert!(!driver.seen.iter().any(|seen| seen == "prepare"));
+    }
+
+    #[test]
+    fn spotlight_hide_is_acknowledged_before_zoom_gets_input() {
+        let mut driver = Driver::new(layers((true, true), (false, false, ANNOTATION)));
+        let effects = driver.request(ZoomCommand::On);
+        driver.run(effects);
+        driver.seen.clear();
+        driver.layers.spotlight.requested = false;
+        let effects =
+            driver
+                .lifecycle
+                .visibility_changed(Layer::Spotlight, driver.layers, driver.now);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Present {
+                layer: Layer::Spotlight,
+                visible: false,
+                ..
+            }]
+        ));
+        assert_eq!(driver.lifecycle.owner_window, Some(SPOTLIGHT));
+        let after_hide = driver.ack(&effects[0]);
+        driver.run(after_hide);
+        assert_eq!(driver.lifecycle.owner_window, Some(ZOOM));
+        assert!(driver.lifecycle.is_zoom_active());
+        assert!(!driver.seen.iter().any(|seen| seen == "prepare"));
+    }
+
+    #[test]
+    fn viewing_annotation_returns_input_to_spotlight() {
+        let mut driver = Driver::new(layers((true, true), (true, true, ANNOTATION)));
+        let effects = driver.request(ZoomCommand::On);
+        driver.run(effects);
+        assert_eq!(driver.lifecycle.owner_window, Some(ANNOTATION));
+        driver.layers.annotation_editing = false;
+        let effects =
+            driver
+                .lifecycle
+                .visibility_changed(Layer::Annotation, driver.layers, driver.now);
+        driver.run(effects);
+        assert!(driver.layers.annotation.mapped);
+        assert_eq!(driver.lifecycle.owner_window, Some(SPOTLIGHT));
+    }
+
+    #[test]
+    fn closing_zoom_preserves_spotlight_ownership() {
+        let mut driver = Driver::new(layers((true, true), (false, false, ANNOTATION)));
+        let effects = driver.request(ZoomCommand::On);
+        driver.run(effects);
+        let effects = driver.request(ZoomCommand::Off);
+        driver.run(effects);
+        assert!(!driver.lifecycle.is_zoom_active());
+        assert!(driver.layers.spotlight.mapped);
+        assert_eq!(driver.lifecycle.owner_window, Some(SPOTLIGHT));
+    }
+
+    #[test]
+    fn hidden_spotlight_is_not_acquired_after_motion_cancellation() {
+        let mut driver = Driver::new(layers((false, false), (false, false, ANNOTATION)));
+        let effects = driver.request(ZoomCommand::On);
+        driver.run(effects);
+        driver.layers.spotlight.requested = true;
+        let effects =
+            driver
+                .lifecycle
+                .visibility_changed(Layer::Spotlight, driver.layers, driver.now);
+        let cancel = driver.run_until(effects, "cancel-motion");
+        driver.layers.spotlight.requested = false;
+        driver.seen.clear();
+        let effects = driver.ack(&cancel[0]);
+        driver.run(effects);
+        assert_eq!(driver.lifecycle.owner_window, Some(ZOOM));
+        assert!(
+            !driver
+                .seen
+                .contains(&format!("owner Some({SPOTLIGHT}) restore_focus=false"))
+        );
+    }
+
+    #[test]
+    fn transfer_motion_failure_uses_finite_zoom_stop_recovery() {
+        let mut driver = Driver::new(layers((false, false), (false, false, ANNOTATION)));
+        let effects = driver.request(ZoomCommand::On);
+        driver.run(effects);
+        driver.layers.spotlight.requested = true;
+        let effects =
+            driver
+                .lifecycle
+                .visibility_changed(Layer::Spotlight, driver.layers, driver.now);
+        let cancel = driver.run_until(effects, "cancel-motion");
+        let effects = driver.fail(&cancel[0], "motion worker did not cancel");
+        driver.run(effects);
+        assert!(!driver.lifecycle.is_zoom_active());
+        assert!(driver.layers.spotlight.mapped);
+        assert!(!driver.lifecycle.take_errors().is_empty());
+    }
+
+    #[test]
+    fn failed_or_expired_cleanup_stops_native_retry() {
+        for timeout in [false, true] {
+            let mut driver = Driver::new(layers((true, true), (false, false, ANNOTATION)));
+            let effects =
+                driver
+                    .lifecycle
+                    .visibility_changed(Layer::Spotlight, driver.layers, driver.now);
+            let _owner = driver.run_until(effects, "owner Some(");
+            driver.now += ACK_TIMEOUT + Duration::from_millis(1);
+            let cleanup = driver.lifecycle.expire(driver.layers, driver.now);
+            assert!(matches!(
+                cleanup.as_slice(),
+                [Effect::SetOwner { window: None, .. }]
+            ));
+            let effects = if timeout {
+                driver.now += ACK_TIMEOUT + Duration::from_millis(1);
+                driver.lifecycle.expire(driver.layers, driver.now)
+            } else {
+                driver.fail(&cleanup[0], "native connection cannot release")
+            };
+            assert!(effects.is_empty());
+            assert!(driver.lifecycle.native_cleanup_failed());
+            assert!(
+                driver
+                    .lifecycle
+                    .retry_owner(driver.layers, driver.now)
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn activation_does_not_commit_after_initial_owner_failure() {
+        let mut driver = Driver::new(layers((true, true), (false, false, ANNOTATION)));
+        let effects = driver.request(ZoomCommand::On);
+        let owner = driver.run_until(effects, "owner Some(");
+        let effects = driver.fail(&owner[0], "initial grab denied");
+        driver.run(effects);
+        assert!(!driver.lifecycle.is_zoom_active());
+        assert!(!driver.seen.iter().any(|seen| seen == "commit"));
+        assert!(
+            !driver
+                .seen
+                .contains(&format!("owner Some({ZOOM}) restore_focus=false"))
+        );
     }
 }
