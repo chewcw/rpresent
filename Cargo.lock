@@ -746,6 +746,7 @@ dependencies = [
  "cosmic-text",
  "rpresent-config",
  "thiserror 2.0.18",
+ "tiny-skia",
  "tracing",
 ]
 

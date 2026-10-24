@@ -212,33 +212,44 @@ impl Session {
                 self.editing_requested = true;
             }
             AnnotationCommand::Off => {
+                self.mark_selection();
                 self.cancel();
                 self.selection = None;
                 self.editing_requested = false;
             }
             AnnotationCommand::Toggle => {
                 if self.editing_requested {
+                    self.mark_selection();
                     self.cancel();
                     self.selection = None;
                 }
                 self.editing_requested = !self.editing_requested;
             }
             AnnotationCommand::Clear => {
+                self.mark_all();
+                self.mark_selection();
                 self.cancel();
                 self.selection = None;
                 self.document.clear();
             }
             AnnotationCommand::Undo => {
+                self.mark_all();
+                self.mark_selection();
                 self.cancel();
                 self.selection = None;
                 self.document.undo();
+                self.mark_all();
             }
             AnnotationCommand::Redo => {
+                self.mark_all();
+                self.mark_selection();
                 self.cancel();
                 self.selection = None;
                 self.document.redo();
+                self.mark_all();
             }
             AnnotationCommand::Delete => {
+                self.mark_selection();
                 self.cancel();
                 if let Some(id) = self.selection.take() {
                     self.document.delete(&[id]);
@@ -294,12 +305,16 @@ impl Session {
     }
 
     pub fn cancel(&mut self) {
+        self.mark_edited_object();
+        self.mark_transient();
         self.gesture = None;
         self.text_edit = None;
         self.last_click = None;
     }
 
     fn cancel_transient(&mut self) {
+        self.mark_edited_object();
+        self.mark_transient();
         self.gesture = None;
         self.text_edit = None;
         self.last_click = None;
@@ -313,11 +328,27 @@ impl Session {
             self.draft_key(input);
             return;
         }
+        if input.keysym == KEY_ESCAPE {
+            self.mark_transient();
+            self.mark_selection();
+            self.escape();
+            return;
+        }
         if input.modifiers.ctrl || input.modifiers.super_key || input.modifiers.alt {
             self.document_shortcut(input);
             return;
         }
         self.tool_key(input);
+    }
+
+    fn escape(&mut self) {
+        if self.gesture.is_some() {
+            self.gesture = None;
+        } else if self.selection.is_some() {
+            self.selection = None;
+        } else {
+            self.editing_requested = false;
+        }
     }
 
     fn document_shortcut(&mut self, input: KeyInput) {
@@ -454,22 +485,28 @@ impl Session {
     }
 
     fn draft_insert(&mut self, text: &str) {
+        self.mark_transient();
         if let Some(edit) = self.text_edit.as_mut() {
             edit.draft.insert(text, &mut self.text_system);
         }
+        self.mark_transient();
     }
 
     fn draft_action(&mut self, action: Action) {
+        self.mark_transient();
         if let Some(edit) = self.text_edit.as_mut() {
             edit.draft.perform(action, &mut self.text_system);
         }
+        self.mark_transient();
     }
 
     fn draft_motion(&mut self, motion: Motion, extend_selection: bool) {
+        self.mark_transient();
         if let Some(edit) = self.text_edit.as_mut() {
             edit.draft
                 .move_caret(motion, extend_selection, &mut self.text_system);
         }
+        self.mark_transient();
     }
 
     /// Route pointer input to the draft. Returns false when the pointer is
@@ -509,13 +546,17 @@ impl Session {
             },
             PointerInput::Up { .. } => return true,
         };
+        self.mark_transient();
         if let Some(edit) = self.text_edit.as_mut() {
             edit.draft.perform(action, &mut self.text_system);
         }
+        self.mark_transient();
         true
     }
 
     fn pointer_down(&mut self, root: Point, time: Duration) {
+        self.mark_transient();
+        self.mark_selection();
         match self.tool {
             AnnotationTool::Pen => {
                 self.gesture = Some(Gesture::Pen {
@@ -536,9 +577,12 @@ impl Session {
             AnnotationTool::Select => self.select_down(root, time),
             AnnotationTool::Text => self.text_down(root, time),
         }
+        self.mark_transient();
+        self.mark_selection();
     }
 
     fn pointer_move(&mut self, root: Point) {
+        self.mark_transient();
         match &mut self.gesture {
             Some(Gesture::Pen { origin, points }) => {
                 let local = Point {
@@ -591,9 +635,12 @@ impl Session {
             }
             None => {}
         }
+        self.mark_transient();
     }
 
     fn pointer_up(&mut self, root: Point) {
+        self.mark_transient();
+        self.mark_selection();
         match self.gesture.take() {
             Some(Gesture::Pen {
                 origin,
@@ -613,6 +660,7 @@ impl Session {
                     color,
                     ObjectData::Pen { points, width_px },
                 );
+                self.mark_last_object();
             }
             Some(Gesture::Line { origin, .. }) => {
                 let end = Point {
@@ -623,6 +671,7 @@ impl Session {
                 let color = self.color();
                 self.document
                     .insert(origin, color, ObjectData::Line { end, width_px });
+                self.mark_last_object();
             }
             Some(Gesture::Move {
                 id,
@@ -639,6 +688,7 @@ impl Session {
                 if dragged {
                     self.document.move_by(id, delta);
                 }
+                self.mark_selection();
             }
             Some(Gesture::Erase {
                 mut hidden, last, ..
@@ -728,19 +778,24 @@ impl Session {
     }
 
     fn open_text(&mut self, id: ObjectId) {
-        let Some(object) = self.document.objects().iter().find(|object| object.id == id) else {
+        let Some((data, origin, color)) = self
+            .document
+            .objects()
+            .iter()
+            .find(|object| object.id == id)
+            .map(|object| (object.data.clone(), object.origin, object.color))
+        else {
             return;
         };
         let ObjectData::Text {
             text,
             family,
             size_px,
-        } = object.data.clone()
+        } = data
         else {
             return;
         };
-        let origin = object.origin;
-        let color = object.color;
+        self.mark_all();
         let draft = TextDraft::new(
             self.next_draft_id,
             &text,
@@ -757,9 +812,11 @@ impl Session {
             color,
             draft,
         });
+        self.mark_transient();
     }
 
     fn commit_text(&mut self) {
+        self.mark_transient();
         let Some(edit) = self.text_edit.take() else {
             return;
         };
@@ -787,10 +844,31 @@ impl Session {
                 }
             }
         }
+        self.mark_all();
+        self.mark_selection();
+        self.mark_transient();
     }
 
     fn cancel_text(&mut self) {
+        self.mark_edited_object();
+        self.mark_transient();
+        self.mark_selection();
         self.text_edit = None;
+    }
+
+    fn mark_edited_object(&mut self) {
+        let id = self.text_edit.as_ref().and_then(|edit| edit.object);
+        if let Some(id) = id {
+            if let Some(object) = self
+                .document
+                .objects()
+                .iter()
+                .find(|object| object.id == id)
+                .cloned()
+            {
+                self.mark_object(&object);
+            }
+        }
     }
 
     fn is_text(&self, id: ObjectId) -> bool {
@@ -823,6 +901,107 @@ impl Session {
     /// Take the union of paint bounds changed since the last redraw.
     pub fn take_damage(&mut self) -> Option<Rect> {
         self.damage.take()
+    }
+
+    fn mark(&mut self, bounds: Rect) {
+        if bounds.width == 0 && bounds.height == 0 {
+            return;
+        }
+        self.damage = Some(match self.damage {
+            Some(existing) => existing.union(&bounds),
+            None => bounds,
+        });
+    }
+
+    fn mark_object(&mut self, object: &Object) {
+        let bounds = crate::render::object_paint_bounds(&mut self.text_system, object);
+        self.mark(bounds);
+    }
+
+    fn mark_last_object(&mut self) {
+        if let Some(object) = self.document.objects().last().cloned() {
+            self.mark_object(&object);
+        }
+    }
+
+    fn mark_all(&mut self) {
+        let objects = self.document.objects().to_vec();
+        for object in &objects {
+            self.mark_object(object);
+        }
+    }
+
+    fn mark_selection(&mut self) {
+        if let Some(id) = self.selection {
+            if let Some(object) = self
+                .document
+                .objects()
+                .iter()
+                .find(|object| object.id == id)
+                .cloned()
+            {
+                let bounds =
+                    crate::render::object_paint_bounds(&mut self.text_system, &object).padded(2);
+                self.mark(bounds);
+            }
+        }
+    }
+
+    fn transient_bounds(&mut self) -> Option<Rect> {
+        let mut bounds = match self.gesture.clone() {
+            Some(Gesture::Pen { origin, points }) => {
+                Some(crate::render::stroke_bounds(origin, &points, self.width_px()))
+            }
+            Some(Gesture::Line { origin, end }) => Some(crate::render::stroke_bounds(
+                origin,
+                &[Point::default(), end],
+                self.width_px(),
+            )),
+            Some(Gesture::Move { id, offset, .. }) => {
+                let object = self
+                    .document
+                    .objects()
+                    .iter()
+                    .find(|object| object.id == id)
+                    .cloned();
+                object.map(|mut object| {
+                    object.origin.x += offset.x;
+                    object.origin.y += offset.y;
+                    crate::render::object_paint_bounds(&mut self.text_system, &object)
+                })
+            }
+            Some(Gesture::Erase { hidden, .. }) => {
+                let objects: Vec<Object> = self
+                    .document
+                    .objects()
+                    .iter()
+                    .filter(|object| hidden.contains(&object.id))
+                    .cloned()
+                    .collect();
+                objects
+                    .iter()
+                    .map(|object| crate::render::object_paint_bounds(&mut self.text_system, object))
+                    .reduce(|left, right| left.union(&right))
+            }
+            None => None,
+        };
+        let draft_bounds = self.text_edit.as_mut().map(|edit| {
+            edit.draft
+                .bounds(edit.origin, &mut self.text_system)
+                .padded(TEXT_BOX_PADDING_PX)
+                .padded(2)
+        });
+        bounds = match (bounds, draft_bounds) {
+            (Some(left), Some(right)) => Some(left.union(&right)),
+            (left, right) => left.or(right),
+        };
+        bounds
+    }
+
+    fn mark_transient(&mut self) {
+        if let Some(bounds) = self.transient_bounds() {
+            self.mark(bounds);
+        }
     }
 }
 

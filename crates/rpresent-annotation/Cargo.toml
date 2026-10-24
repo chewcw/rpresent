@@ -8,3 +8,4 @@ rpresent-config = { path = "../rpresent-config" }
 tracing = { workspace = true }
 thiserror = "2"
 cosmic-text = "0.19"
+tiny-skia = { version = "0.11", default-features = false, features = ["std"] }

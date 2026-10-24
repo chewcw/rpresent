@@ -43,10 +43,6 @@ impl TextSystem {
         &mut self.font_system
     }
 
-    pub(crate) fn swash_cache_mut(&mut self) -> &mut SwashCache {
-        &mut self.swash_cache
-    }
-
     /// Layout bounds of a committed text object, including glyph boxes.
     pub fn bounds(&mut self, object: &Object) -> Rect {
         let ObjectData::Text {
@@ -91,6 +87,44 @@ impl TextSystem {
             width: (max_x.ceil() as i32 - x).max(0) as u32,
             height: (max_y.ceil() as i32 - y).max(0) as u32,
         }
+    }
+
+    /// Draw a committed text object and hand every shaded glyph pixel to
+    /// `plot` as `(x, y, width, height, red, green, blue, alpha)`.
+    pub(crate) fn draw_object<F>(
+        &mut self,
+        object: &Object,
+        color: cosmic_text::Color,
+        mut plot: F,
+    ) where
+        F: FnMut(i32, i32, u32, u32, u8, u8, u8, u8),
+    {
+        let ObjectData::Text {
+            text,
+            family,
+            size_px,
+        } = &object.data
+        else {
+            return;
+        };
+        let mut buffer = self.layout_buffer(text, family, *size_px);
+        buffer.draw(
+            &mut self.font_system,
+            &mut self.swash_cache,
+            color,
+            |x, y, width, height, color| {
+                plot(
+                    x,
+                    y,
+                    width,
+                    height,
+                    color.r(),
+                    color.g(),
+                    color.b(),
+                    color.a(),
+                );
+            },
+        );
     }
 
     fn layout_buffer(&mut self, text: &str, family: &str, size_px: u32) -> Buffer {
@@ -332,8 +366,37 @@ impl TextDraft {
         }
     }
 
-    pub(crate) fn editor_mut(&mut self) -> &mut Editor<'static> {
-        &mut self.editor
+    pub(crate) fn draw<F>(
+        &mut self,
+        fonts: &mut TextSystem,
+        text_color: cosmic_text::Color,
+        cursor_color: cosmic_text::Color,
+        selection_color: cosmic_text::Color,
+        selected_text_color: cosmic_text::Color,
+        mut plot: F,
+    ) where
+        F: FnMut(i32, i32, u32, u32, u8, u8, u8, u8),
+    {
+        self.editor.draw(
+            &mut fonts.font_system,
+            &mut fonts.swash_cache,
+            text_color,
+            cursor_color,
+            selection_color,
+            selected_text_color,
+            |x, y, width, height, color| {
+                plot(
+                    x,
+                    y,
+                    width,
+                    height,
+                    color.r(),
+                    color.g(),
+                    color.b(),
+                    color.a(),
+                );
+            },
+        );
     }
 }
 
