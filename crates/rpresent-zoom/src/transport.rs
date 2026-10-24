@@ -10,17 +10,17 @@ mod linux {
 
     use crossbeam_channel::{Receiver, Sender, TryRecvError};
 
-    use crate::session::ZoomRequest;
+    use crate::runtime::ZoomRuntimeRequest;
 
     #[derive(Clone)]
     pub struct ZoomHandle {
-        sender: Option<Sender<ZoomRequest>>,
+        sender: Option<Sender<ZoomRuntimeRequest>>,
         wake: Arc<UnixStream>,
         active: Arc<AtomicBool>,
     }
 
     pub struct ZoomInbox {
-        receiver: Receiver<ZoomRequest>,
+        receiver: Receiver<ZoomRuntimeRequest>,
         wake: UnixStream,
         active: Arc<AtomicBool>,
     }
@@ -46,7 +46,7 @@ mod linux {
     }
 
     impl ZoomHandle {
-        pub fn send(&self, request: ZoomRequest) -> io::Result<()> {
+        pub fn send(&self, request: ZoomRuntimeRequest) -> io::Result<()> {
             self.sender
                 .as_ref()
                 .expect("a live handle owns a sender")
@@ -85,7 +85,7 @@ mod linux {
             }
         }
 
-        pub(crate) fn try_recv(&self) -> Result<ZoomRequest, TryRecvError> {
+        pub fn try_recv(&self) -> Result<ZoomRuntimeRequest, TryRecvError> {
             self.receiver.try_recv()
         }
 
@@ -116,29 +116,27 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::command::ZoomCommand;
         use std::time::Duration;
 
         #[test]
         fn wake_then_drain_preserves_command_order() {
             let (handle, mut inbox) = channel().unwrap();
             assert!(inbox.wake_fd() >= 0);
-            for command in [
-                ZoomCommand::On,
-                ZoomCommand::Reset,
-                ZoomCommand::Off,
-                ZoomCommand::Toggle,
-            ] {
-                handle.send(ZoomRequest::Command(command)).unwrap();
+            let requests = [
+                ZoomRuntimeRequest::Reset { operation: 1 },
+                ZoomRuntimeRequest::Scroll {
+                    delta: 1.0,
+                    root: (10, 20),
+                },
+                ZoomRuntimeRequest::CancelMotion { operation: 2 },
+                ZoomRuntimeRequest::Reset { operation: 3 },
+            ];
+            for request in requests {
+                handle.send(request).unwrap();
             }
             inbox.drain_wake().unwrap();
-            for command in [
-                ZoomCommand::On,
-                ZoomCommand::Reset,
-                ZoomCommand::Off,
-                ZoomCommand::Toggle,
-            ] {
-                assert_eq!(inbox.try_recv(), Ok(ZoomRequest::Command(command)));
+            for request in requests {
+                assert_eq!(inbox.try_recv(), Ok(request));
             }
             assert_eq!(inbox.try_recv(), Err(TryRecvError::Empty));
             assert_eq!(
@@ -160,12 +158,12 @@ mod linux {
                 }
             }
             handle
-                .send(ZoomRequest::Command(ZoomCommand::Reset))
+                .send(ZoomRuntimeRequest::Reset { operation: 7 })
                 .unwrap();
             inbox.drain_wake().unwrap();
             assert_eq!(
                 inbox.try_recv(),
-                Ok(ZoomRequest::Command(ZoomCommand::Reset))
+                Ok(ZoomRuntimeRequest::Reset { operation: 7 })
             );
         }
 
@@ -178,7 +176,7 @@ mod linux {
                     std::thread::spawn(move || {
                         for sequence in 0..128 {
                             handle
-                                .send(ZoomRequest::Scroll {
+                                .send(ZoomRuntimeRequest::Scroll {
                                     delta: 1.0,
                                     root: (producer, sequence),
                                 })
@@ -193,7 +191,7 @@ mod linux {
             inbox.drain_wake().unwrap();
             let mut next = [0; 4];
             for _ in 0..512 {
-                let ZoomRequest::Scroll {
+                let ZoomRuntimeRequest::Scroll {
                     root: (producer, sequence),
                     ..
                 } = inbox.try_recv().unwrap()
@@ -216,10 +214,15 @@ mod linux {
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
             let producer = std::thread::spawn(move || {
-                handle.send(ZoomRequest::Command(ZoomCommand::On)).unwrap()
+                handle
+                    .send(ZoomRuntimeRequest::Reset { operation: 1 })
+                    .unwrap()
             });
             assert_eq!(inbox.wake.read(&mut [0]).unwrap(), 1);
-            assert_eq!(inbox.try_recv(), Ok(ZoomRequest::Command(ZoomCommand::On)));
+            assert_eq!(
+                inbox.try_recv(),
+                Ok(ZoomRuntimeRequest::Reset { operation: 1 })
+            );
             producer.join().unwrap();
         }
 
@@ -239,7 +242,9 @@ mod linux {
         fn only_the_inbox_publishes_active_status_and_clears_it_on_drop() {
             let (handle, inbox) = channel().unwrap();
             let cloned = handle.clone();
-            handle.send(ZoomRequest::Command(ZoomCommand::On)).unwrap();
+            handle
+                .send(ZoomRuntimeRequest::Reset { operation: 1 })
+                .unwrap();
             assert!(!handle.is_active());
             inbox.publish_active(true);
             assert!(handle.is_active());
@@ -261,7 +266,7 @@ pub use linux::{ZoomHandle, ZoomInbox, channel};
 mod unsupported {
     use std::io;
 
-    use crate::session::ZoomRequest;
+    use crate::runtime::ZoomRuntimeRequest;
 
     #[derive(Clone)]
     pub struct ZoomHandle;
@@ -275,7 +280,7 @@ mod unsupported {
     }
 
     impl ZoomHandle {
-        pub fn send(&self, _request: ZoomRequest) -> io::Result<()> {
+        pub fn send(&self, _request: ZoomRuntimeRequest) -> io::Result<()> {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "zoom transport requires Linux",

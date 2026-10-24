@@ -3,6 +3,7 @@ use rpresent_config::ShortcutConfig;
 use std::time::Duration;
 
 use crate::command::{AnnotationCommand, AppCommand, SpotlightCommand, ZoomCommand};
+use crate::native_input::NativeEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveMode {
@@ -41,10 +42,14 @@ pub enum InputAction {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum AppEvent {
     Command(crate::command::AppCommand),
     Input(InputAction),
+    Native(NativeEvent),
+    SpotlightRuntime(rpresent_spotlight::SpotlightEvent),
+    ZoomRuntime(rpresent_zoom::ZoomEvent),
+    IpcFailed(String),
 }
 
 /// Feature facts the input coordinator needs. Callers keep requested activation

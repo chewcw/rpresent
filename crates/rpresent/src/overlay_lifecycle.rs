@@ -818,7 +818,7 @@ impl WindowLifecycle {
     }
 
     fn desired_visible(&self, layer: Layer, layers: &LayerSnapshot) -> bool {
-        !self.suppressed && layers.state(layer).requested
+        !self.suppressed && layers.state(layer).window.is_some() && layers.state(layer).requested
     }
 
     fn effective_order(&self, layers: &LayerSnapshot) -> [Option<u32>; 3] {

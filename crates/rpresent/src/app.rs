@@ -4,14 +4,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
 
-use rpresent_annotation::{AnnotationController, AnnotationState};
+use rpresent_annotation::AnnotationState;
 use rpresent_config::{ConfigService, default_config_path, write_default_config};
-use rpresent_spotlight::{SpotlightController, SpotlightRuntimeMessage};
-use rpresent_zoom::{ZoomRequest, channel as zoom_channel, run_overlay};
+use rpresent_spotlight::SpotlightRuntimeMessage;
+use rpresent_zoom::{channel as zoom_channel, run_overlay};
 
 use crate::command::AppCommand;
+use crate::coordinator::{Coordinator, CoordinatorOutputs};
 use crate::input::AppEvent;
 use crate::ipc;
+use crate::native_input::channel as native_channel;
 
 #[derive(Debug, Parser, Clone, PartialEq, Eq)]
 #[command(
@@ -186,93 +188,78 @@ fn run_daemon(config_service: Arc<ConfigService>) -> Result<(), AppError> {
     })?;
     let socket_path = ipc::socket_path_for(&config_service.app().socket_name)?;
 
-    // Forward IPC commands into unified event channel
+    #[cfg(not(target_os = "linux"))]
+    return Err(AppError::Zoom(
+        rpresent_zoom::OverlayError::UnsupportedPlatform,
+    ));
+    #[cfg(target_os = "linux")]
+    let (native_handle, native_inbox) = native_channel().map_err(|error| {
+        AppError::Zoom(rpresent_zoom::OverlayError::Runtime(format!(
+            "failed to create native input transport: {error}"
+        )))
+    })?;
+
+    // Forward IPC commands into the unified event channel.
     let event_tx_for_ipc = event_tx.clone();
     std::thread::spawn(move || {
         for cmd in ipc_rx {
             let _ = event_tx_for_ipc.send(AppEvent::Command(cmd));
         }
     });
+    let event_tx_for_ipc_error = event_tx.clone();
     std::thread::spawn(move || {
         if let Err(error) = ipc::serve(&socket_path, ipc_tx) {
             tracing::error!(error = %error, "ipc server failed");
-            std::process::exit(1);
+            let _ = event_tx_for_ipc_error.send(AppEvent::IpcFailed(error.to_string()));
         }
     });
 
-    // X11 input capture (Linux only)
+    let zoom_events: rpresent_zoom::ZoomEventSink = {
+        let events = event_tx.clone();
+        Arc::new(move |event| {
+            let _ = events.send(AppEvent::ZoomRuntime(event));
+        })
+    };
+    let spotlight_events: rpresent_spotlight::SpotlightEventSink = {
+        let events = event_tx.clone();
+        Arc::new(move |event| {
+            let _ = events.send(AppEvent::SpotlightRuntime(event));
+        })
+    };
+
     #[cfg(target_os = "linux")]
-    crate::x11_input::spawn(Arc::clone(&config_service), event_tx, zoom_handle.clone());
-    #[cfg(not(target_os = "linux"))]
-    let _ = event_tx;
-
-    let controller_service = Arc::clone(&config_service);
-    let zoom_command_handle = zoom_handle.clone();
-    std::thread::spawn(move || {
-        let mut spotlight_controller =
-            SpotlightController::new(controller_service.spotlight().enabled_on_start);
-        let mut annotation_controller = AnnotationController::new(
-            controller_service.annotation().enabled_on_start,
-            controller_service.annotation().default_tool,
-            controller_service.annotation().history_depth,
-        );
-        let _ = spotlight_tx.send(SpotlightRuntimeMessage::Visibility(
-            spotlight_controller.state(),
-        ));
-        let _ = annotation_tx.send(annotation_controller.state());
-
-        for event in event_rx {
-            match event {
-                AppEvent::Command(AppCommand::Spotlight(command)) => {
-                    if spotlight_controller.apply(command) {
-                        let _ = spotlight_tx.send(SpotlightRuntimeMessage::Visibility(
-                            spotlight_controller.state(),
-                        ));
-                    }
-                }
-                AppEvent::Command(AppCommand::Annotation(command)) => {
-                    if annotation_controller.apply(command) {
-                        let _ = annotation_tx.send(annotation_controller.state());
-                    }
-                }
-                AppEvent::Command(AppCommand::Zoom(command)) => {
-                    let _ = zoom_command_handle.send(ZoomRequest::Command(command));
-                }
-                AppEvent::Input(crate::input::InputAction::SpotlightWheel { delta }) => {
-                    let _ = spotlight_tx.send(SpotlightRuntimeMessage::ResizeBy(
-                        delta * controller_service.spotlight().wheel_speed,
-                    ));
-                }
-                AppEvent::Input(crate::input::InputAction::ZoomWheel {
-                    delta,
-                    cursor_x,
-                    cursor_y,
-                }) => {
-                    let _ = zoom_command_handle.send(ZoomRequest::Scroll {
-                        delta: f64::from(delta),
-                        root: (i32::from(cursor_x), i32::from(cursor_y)),
-                    });
-                }
-            }
-        }
-    });
-
+    {
+        let events: crate::native_input::NativeEventSink = {
+            let event_tx = event_tx.clone();
+            Arc::new(move |event| {
+                let _ = event_tx.send(AppEvent::Native(event));
+            })
+        };
+        crate::x11_input::spawn(Arc::clone(&config_service), native_inbox, events);
+    }
     let spotlight_service = Arc::clone(&config_service);
     let spotlight_handle = std::thread::spawn(move || {
-        rpresent_spotlight::run_overlay(spotlight_service, spotlight_rx)
+        rpresent_spotlight::run_overlay(spotlight_service, spotlight_rx, spotlight_events)
     });
     let annotation_service = Arc::clone(&config_service);
     let annotation_handle = std::thread::spawn(move || {
         rpresent_annotation::run_overlay(annotation_service, annotation_rx)
     });
     let zoom_service = Arc::clone(&config_service);
-    let zoom_runtime = std::thread::spawn(move || run_overlay(zoom_service, zoom_inbox));
-    if config_service.zoom().enabled_on_start {
-        let _ = zoom_handle.send(ZoomRequest::Command(rpresent_zoom::ZoomCommand::On));
-    }
+    let zoom_runtime =
+        std::thread::spawn(move || run_overlay(zoom_service, zoom_inbox, zoom_events));
 
-    spotlight_handle.join().unwrap()?;
-    annotation_handle.join().unwrap()?;
-    zoom_runtime.join().unwrap()?;
-    Ok(())
+    let outputs = CoordinatorOutputs {
+        spotlight: spotlight_tx,
+        zoom: zoom_handle,
+        native: native_handle,
+        annotation: annotation_tx,
+    };
+    let coordinator_result = Coordinator::run(Arc::clone(&config_service), event_rx, outputs);
+
+    let _ = spotlight_handle.join();
+    let _ = annotation_handle.join();
+    let _ = zoom_runtime.join();
+
+    coordinator_result.map_err(|error| AppError::Zoom(rpresent_zoom::OverlayError::Runtime(error)))
 }

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
+#[cfg(test)]
 use crate::controller::SpotlightState;
 
 pub fn spotlight_alpha(distance_px: f32, radius_px: f32, softness_px: f32) -> f32 {
@@ -68,6 +69,7 @@ impl SpotlightFrame {
 }
 
 pub(crate) trait SpotlightOverlayBackend {
+    fn window_id(&self) -> u32;
     fn show(&mut self) -> Result<(), OverlayError>;
     fn hide(&mut self) -> Result<(), OverlayError>;
     fn surface_size(&self) -> Result<(u16, u16), OverlayError>;
@@ -82,9 +84,24 @@ pub(crate) trait SpotlightOverlayBackend {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SpotlightRuntimeMessage {
-    Visibility(SpotlightState),
+    Present { operation: u64, visible: bool },
     ResizeBy(f32),
 }
+
+#[derive(Debug)]
+pub enum SpotlightEvent {
+    Ready {
+        window: u32,
+    },
+    Presented {
+        operation: u64,
+        visible: bool,
+        result: Result<(), String>,
+    },
+    Exited(Result<(), String>),
+}
+
+pub type SpotlightEventSink = Arc<dyn Fn(SpotlightEvent) + Send + Sync>;
 
 pub(crate) struct SpotlightOverlayRuntime<B> {
     config_service: Arc<rpresent_config::ConfigService>,
@@ -124,7 +141,7 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
         message: SpotlightRuntimeMessage,
     ) -> Result<(), OverlayError> {
         match message {
-            SpotlightRuntimeMessage::Visibility(state) => self.process_state(state),
+            SpotlightRuntimeMessage::Present { visible, .. } => self.process_visibility(visible),
             SpotlightRuntimeMessage::ResizeBy(delta) => {
                 let next = (self.radius_px as f32 + delta).round().clamp(24.0, 4096.0) as u32;
                 if next != self.radius_px {
@@ -139,6 +156,29 @@ impl<B: SpotlightOverlayBackend> SpotlightOverlayRuntime<B> {
         }
     }
 
+    pub(crate) fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    fn process_visibility(&mut self, visible: bool) -> Result<(), OverlayError> {
+        if visible {
+            if !self.visible {
+                self.backend.show()?;
+                self.visible = true;
+                self.needs_redraw = true;
+            }
+            self.tick()
+        } else {
+            if self.visible {
+                self.backend.hide()?;
+                self.visible = false;
+                self.needs_redraw = false;
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn process_state(&mut self, state: SpotlightState) -> Result<(), OverlayError> {
         match state {
             SpotlightState::On => {
@@ -238,21 +278,33 @@ pub(crate) fn build_spotlight_frame(
 pub fn run_overlay(
     config_service: Arc<rpresent_config::ConfigService>,
     rx: Receiver<SpotlightRuntimeMessage>,
+    events: SpotlightEventSink,
 ) -> Result<(), OverlayError> {
     use std::sync::mpsc::RecvTimeoutError;
     use std::time::Duration;
 
     tracing::debug!("starting spotlight overlay");
-    let backend = crate::x11::X11SpotlightOverlay::new()?;
+    let backend = match crate::x11::X11SpotlightOverlay::new() {
+        Ok(backend) => backend,
+        Err(error) => {
+            events(SpotlightEvent::Exited(Err(error.to_string())));
+            return Err(error);
+        }
+    };
+    events(SpotlightEvent::Ready {
+        window: backend.window_id(),
+    });
     let mut runtime = SpotlightOverlayRuntime::new(config_service, backend);
-    let mut visible = false;
 
     loop {
-        let next_msg = if visible {
+        let next_msg = if runtime.is_visible() {
             match rx.recv_timeout(Duration::from_millis(16)) {
                 Ok(msg) => Some(msg),
                 Err(RecvTimeoutError::Timeout) => {
-                    runtime.tick()?;
+                    if let Err(error) = runtime.tick() {
+                        events(SpotlightEvent::Exited(Err(error.to_string())));
+                        return Err(error);
+                    }
                     None
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -265,14 +317,34 @@ pub fn run_overlay(
         };
 
         if let Some(msg) = next_msg {
-            // ResizeBy does not change visibility — only Visibility messages control the recv-mode timing
-            if let SpotlightRuntimeMessage::Visibility(state) = msg {
-                visible = matches!(state, SpotlightState::On);
+            let presentation = match msg {
+                SpotlightRuntimeMessage::Present { operation, visible } => {
+                    Some((operation, visible))
+                }
+                SpotlightRuntimeMessage::ResizeBy(_) => None,
+            };
+            if let Err(error) = runtime.process_message(msg) {
+                if let Some((operation, visible)) = presentation {
+                    events(SpotlightEvent::Presented {
+                        operation,
+                        visible,
+                        result: Err(error.to_string()),
+                    });
+                }
+                events(SpotlightEvent::Exited(Err(error.to_string())));
+                return Err(error);
             }
-            runtime.process_message(msg)?;
+            if let Some((operation, visible)) = presentation {
+                events(SpotlightEvent::Presented {
+                    operation,
+                    visible,
+                    result: Ok(()),
+                });
+            }
         }
     }
 
+    events(SpotlightEvent::Exited(Ok(())));
     Ok(())
 }
 
@@ -280,8 +352,11 @@ pub fn run_overlay(
 pub fn run_overlay(
     _config_service: Arc<rpresent_config::ConfigService>,
     _rx: Receiver<SpotlightRuntimeMessage>,
+    events: SpotlightEventSink,
 ) -> Result<(), OverlayError> {
-    Err(OverlayError::UnsupportedPlatform)
+    let error = OverlayError::UnsupportedPlatform;
+    events(SpotlightEvent::Exited(Err(error.to_string())));
+    Err(error)
 }
 
 #[cfg(test)]
@@ -304,6 +379,7 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct FakeBackend {
+        window_id: u32,
         calls: Vec<&'static str>,
         redraw_radii: Vec<u32>,
         surface_size: (u16, u16),
@@ -311,6 +387,10 @@ mod tests {
     }
 
     impl SpotlightOverlayBackend for FakeBackend {
+        fn window_id(&self) -> u32 {
+            self.window_id
+        }
+
         fn show(&mut self) -> Result<(), OverlayError> {
             self.calls.push("show");
             Ok(())
@@ -354,10 +434,16 @@ mod tests {
             backend,
         );
 
-        tx.send(SpotlightRuntimeMessage::Visibility(SpotlightState::On))
-            .unwrap();
-        tx.send(SpotlightRuntimeMessage::Visibility(SpotlightState::Off))
-            .unwrap();
+        tx.send(SpotlightRuntimeMessage::Present {
+            operation: 1,
+            visible: true,
+        })
+        .unwrap();
+        tx.send(SpotlightRuntimeMessage::Present {
+            operation: 2,
+            visible: false,
+        })
+        .unwrap();
         drop(tx);
 
         runtime.run(rx).unwrap();
@@ -422,7 +508,10 @@ mod tests {
         let mut runtime =
             SpotlightOverlayRuntime::new(std::sync::Arc::clone(&config_service), backend);
         runtime
-            .process_message(SpotlightRuntimeMessage::Visibility(SpotlightState::On))
+            .process_message(SpotlightRuntimeMessage::Present {
+                operation: 1,
+                visible: true,
+            })
             .unwrap();
         runtime
             .process_message(SpotlightRuntimeMessage::ResizeBy(20.0))
@@ -511,7 +600,10 @@ mod tests {
         let mut runtime =
             SpotlightOverlayRuntime::new(std::sync::Arc::clone(&config_service), backend);
         runtime
-            .process_message(SpotlightRuntimeMessage::Visibility(SpotlightState::On))
+            .process_message(SpotlightRuntimeMessage::Present {
+                operation: 1,
+                visible: true,
+            })
             .unwrap();
         runtime
             .process_message(SpotlightRuntimeMessage::ResizeBy(20.0))
@@ -519,6 +611,42 @@ mod tests {
 
         assert_eq!(runtime.radius_px, 120);
         assert_eq!(config_service.spotlight().radius_px, 100);
+    }
+
+    #[test]
+    fn capture_hiding_preserves_the_live_radius() {
+        let backend = FakeBackend {
+            surface_size: (80, 60),
+            ..Default::default()
+        };
+        let mut runtime = SpotlightOverlayRuntime::new(
+            config_service(rpresent_config::SpotlightConfig::default()),
+            backend,
+        );
+        runtime
+            .process_message(SpotlightRuntimeMessage::ResizeBy(12.0))
+            .unwrap();
+        let radius = runtime.radius_px;
+        runtime
+            .process_message(SpotlightRuntimeMessage::Present {
+                operation: 1,
+                visible: true,
+            })
+            .unwrap();
+        runtime
+            .process_message(SpotlightRuntimeMessage::Present {
+                operation: 2,
+                visible: false,
+            })
+            .unwrap();
+        runtime
+            .process_message(SpotlightRuntimeMessage::Present {
+                operation: 3,
+                visible: true,
+            })
+            .unwrap();
+        assert_eq!(runtime.radius_px, radius);
+        assert!(runtime.visible);
     }
 
     #[test]

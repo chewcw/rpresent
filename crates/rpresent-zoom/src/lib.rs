@@ -1,6 +1,7 @@
 pub mod capture;
 pub mod command;
 pub mod navigation;
+pub mod runtime;
 pub mod session;
 pub mod transport;
 
@@ -21,6 +22,7 @@ pub enum OverlayError {
 pub use capture::{CaptureError, CapturedFrame};
 pub use command::{CommandParseError, ZoomCommand};
 pub use rpresent_config::ZoomConfig;
+pub use runtime::{ZoomEvent, ZoomEventSink, ZoomRuntimeRequest};
 pub use session::{MonitorRect, PointerInput, SessionEffect, ZoomRequest, ZoomSession};
 pub use transport::{ZoomHandle, ZoomInbox, channel};
 
@@ -31,6 +33,10 @@ pub use native::run_overlay;
 pub fn run_overlay(
     _config_service: std::sync::Arc<rpresent_config::ConfigService>,
     _inbox: ZoomInbox,
+    events: ZoomEventSink,
 ) -> Result<(), OverlayError> {
+    events(ZoomEvent::Exited(Err(
+        OverlayError::UnsupportedPlatform.to_string()
+    )));
     Err(OverlayError::UnsupportedPlatform)
 }

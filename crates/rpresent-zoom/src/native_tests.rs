@@ -1,39 +1,245 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use rpresent_config::{Config, ConfigService};
 
-use crate::{ZoomCommand, ZoomRequest, channel, run_overlay};
+use crate::runtime::{ZoomEvent, ZoomEventSink, ZoomRuntimeRequest};
+use crate::{channel, run_overlay};
+
+fn event_sink() -> (ZoomEventSink, mpsc::Receiver<ZoomEvent>) {
+    let (tx, rx) = mpsc::channel();
+    let sink: ZoomEventSink = Arc::new(move |event| {
+        let _ = tx.send(event);
+    });
+    (sink, rx)
+}
+
+fn wait_for(rx: &mpsc::Receiver<ZoomEvent>, predicate: impl Fn(&ZoomEvent) -> bool) -> ZoomEvent {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = Vec::new();
+    while Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(event) => {
+                if predicate(&event) {
+                    return event;
+                }
+                seen.push(format!("{event:?}"));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    panic!("expected zoom event was not reported; saw {seen:?}");
+}
+
+fn drain_for(rx: &mpsc::Receiver<ZoomEvent>, window: Duration) -> Vec<ZoomEvent> {
+    let deadline = Instant::now() + window;
+    let mut events = Vec::new();
+    while Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(event) => events.push(event),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    events
+}
+
+fn config() -> Arc<ConfigService> {
+    Arc::new(ConfigService::new(
+        PathBuf::from("native-test.toml"),
+        Config::default(),
+    ))
+}
 
 #[test]
 #[ignore = "requires a private X11 display with GLX"]
-fn native_activation_publishes_only_after_a_real_window_is_ready() {
-    let config = Arc::new(ConfigService::new(
-        PathBuf::from("native-test.toml"),
-        Config::default(),
-    ));
+fn native_activation_commits_only_after_preparation() {
     let (handle, inbox) = channel().expect("zoom transport");
-    let runtime = thread::spawn(move || run_overlay(config, inbox));
+    let (sink, events) = event_sink();
+    let runtime = thread::spawn(move || run_overlay(config(), inbox, sink));
+
+    wait_for(&events, |event| matches!(event, ZoomEvent::Ready));
 
     handle
-        .send(ZoomRequest::Command(ZoomCommand::On))
-        .expect("activate zoom");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !handle.is_active() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    if !handle.is_active() {
-        drop(handle);
-        let result = runtime.join().expect("native runtime thread");
-        panic!("native zoom activation did not complete: {result:?}");
-    }
+        .send(ZoomRuntimeRequest::SelectMonitor { operation: 1 })
+        .expect("select monitor");
+    let ZoomEvent::Selected { monitor, .. } =
+        wait_for(&events, |event| matches!(event, ZoomEvent::Selected { .. }))
+    else {
+        unreachable!()
+    };
 
     handle
-        .send(ZoomRequest::Command(ZoomCommand::Off))
+        .send(ZoomRuntimeRequest::Prepare {
+            operation: 2,
+            monitor,
+        })
+        .expect("prepare zoom");
+    let ZoomEvent::Prepared { window, .. } =
+        wait_for(&events, |event| matches!(event, ZoomEvent::Prepared { .. }))
+    else {
+        unreachable!()
+    };
+    assert_ne!(window, 0);
+    assert!(
+        !handle.is_active(),
+        "preparation must not publish active zoom"
+    );
+
+    handle
+        .send(ZoomRuntimeRequest::Commit { operation: 3 })
+        .expect("commit zoom");
+    wait_for(&events, |event| {
+        matches!(event, ZoomEvent::Committed { .. })
+    });
+    assert!(handle.is_active());
+
+    handle
+        .send(ZoomRuntimeRequest::Close { operation: 4 })
         .expect("close zoom");
+    wait_for(&events, |event| matches!(event, ZoomEvent::Closed { .. }));
+    assert!(!handle.is_active());
+
     drop(handle);
+    runtime
+        .join()
+        .expect("native runtime thread")
+        .expect("native runtime");
+}
+
+#[test]
+#[ignore = "requires a private X11 display with GLX"]
+fn native_prepare_failure_leaves_zoom_inactive_and_close_is_idempotent() {
+    let (handle, inbox) = channel().expect("zoom transport");
+    let (sink, events) = event_sink();
+    let runtime = thread::spawn(move || run_overlay(config(), inbox, sink));
+
+    wait_for(&events, |event| matches!(event, ZoomEvent::Ready));
+
+    handle
+        .send(ZoomRuntimeRequest::Prepare {
+            operation: 1,
+            monitor: crate::session::MonitorRect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
+        })
+        .expect("prepare zoom");
+    wait_for(&events, |event| matches!(event, ZoomEvent::Failed { .. }));
+    assert!(!handle.is_active());
+
+    handle
+        .send(ZoomRuntimeRequest::Close { operation: 2 })
+        .expect("close zoom");
+    wait_for(&events, |event| matches!(event, ZoomEvent::Closed { .. }));
+    assert!(!handle.is_active());
+
+    drop(handle);
+    runtime
+        .join()
+        .expect("native runtime thread")
+        .expect("native runtime");
+}
+
+#[test]
+#[ignore = "requires a private X11 display with GLX"]
+fn native_reset_and_scroll_reuse_the_prepared_capture() {
+    let (handle, inbox) = channel().expect("zoom transport");
+    let (sink, events) = event_sink();
+    let runtime = thread::spawn(move || run_overlay(config(), inbox, sink));
+
+    wait_for(&events, |event| matches!(event, ZoomEvent::Ready));
+    handle
+        .send(ZoomRuntimeRequest::SelectMonitor { operation: 1 })
+        .expect("select monitor");
+    let ZoomEvent::Selected { monitor, .. } =
+        wait_for(&events, |event| matches!(event, ZoomEvent::Selected { .. }))
+    else {
+        unreachable!()
+    };
+    handle
+        .send(ZoomRuntimeRequest::Prepare {
+            operation: 2,
+            monitor,
+        })
+        .expect("prepare zoom");
+    wait_for(&events, |event| matches!(event, ZoomEvent::Prepared { .. }));
+
+    handle
+        .send(ZoomRuntimeRequest::Commit { operation: 3 })
+        .expect("commit zoom");
+    wait_for(&events, |event| {
+        matches!(event, ZoomEvent::Committed { .. })
+    });
+
+    handle
+        .send(ZoomRuntimeRequest::Reset { operation: 4 })
+        .expect("reset zoom");
+    wait_for(&events, |event| matches!(event, ZoomEvent::Reset { .. }));
+    handle
+        .send(ZoomRuntimeRequest::Scroll {
+            delta: 1.0,
+            root: (10, 10),
+        })
+        .expect("scroll zoom");
+    handle
+        .send(ZoomRuntimeRequest::Reset { operation: 5 })
+        .expect("reset zoom");
+    wait_for(&events, |event| matches!(event, ZoomEvent::Reset { .. }));
+
+    let unexpected = drain_for(&events, Duration::from_millis(300));
+    assert!(
+        !unexpected
+            .iter()
+            .any(|event| matches!(event, ZoomEvent::Prepared { .. } | ZoomEvent::Failed { .. })),
+        "reset and scroll must not capture again: {unexpected:?}"
+    );
+    assert!(handle.is_active());
+
+    handle
+        .send(ZoomRuntimeRequest::Close { operation: 6 })
+        .expect("close zoom");
+    wait_for(&events, |event| matches!(event, ZoomEvent::Closed { .. }));
+
+    drop(handle);
+    runtime
+        .join()
+        .expect("native runtime thread")
+        .expect("native runtime");
+}
+
+#[test]
+#[ignore = "requires a private X11 display with GLX"]
+fn native_disconnection_after_preparation_exits_cleanly() {
+    let (handle, inbox) = channel().expect("zoom transport");
+    let (sink, events) = event_sink();
+    let runtime = thread::spawn(move || run_overlay(config(), inbox, sink));
+
+    wait_for(&events, |event| matches!(event, ZoomEvent::Ready));
+    handle
+        .send(ZoomRuntimeRequest::SelectMonitor { operation: 1 })
+        .expect("select monitor");
+    let ZoomEvent::Selected { monitor, .. } =
+        wait_for(&events, |event| matches!(event, ZoomEvent::Selected { .. }))
+    else {
+        unreachable!()
+    };
+    handle
+        .send(ZoomRuntimeRequest::Prepare {
+            operation: 2,
+            monitor,
+        })
+        .expect("prepare zoom");
+    wait_for(&events, |event| matches!(event, ZoomEvent::Prepared { .. }));
+
+    drop(handle);
+    wait_for(&events, |event| matches!(event, ZoomEvent::Exited(_)));
     runtime
         .join()
         .expect("native runtime thread")

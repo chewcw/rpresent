@@ -570,6 +570,7 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "directories",
+ "libc",
  "rpresent-annotation",
  "rpresent-config",
  "rpresent-spotlight",

@@ -6,23 +6,40 @@ use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::Event;
 use x11rb::protocol::randr;
 use x11rb::protocol::xproto::{
-    ChangeWindowAttributesAux, ConnectionExt as _, EventMask, GrabMode, ImageFormat, InputFocus,
-    VisualClass, Window,
+    ChangeWindowAttributesAux, ConnectionExt as _, EventMask, ImageFormat, VisualClass, Window,
 };
 use x11rb::rust_connection::RustConnection;
 
 use crate::OverlayError;
+use crate::ZoomCommand;
 use crate::capture::{CaptureError, CapturedFrame};
 use crate::glx::GlxRenderer;
-use crate::session::{MonitorRect, PointerInput, SessionEffect, ZoomRequest, ZoomSession};
+use crate::runtime::{ZoomEvent, ZoomEventSink, ZoomRuntimeRequest};
+use crate::session::{MonitorRect, PointerInput, ZoomRequest, ZoomSession};
 use crate::transport::ZoomInbox;
 
 const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 const MAX_ADVANCE: Duration = Duration::from_millis(100);
 
+/// Run the GL-owning zoom worker. Preparation, commit, and teardown arrive as
+/// explicit requests; the worker never decides which feature owns input.
 pub fn run_overlay(
     config_service: Arc<rpresent_config::ConfigService>,
     mut inbox: ZoomInbox,
+    events: ZoomEventSink,
+) -> Result<(), OverlayError> {
+    let result = run_inner(config_service, &mut inbox, Arc::clone(&events));
+    match &result {
+        Ok(()) => events(ZoomEvent::Exited(Ok(()))),
+        Err(error) => events(ZoomEvent::Exited(Err(error.to_string()))),
+    }
+    result
+}
+
+fn run_inner(
+    config_service: Arc<rpresent_config::ConfigService>,
+    inbox: &mut ZoomInbox,
+    events: ZoomEventSink,
 ) -> Result<(), OverlayError> {
     let (connection, screen_num) = x11rb::connect(None).map_err(runtime_error)?;
     let screen = connection
@@ -42,8 +59,13 @@ pub fn run_overlay(
     let mut session = ZoomSession::new(navigation);
     let x11_fd = connection.stream().as_raw_fd();
     let mut window = None;
+    let mut selected = None;
+    let mut close_requested = false;
     let mut last_frame_start = Instant::now();
     let mut deadline = None;
+
+    // Idle runtime ready: no window, no capture, no active publication.
+    events(ZoomEvent::Ready);
 
     loop {
         inbox.drain_wake().map_err(runtime_error)?;
@@ -54,30 +76,31 @@ pub fn run_overlay(
             root_rect,
             &mut session,
             &mut window,
-            &mut inbox,
+            &mut selected,
+            inbox,
+            &events,
         )? {
             LoopAction::Exit => break,
             LoopAction::Continue => {}
         }
 
         while let Some(event) = connection.poll_for_event().map_err(runtime_error)? {
-            let topology_changed = matches!(event, Event::RandrNotify(_));
-            let close_requested = handle_event(
-                event,
-                &mut session,
-                &mut window,
-                &config_service.shortcuts().wheel_modifier,
-            )?;
-            let monitor_lost = topology_changed
-                && window.as_ref().is_some_and(|active| {
-                    !query_monitors(&connection, root).contains(&active.monitor)
-                });
-            if close_requested || monitor_lost {
-                close_window(&connection, &mut window)?;
-                session.closed();
-                inbox.publish_active(false);
-                deadline = None;
+            match event {
+                Event::Expose(_) => session.mark_dirty(),
+                Event::RandrNotify(_) => {
+                    let monitor_lost = window.as_ref().is_some_and(|active| {
+                        !query_monitors(&connection, root).contains(&active.monitor)
+                    });
+                    if monitor_lost && !close_requested {
+                        close_requested = true;
+                        events(ZoomEvent::CloseRequested);
+                    }
+                }
+                _ => {}
             }
+        }
+        if window.is_none() {
+            close_requested = false;
         }
 
         let now = Instant::now();
@@ -150,6 +173,7 @@ enum LoopAction {
     Exit,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_requests(
     connection: &RustConnection,
     screen_num: usize,
@@ -157,7 +181,9 @@ fn handle_requests(
     root_rect: MonitorRect,
     session: &mut ZoomSession,
     window: &mut Option<NativeWindow>,
+    selected: &mut Option<MonitorRect>,
     inbox: &mut ZoomInbox,
+    events: &ZoomEventSink,
 ) -> Result<LoopAction, OverlayError> {
     loop {
         let request = match inbox.try_recv() {
@@ -165,53 +191,111 @@ fn handle_requests(
             Err(crossbeam_channel::TryRecvError::Empty) => break,
             Err(crossbeam_channel::TryRecvError::Disconnected) => return Ok(LoopAction::Exit),
         };
-        let effect = session.request(request);
-        match effect {
-            SessionEffect::None => {}
-            SessionEffect::Activate => {
-                if window.is_none() {
-                    match activate(connection, screen_num, root, root_rect, session) {
-                        Ok(native_window) => {
-                            *window = Some(native_window);
-                            inbox.publish_active(true);
-                        }
-                        Err(error) => {
-                            tracing::error!(?error, "zoom activation failed");
-                            #[cfg(test)]
-                            eprintln!("zoom activation failed: {error:?}");
-                            session.closed();
-                            inbox.publish_active(false);
-                        }
+
+        match request {
+            ZoomRuntimeRequest::SelectMonitor { operation } => {
+                match select_monitor_request(connection, root, root_rect) {
+                    Ok(monitor) => {
+                        *selected = Some(monitor);
+                        events(ZoomEvent::Selected { operation, monitor });
+                    }
+                    Err(error) => {
+                        tracing::error!(?error, "zoom monitor selection failed");
+                        events(ZoomEvent::Failed {
+                            operation,
+                            error: error.to_string(),
+                        });
                     }
                 }
             }
-            SessionEffect::Close => {
+            ZoomRuntimeRequest::Prepare { operation, monitor } => {
+                match prepare(connection, screen_num, root, monitor, session) {
+                    Ok(native_window) => {
+                        let window_id = native_window.window;
+                        *window = Some(native_window);
+                        events(ZoomEvent::Prepared {
+                            operation,
+                            window: window_id,
+                        });
+                    }
+                    Err(error) => {
+                        tracing::error!(?error, "zoom preparation failed");
+                        events(ZoomEvent::Failed {
+                            operation,
+                            error: error.to_string(),
+                        });
+                    }
+                }
+            }
+            ZoomRuntimeRequest::Commit { operation } => {
+                if window.is_some() {
+                    inbox.publish_active(true);
+                    events(ZoomEvent::Committed { operation });
+                } else {
+                    events(ZoomEvent::Failed {
+                        operation,
+                        error: "no prepared zoom window to commit".to_owned(),
+                    });
+                }
+            }
+            ZoomRuntimeRequest::Close { operation } => {
                 close_window(connection, window)?;
                 session.closed();
                 inbox.publish_active(false);
+                events(ZoomEvent::Closed { operation });
+            }
+            ZoomRuntimeRequest::Reset { operation } => {
+                if session.is_active() {
+                    session.request(ZoomRequest::Command(ZoomCommand::Reset));
+                }
+                events(ZoomEvent::Reset { operation });
+            }
+            ZoomRuntimeRequest::Scroll {
+                delta,
+                root: position,
+            } => {
+                if session.is_active() {
+                    session.request(ZoomRequest::Scroll {
+                        delta,
+                        root: position,
+                    });
+                }
+            }
+            ZoomRuntimeRequest::Pointer(input) => session.pointer(input),
+            ZoomRuntimeRequest::CancelMotion { operation } => {
+                session.pointer(PointerInput::Cancel);
+                events(ZoomEvent::MotionCancelled { operation });
             }
         }
     }
+
     Ok(LoopAction::Continue)
 }
 
-fn activate(
+fn select_monitor_request(
+    connection: &RustConnection,
+    root: Window,
+    root_rect: MonitorRect,
+) -> Result<MonitorRect, OverlayError> {
+    let pointer = connection
+        .query_pointer(root)
+        .map_err(runtime_error)?
+        .reply()
+        .map_err(runtime_error)?;
+    Ok(select_monitor(
+        &query_monitors(connection, root),
+        (i32::from(pointer.root_x), i32::from(pointer.root_y)),
+        root_rect,
+    ))
+}
+
+fn prepare(
     connection: &RustConnection,
     screen_num: usize,
     root: Window,
     monitor: MonitorRect,
     session: &mut ZoomSession,
 ) -> Result<NativeWindow, OverlayError> {
-    let pointer = connection
-        .query_pointer(root)
-        .map_err(runtime_error)?
-        .reply()
-        .map_err(runtime_error)?;
-    let monitor = select_monitor(
-        &query_monitors(connection, root),
-        (i32::from(pointer.root_x), i32::from(pointer.root_y)),
-        monitor,
-    );
     let frame = capture_frame(connection, screen_num, root, monitor)?;
     let mut renderer = unsafe { GlxRenderer::new(screen_num as i32)? };
     let screen = &connection.setup().roots[screen_num];
@@ -223,16 +307,36 @@ fn activate(
         monitor.height,
         screen.black_pixel,
     )?;
-    let event_mask = EventMask::EXPOSURE
-        | EventMask::KEY_PRESS
-        | EventMask::BUTTON_PRESS
-        | EventMask::BUTTON_RELEASE
-        | EventMask::POINTER_MOTION
-        | EventMask::FOCUS_CHANGE;
+
+    match attach_and_map(connection, &mut renderer, window, monitor, session, &frame) {
+        Ok(()) => Ok(NativeWindow {
+            window,
+            monitor,
+            renderer,
+        }),
+        Err(error) => {
+            // A failure after creation must not leave an orphan mapped window,
+            // and dropping the renderer releases its drawable and context.
+            let _ = connection.unmap_window(window);
+            let _ = connection.flush();
+            session.closed();
+            Err(error)
+        }
+    }
+}
+
+fn attach_and_map(
+    connection: &RustConnection,
+    renderer: &mut GlxRenderer,
+    window: Window,
+    monitor: MonitorRect,
+    session: &mut ZoomSession,
+    frame: &CapturedFrame,
+) -> Result<(), OverlayError> {
     connection
         .change_window_attributes(
             window,
-            &ChangeWindowAttributesAux::new().event_mask(event_mask),
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::EXPOSURE),
         )
         .map_err(runtime_error)?
         .check()
@@ -240,7 +344,7 @@ fn activate(
     connection.flush().map_err(runtime_error)?;
 
     renderer.attach(window)?;
-    renderer.upload_frame(&frame)?;
+    renderer.upload_frame(frame)?;
     session.activated(monitor);
     if let Some(camera) = session.camera() {
         renderer.draw(
@@ -249,43 +353,8 @@ fn activate(
             (monitor.width, monitor.height),
         )?;
     }
-    let previous_focus = connection
-        .get_input_focus()
-        .map_err(runtime_error)?
-        .reply()
-        .map_err(runtime_error)?
-        .focus;
     renderer.map_window();
-    let grab = connection
-        .grab_pointer(
-            false,
-            window,
-            EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
-            GrabMode::ASYNC,
-            GrabMode::ASYNC,
-            x11rb::NONE,
-            x11rb::NONE,
-            x11rb::CURRENT_TIME,
-        )
-        .map_err(runtime_error)?
-        .reply()
-        .map_err(runtime_error)?;
-    if grab.status != x11rb::protocol::xproto::GrabStatus::SUCCESS {
-        let _ = connection.unmap_window(window);
-        return Err(runtime_error("failed to acquire the zoom pointer grab"));
-    }
-    connection
-        .set_input_focus(InputFocus::PARENT, window, x11rb::CURRENT_TIME)
-        .map_err(runtime_error)?
-        .check()
-        .map_err(runtime_error)?;
-    connection.flush().map_err(runtime_error)?;
-    Ok(NativeWindow {
-        window,
-        monitor,
-        renderer,
-        previous_focus,
-    })
+    connection.flush().map_err(runtime_error)
 }
 
 fn close_window(
@@ -295,65 +364,16 @@ fn close_window(
     let Some(native_window) = window.take() else {
         return Ok(());
     };
-    let _ = connection.ungrab_pointer(x11rb::CURRENT_TIME);
-    let focus = native_window.previous_focus;
-    if focus != x11rb::NONE {
-        let _ = connection.set_input_focus(InputFocus::PARENT, focus, x11rb::CURRENT_TIME);
-    }
     let _ = connection.unmap_window(native_window.window);
-    connection.flush().map_err(runtime_error)
+    connection.flush().map_err(runtime_error)?;
+    drop(native_window);
+    Ok(())
 }
 
 struct NativeWindow {
     window: Window,
     monitor: MonitorRect,
     renderer: GlxRenderer,
-    previous_focus: Window,
-}
-
-fn handle_event(
-    event: Event,
-    session: &mut ZoomSession,
-    window: &mut Option<NativeWindow>,
-    wheel_modifier: &str,
-) -> Result<bool, OverlayError> {
-    let Some(native_window) = window.as_mut() else {
-        return Ok(false);
-    };
-    let mut close = false;
-    match event {
-        Event::ButtonPress(event) if event.detail == 1 => session.pointer(PointerInput::Down {
-            local: (f64::from(event.event_x), f64::from(event.event_y)),
-            time: event_time(event.time),
-        }),
-        Event::ButtonRelease(event) if event.detail == 1 => {
-            session.pointer(PointerInput::Up {
-                time: event_time(event.time),
-            });
-        }
-        Event::ButtonPress(event)
-            if (event.detail == 4 || event.detail == 5)
-                && matches_wheel_modifier(event.state, wheel_modifier) =>
-        {
-            let delta = if event.detail == 4 { 1.0 } else { -1.0 };
-            session.request(ZoomRequest::Scroll {
-                delta,
-                root: (i32::from(event.root_x), i32::from(event.root_y)),
-            });
-        }
-        Event::MotionNotify(event) => session.pointer(PointerInput::Move {
-            local: (f64::from(event.event_x), f64::from(event.event_y)),
-            time: event_time(event.time),
-        }),
-        Event::KeyPress(event) if event.detail == 9 => {
-            close = true;
-        }
-        Event::Expose(_) => session.mark_dirty(),
-        Event::FocusOut(_) => session.pointer(PointerInput::Cancel),
-        _ => {}
-    }
-    let _ = native_window;
-    Ok(close)
 }
 
 fn capture_frame(
@@ -542,21 +562,6 @@ fn extract_channel(value: u32, mask: u32) -> u8 {
 
 fn capture_error(error: CaptureError) -> OverlayError {
     runtime_error(error)
-}
-
-fn event_time(time: u32) -> Duration {
-    Duration::from_millis(u64::from(time))
-}
-
-fn matches_wheel_modifier(state: x11rb::protocol::xproto::KeyButMask, modifier: &str) -> bool {
-    use x11rb::protocol::xproto::KeyButMask;
-    match modifier {
-        "Ctrl" | "Control" => state.contains(KeyButMask::CONTROL),
-        "Shift" => state.contains(KeyButMask::SHIFT),
-        "Alt" => state.contains(KeyButMask::MOD1),
-        "Super" | "Meta" => state.contains(KeyButMask::MOD4),
-        _ => false,
-    }
 }
 
 fn runtime_error(error: impl std::fmt::Display) -> OverlayError {

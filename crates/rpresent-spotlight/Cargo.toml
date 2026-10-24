@@ -9,4 +9,4 @@ rpresent-config = { path = "../rpresent-config" }
 tiny-skia = "0.11"
 tracing = { workspace = true }
 thiserror = "2"
-x11rb = { version = "0.13", features = ["render", "image", "shm", "damage"] }
+x11rb = { version = "0.13", features = ["render", "image", "shm", "damage", "shape"] }
