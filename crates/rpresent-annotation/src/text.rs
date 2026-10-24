@@ -91,12 +91,8 @@ impl TextSystem {
 
     /// Draw a committed text object and hand every shaded glyph pixel to
     /// `plot` as `(x, y, width, height, red, green, blue, alpha)`.
-    pub(crate) fn draw_object<F>(
-        &mut self,
-        object: &Object,
-        color: cosmic_text::Color,
-        mut plot: F,
-    ) where
+    pub(crate) fn draw_object<F>(&mut self, object: &Object, color: cosmic_text::Color, mut plot: F)
+    where
         F: FnMut(i32, i32, u32, u32, u8, u8, u8, u8),
     {
         let ObjectData::Text {
@@ -230,8 +226,8 @@ impl TextDraft {
         let mut change = entry.change.clone();
         change.reverse();
         self.editor.apply_change(&change);
-        self.editor.set_cursor(entry.before.0.clone());
-        self.editor.set_selection(entry.before.1.clone());
+        self.editor.set_cursor(entry.before.0);
+        self.editor.set_selection(entry.before.1);
         self.redo.push(entry);
         true
     }
@@ -241,8 +237,8 @@ impl TextDraft {
             return false;
         };
         self.editor.apply_change(&entry.change);
-        self.editor.set_cursor(entry.after.0.clone());
-        self.editor.set_selection(entry.after.1.clone());
+        self.editor.set_cursor(entry.after.0);
+        self.editor.set_selection(entry.after.1);
         self.undo.push(entry);
         true
     }
@@ -266,12 +262,7 @@ impl TextDraft {
     }
 
     /// Move the caret, extending the selection when `extend_selection` is set.
-    pub fn move_caret(
-        &mut self,
-        motion: Motion,
-        extend_selection: bool,
-        fonts: &mut TextSystem,
-    ) {
+    pub fn move_caret(&mut self, motion: Motion, extend_selection: bool, fonts: &mut TextSystem) {
         let anchor = match self.editor.selection() {
             Selection::Normal(anchor) => Some(anchor),
             _ => None,
@@ -451,7 +442,11 @@ mod tests {
     fn multiline_layout_grows_with_explicit_newlines() {
         let mut fonts = TextSystem::with_font(TEST_FONT);
         let one = text_object(crate::document::Point { x: 10, y: 20 }, "one", 24);
-        let three = text_object(crate::document::Point { x: 10, y: 20 }, "one\ntwo\nthree", 24);
+        let three = text_object(
+            crate::document::Point { x: 10, y: 20 },
+            "one\ntwo\nthree",
+            24,
+        );
         let one_bounds = fonts.bounds(&one);
         let three_bounds = fonts.bounds(&three);
         assert!(one_bounds.width > 0);

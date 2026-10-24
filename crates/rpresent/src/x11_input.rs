@@ -353,9 +353,7 @@ fn translate_event(
             }
         }
         Event::KeyPress(event) => {
-            if let Some(shortcut) =
-                shortcut_from_keypress(event.detail, event.state, keycode_map)
-            {
+            if let Some(shortcut) = shortcut_from_keypress(event.detail, event.state, keycode_map) {
                 events(NativeEvent::Key(shortcut));
                 return;
             }
@@ -381,7 +379,7 @@ fn translate_event(
                 .ok()
                 .and_then(|cookie| cookie.reply().ok())
                 .map(|reply| reply.focus);
-            if focused == Some(u32::from(event.event)) {
+            if focused == Some(event.event) {
                 return;
             }
             let epoch = owner.take().map_or(0, |owner| owner.epoch);

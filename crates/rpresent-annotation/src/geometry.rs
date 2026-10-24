@@ -19,10 +19,7 @@ impl Rect {
     }
 
     pub fn contains(&self, point: Point) -> bool {
-        point.x >= self.x
-            && point.y >= self.y
-            && point.x < self.right()
-            && point.y < self.bottom()
+        point.x >= self.x && point.y >= self.y && point.x < self.right() && point.y < self.bottom()
     }
 
     pub fn union(&self, other: &Rect) -> Rect {
@@ -74,9 +71,21 @@ impl Rect {
         let right = self.right();
         let bottom = self.bottom();
         [
-            (Point { x: self.x, y: self.y }, Point { x: right, y: self.y }),
             (
-                Point { x: right, y: self.y },
+                Point {
+                    x: self.x,
+                    y: self.y,
+                },
+                Point {
+                    x: right,
+                    y: self.y,
+                },
+            ),
+            (
+                Point {
+                    x: right,
+                    y: self.y,
+                },
                 Point {
                     x: right,
                     y: bottom,
@@ -87,11 +96,20 @@ impl Rect {
                     x: right,
                     y: bottom,
                 },
-                Point { x: self.x, y: bottom },
+                Point {
+                    x: self.x,
+                    y: bottom,
+                },
             ),
             (
-                Point { x: self.x, y: bottom },
-                Point { x: self.x, y: self.y },
+                Point {
+                    x: self.x,
+                    y: bottom,
+                },
+                Point {
+                    x: self.x,
+                    y: self.y,
+                },
             ),
         ]
     }
@@ -102,11 +120,7 @@ fn distance(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
 }
 
 /// Shortest distance from a point to a line segment.
-pub(crate) fn point_segment_distance(
-    point: Point,
-    start: Point,
-    end: Point,
-) -> f64 {
+pub(crate) fn point_segment_distance(point: Point, start: Point, end: Point) -> f64 {
     let (px, py) = (point.x as f64, point.y as f64);
     let (ax, ay) = (start.x as f64, start.y as f64);
     let (bx, by) = (end.x as f64, end.y as f64);

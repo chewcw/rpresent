@@ -50,7 +50,9 @@ impl NativeKeys {
             return Err(format!("keycode {keycode} has no keysym"));
         }
         let keysym = Keysym::from(keysym);
-        let text = keysym.key_char().filter(|character| !character.is_control());
+        let text = keysym
+            .key_char()
+            .filter(|character| !character.is_control());
         Ok(KeyInput {
             keysym: keysym.raw(),
             text,
@@ -95,10 +97,10 @@ mod tests {
         let mut keys = NativeKeys::new().expect("native keys require an X11 session");
         let xlib = Xlib::open().unwrap();
         // SAFETY: `keys` owns an open display for this lookup.
-        let keycode = unsafe { (xlib.XKeysymToKeycode)(keys.display, u64::from(b'a' as u8)) };
+        let keycode = unsafe { (xlib.XKeysymToKeycode)(keys.display, u64::from(b'a')) };
         assert_ne!(keycode, 0);
         let input = keys
-            .translate(keycode as u8, x11_dl::xlib::ShiftMask as u16)
+            .translate(keycode, x11_dl::xlib::ShiftMask as u16)
             .expect("shifted letter");
         assert_eq!(input.text, Some('A'));
         assert!(input.modifiers.shift);

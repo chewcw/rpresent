@@ -39,6 +39,7 @@ pub fn parse_rgb(text: &str) -> Result<Rgb, AnnotationCommandParseError> {
     if digits.len() != 6 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(invalid());
     }
-    let channel = |start: usize| u8::from_str_radix(&digits[start..start + 2], 16).map_err(|_| invalid());
+    let channel =
+        |start: usize| u8::from_str_radix(&digits[start..start + 2], 16).map_err(|_| invalid());
     Ok([channel(0)?, channel(2)?, channel(4)?])
 }

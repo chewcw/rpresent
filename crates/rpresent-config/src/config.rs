@@ -571,9 +571,11 @@ fn default_stroke_width_px() -> u32 {
 }
 
 fn default_annotation_colors() -> Vec<String> {
-    ["#FF0000", "#FFFF00", "#00FF00", "#00FFFF", "#FFFFFF", "#000000"]
-        .map(str::to_owned)
-        .to_vec()
+    [
+        "#FF0000", "#FFFF00", "#00FF00", "#00FFFF", "#FFFFFF", "#000000",
+    ]
+    .map(str::to_owned)
+    .to_vec()
 }
 
 fn default_annotation_color() -> String {

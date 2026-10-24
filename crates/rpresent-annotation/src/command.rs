@@ -54,7 +54,9 @@ impl FromStr for AnnotationCommand {
                 } else if let Some(value) = other.strip_prefix("annotation=text-size=") {
                     Self::TextSize(parse_size(value, other)?)
                 } else {
-                    return Err(AnnotationCommandParseError::UnknownCommand(other.to_owned()));
+                    return Err(AnnotationCommandParseError::UnknownCommand(
+                        other.to_owned(),
+                    ));
                 }
             }
         };
@@ -114,7 +116,11 @@ impl Display for AnnotationCommand {
                 AnnotationTool::Text => f.write_str("annotation=tool=text"),
             },
             AnnotationCommand::Color(preset) => match preset {
-                Preset::Value(rgb) => write!(f, "annotation=color=#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2]),
+                Preset::Value(rgb) => write!(
+                    f,
+                    "annotation=color=#{:02X}{:02X}{:02X}",
+                    rgb[0], rgb[1], rgb[2]
+                ),
                 Preset::Next => f.write_str("annotation=color=next"),
                 Preset::Prev => f.write_str("annotation=color=prev"),
             },

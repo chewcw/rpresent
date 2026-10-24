@@ -6,7 +6,7 @@ use std::time::Duration;
 use tempfile::tempdir;
 
 use rpresent::command::{AppCommand, ZoomCommand};
-use rpresent::ipc::{encode_command, read_command, send_command, IpcError};
+use rpresent::ipc::{IpcError, encode_command, read_command, send_command};
 
 #[test]
 fn round_trips_one_command_over_unix_socket() {
@@ -48,8 +48,7 @@ fn send_command_to_stale_socket_returns_daemon_not_running() {
     std::fs::File::create(&socket_path).unwrap();
     assert!(socket_path.exists());
 
-    let error = send_command(&socket_path, AppCommand::Zoom(ZoomCommand::Toggle))
-        .unwrap_err();
+    let error = send_command(&socket_path, AppCommand::Zoom(ZoomCommand::Toggle)).unwrap_err();
     assert!(
         matches!(error, IpcError::DaemonNotRunning { .. }),
         "expected DaemonNotRunning, got {error:?}"
@@ -64,8 +63,7 @@ fn send_command_to_missing_socket_surfaces_io_error() {
     let socket_path = dir.path().join("does_not_exist.sock");
     assert!(!socket_path.exists());
 
-    let error = send_command(&socket_path, AppCommand::Zoom(ZoomCommand::Toggle))
-        .unwrap_err();
+    let error = send_command(&socket_path, AppCommand::Zoom(ZoomCommand::Toggle)).unwrap_err();
     assert!(
         !matches!(error, IpcError::DaemonNotRunning { .. }),
         "expected underlying IO error for a missing socket, got {error:?}"

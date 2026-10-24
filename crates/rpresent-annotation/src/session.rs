@@ -325,10 +325,8 @@ impl Session {
         if self.owner_epoch != Some(epoch) || !self.editing_requested {
             return;
         }
-        if self.text_edit.is_some() {
-            if self.draft_pointer(input) {
-                return;
-            }
+        if self.text_edit.is_some() && self.draft_pointer(input) {
+            return;
         }
         match input {
             PointerInput::Down { root, time } => self.pointer_down(root, time),
@@ -696,10 +694,7 @@ impl Session {
         self.mark_transient();
         self.mark_selection();
         match self.gesture.take() {
-            Some(Gesture::Pen {
-                origin,
-                mut points,
-            }) => {
+            Some(Gesture::Pen { origin, mut points }) => {
                 let local = Point {
                     x: root.x - origin.x,
                     y: root.y - origin.y,
@@ -709,11 +704,8 @@ impl Session {
                 }
                 let width_px = self.width_px();
                 let color = self.color();
-                self.document.insert(
-                    origin,
-                    color,
-                    ObjectData::Pen { points, width_px },
-                );
+                self.document
+                    .insert(origin, color, ObjectData::Pen { points, width_px });
                 self.mark_last_object();
             }
             Some(Gesture::Line { origin, .. }) => {
@@ -728,10 +720,7 @@ impl Session {
                 self.mark_last_object();
             }
             Some(Gesture::Move {
-                id,
-                start,
-                moved,
-                ..
+                id, start, moved, ..
             }) => {
                 let delta = Point {
                     x: root.x - start.x,
@@ -804,11 +793,7 @@ impl Session {
             }
             None => false,
         };
-        self.last_click = if double {
-            None
-        } else {
-            Some((id, time, root))
-        };
+        self.last_click = if double { None } else { Some((id, time, root)) };
         double
     }
 
@@ -929,16 +914,15 @@ impl Session {
 
     fn mark_edited_object(&mut self) {
         let id = self.text_edit.as_ref().and_then(|edit| edit.object);
-        if let Some(id) = id {
-            if let Some(object) = self
+        if let Some(id) = id
+            && let Some(object) = self
                 .document
                 .objects()
                 .iter()
                 .find(|object| object.id == id)
                 .cloned()
-            {
-                self.mark_object(&object);
-            }
+        {
+            self.mark_object(&object);
         }
     }
 
@@ -1003,26 +987,27 @@ impl Session {
     }
 
     fn mark_selection(&mut self) {
-        if let Some(id) = self.selection {
-            if let Some(object) = self
+        if let Some(id) = self.selection
+            && let Some(object) = self
                 .document
                 .objects()
                 .iter()
                 .find(|object| object.id == id)
                 .cloned()
-            {
-                let bounds =
-                    crate::render::object_paint_bounds(&mut self.text_system, &object).padded(2);
-                self.mark(bounds);
-            }
+        {
+            let bounds =
+                crate::render::object_paint_bounds(&mut self.text_system, &object).padded(2);
+            self.mark(bounds);
         }
     }
 
     fn transient_bounds(&mut self) -> Option<Rect> {
         let mut bounds = match self.gesture.clone() {
-            Some(Gesture::Pen { origin, points }) => {
-                Some(crate::render::stroke_bounds(origin, &points, self.width_px()))
-            }
+            Some(Gesture::Pen { origin, points }) => Some(crate::render::stroke_bounds(
+                origin,
+                &points,
+                self.width_px(),
+            )),
             Some(Gesture::Line { origin, end }) => Some(crate::render::stroke_bounds(
                 origin,
                 &[Point::default(), end],
@@ -1087,9 +1072,10 @@ fn object_hit(text_system: &mut TextSystem, object: &Object, point: Point) -> bo
                 let dy = (point.y - absolute.y) as f64;
                 return dx.hypot(dy) <= tolerance;
             }
-            points
-                .windows(2)
-                .any(|pair| point_segment_distance(point, object.point(pair[0]), object.point(pair[1])) <= tolerance)
+            points.windows(2).any(|pair| {
+                point_segment_distance(point, object.point(pair[0]), object.point(pair[1]))
+                    <= tolerance
+            })
         }
         ObjectData::Line { end, width_px } => {
             let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
@@ -1099,12 +1085,7 @@ fn object_hit(text_system: &mut TextSystem, object: &Object, point: Point) -> bo
     }
 }
 
-fn object_touched(
-    text_system: &mut TextSystem,
-    object: &Object,
-    start: Point,
-    end: Point,
-) -> bool {
+fn object_touched(text_system: &mut TextSystem, object: &Object, start: Point, end: Point) -> bool {
     match &object.data {
         ObjectData::Pen { points, width_px } => {
             let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
@@ -1114,17 +1095,17 @@ fn object_touched(
                 return segment_segment_distance(absolute, absolute, start, end) <= tolerance;
             }
             points.windows(2).any(|pair| {
-                segment_segment_distance(
-                    object.point(pair[0]),
-                    object.point(pair[1]),
-                    start,
-                    end,
-                ) <= tolerance
+                segment_segment_distance(object.point(pair[0]), object.point(pair[1]), start, end)
+                    <= tolerance
             })
         }
-        ObjectData::Line { end: line_end, width_px } => {
+        ObjectData::Line {
+            end: line_end,
+            width_px,
+        } => {
             let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
-            segment_segment_distance(object.origin, object.point(*line_end), start, end) <= tolerance
+            segment_segment_distance(object.origin, object.point(*line_end), start, end)
+                <= tolerance
         }
         ObjectData::Text { .. } => {
             let bounds = text_system.bounds(object);
@@ -1202,13 +1183,7 @@ mod tests {
     }
 
     fn click(session: &mut Session, at: Point, time: Duration) {
-        pointer(
-            session,
-            PointerInput::Down {
-                root: at,
-                time,
-            },
-        );
+        pointer(session, PointerInput::Down { root: at, time });
         pointer(
             session,
             PointerInput::Up {
@@ -1231,7 +1206,12 @@ mod tests {
 
     fn type_text(session: &mut Session, text: &str) {
         for character in text.chars() {
-            key(session, character as u32, Some(character), Modifiers::default());
+            key(
+                session,
+                character as u32,
+                Some(character),
+                Modifiers::default(),
+            );
         }
     }
 
@@ -1326,12 +1306,7 @@ mod tests {
                 time: Duration::from_millis(120),
             },
         );
-        key(
-            &mut session,
-            KEY_ESCAPE,
-            None,
-            Modifiers::default(),
-        );
+        key(&mut session, KEY_ESCAPE, None, Modifiers::default());
         assert_eq!(session.document().objects()[0].id, id);
         assert_eq!(session.document().objects()[0].origin, origin);
     }
@@ -1495,10 +1470,7 @@ mod tests {
             request: requests[1],
             text: Ok("C".to_owned()),
         });
-        assert_eq!(
-            session.text_edit.as_ref().unwrap().draft.plain_text(),
-            "A"
-        );
+        assert_eq!(session.text_edit.as_ref().unwrap().draft.plain_text(), "A");
         session.accept_paste(PasteResult {
             request: requests[0],
             text: Ok("B".to_owned()),
@@ -1647,13 +1619,17 @@ mod tests {
             .command(AnnotationCommand::Color(Preset::Prev))
             .unwrap();
         assert_eq!(session.color(), [255, 0, 0]);
-        assert!(session
-            .command(AnnotationCommand::Width(Preset::Value(7)))
-            .is_err());
+        assert!(
+            session
+                .command(AnnotationCommand::Width(Preset::Value(7)))
+                .is_err()
+        );
         assert_eq!(session.width_px(), 6);
-        assert!(session
-            .command(AnnotationCommand::TextSize(Preset::Value(0)))
-            .is_err());
+        assert!(
+            session
+                .command(AnnotationCommand::TextSize(Preset::Value(0)))
+                .is_err()
+        );
         assert_eq!(session.text_size_px(), 24);
         session
             .command(AnnotationCommand::Width(Preset::Value(10)))
@@ -1670,9 +1646,11 @@ mod tests {
         click(&mut session, Point { x: 10, y: 10 }, Duration::ZERO);
         type_text(&mut session, "abc");
         assert!(session.status().text_editing);
-        assert!(session
-            .command(AnnotationCommand::Color(Preset::Value([1, 2, 3])))
-            .is_err());
+        assert!(
+            session
+                .command(AnnotationCommand::Color(Preset::Value([1, 2, 3])))
+                .is_err()
+        );
         assert!(session.status().text_editing);
         session
             .command(AnnotationCommand::Width(Preset::Value(2)))
@@ -1698,7 +1676,9 @@ mod tests {
         let objects = session.document().objects();
         match (&objects[0].data, &objects[1].data) {
             (
-                ObjectData::Line { width_px: first, .. },
+                ObjectData::Line {
+                    width_px: first, ..
+                },
                 ObjectData::Line {
                     width_px: second, ..
                 },
@@ -1720,7 +1700,11 @@ mod tests {
         session
             .command(AnnotationCommand::Tool(AnnotationTool::Select))
             .unwrap();
-        click(&mut session, Point { x: 25, y: 0 }, Duration::from_millis(500));
+        click(
+            &mut session,
+            Point { x: 25, y: 0 },
+            Duration::from_millis(500),
+        );
         assert!(session.selection().is_some());
         session.command(AnnotationCommand::Delete).unwrap();
         assert!(session.document().objects().is_empty());

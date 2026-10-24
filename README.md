@@ -8,7 +8,7 @@ This repository is a Rust workspace with five crates:
 
 - `crates/rpresent-config` - shared TOML config loading, defaults, and config-file writing
 - `crates/rpresent-spotlight` - spotlight state and overlay rendering
-- `crates/rpresent-annotation` - drawing tools and stroke history
+- `crates/rpresent-annotation` - editable pen, line, text, and eraser annotations
 - `crates/rpresent-zoom` - frozen screenshot capture and OpenGL magnified rendering
 - `crates/rpresent` - CLI, IPC, shortcut routing, and runtime composition
 
@@ -117,7 +117,27 @@ cargo run -p rpresent -- zoom=reset
 ```
 Restores the initial scale and re-centers the magnified view without capturing again. The next activation captures a fresh screenshot.
 
-With zoom active, the configured wheel gesture controls zoom only (Ctrl+wheel by default). With zoom inactive, the same gesture retains the existing spotlight resize behavior and selected-mode rule. Annotation rendering is not yet available; its command and ordering integration points are reserved for a later change.
+With zoom active, the configured wheel gesture controls zoom only (Ctrl+wheel by default). With zoom inactive, the same gesture retains the existing spotlight resize behavior and selected-mode rule.
+
+## Annotations
+
+Press the configured annotation shortcut (the default is `Ctrl+2`) to start editing. The annotation window follows the root desktop coordinates.
+
+- Tools: `v` Select, `p` Pen, `l` Line, `e` Eraser, `t` Text.
+- `c` cycles colors (hold Shift to cycle backward). `[` and `]` cycle stroke widths. `-` and `=` cycle text sizes.
+- `Ctrl+Z` undoes, `Ctrl+Shift+Z` or `Ctrl+Y` redoes, and `Delete` removes the selected object.
+- Press Enter to commit text, Shift+Enter to insert a newline, and Escape to cancel the draft.
+- `Ctrl+V` pastes clipboard text into the current text draft.
+- The eraser deletes whole objects, and drag with the Select tool moves one object.
+- Turning annotation off keeps finished artwork visible but click-through, and releases input to zoom or the desktop.
+
+Colors can also be selected from the command line; quote the value so the shell keeps the `#`:
+
+```bash
+cargo run -p rpresent -- 'annotation=color=#00FF00'
+```
+
+Deferred for now: a toolbar, IME input, automatic text wrapping, partial-stroke erasing, and disk persistence.
 
 **Known limitations:**
 - Linux/X11 only; Wayland is not supported.

@@ -24,7 +24,12 @@ type = "circle"
 [annotation]
 enabled_on_start = false
 default_tool = "pen"
+colors = ["#FF0000", "#FFFF00", "#00FF00", "#00FFFF", "#FFFFFF", "#000000"]
+color = "#FF0000"
+stroke_widths_px = [2, 4, 6, 10]
 stroke_width_px = 6
+text_sizes_px = [16, 24, 32, 48]
+text_size_px = 24
 history_depth = 64
 
 [zoom]

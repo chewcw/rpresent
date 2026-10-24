@@ -1,14 +1,10 @@
 use cosmic_text::Color as TextColor;
-use tiny_skia::{
-    FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, Stroke, Transform,
-};
+use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 use crate::document::{Object, ObjectData, Point};
-use crate::geometry::Rect;
 use crate::error::OverlayError;
-use crate::session::{
-    Gesture, Session, TEXT_BOX_PADDING_PX, TextEdit,
-};
+use crate::geometry::Rect;
+use crate::session::{Gesture, Session, TEXT_BOX_PADDING_PX, TextEdit};
 use crate::text::TextSystem;
 
 /// Create a premultiplied RGBA framebuffer that covers the desktop.
@@ -19,10 +15,12 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(width: u32, height: u32) -> Result<Renderer, OverlayError> {
-        let pixmap = Pixmap::new(width, height)
-            .ok_or_else(|| OverlayError::Runtime("failed to allocate annotation framebuffer".into()))?;
-        let mask = Mask::new(width, height)
-            .ok_or_else(|| OverlayError::Runtime("failed to allocate annotation damage mask".into()))?;
+        let pixmap = Pixmap::new(width, height).ok_or_else(|| {
+            OverlayError::Runtime("failed to allocate annotation framebuffer".into())
+        })?;
+        let mask = Mask::new(width, height).ok_or_else(|| {
+            OverlayError::Runtime("failed to allocate annotation damage mask".into())
+        })?;
         Ok(Self { pixmap, mask })
     }
 
@@ -79,15 +77,15 @@ impl Renderer {
             self.draw_object(&mut session.text_system, object, &clip);
         }
 
-        if let Some((id, offset)) = moved {
-            if let Some(object) = objects.iter().find(|object| object.id == id) {
-                let mut shifted = object.clone();
-                shifted.origin.x += offset.x;
-                shifted.origin.y += offset.y;
-                let bounds = object_paint_bounds(&mut session.text_system, &shifted);
-                if bounds.intersect(&clip).is_some() {
-                    self.draw_object(&mut session.text_system, &shifted, &clip);
-                }
+        if let Some((id, offset)) = moved
+            && let Some(object) = objects.iter().find(|object| object.id == id)
+        {
+            let mut shifted = object.clone();
+            shifted.origin.x += offset.x;
+            shifted.origin.y += offset.y;
+            let bounds = object_paint_bounds(&mut session.text_system, &shifted);
+            if bounds.intersect(&clip).is_some() {
+                self.draw_object(&mut session.text_system, &shifted, &clip);
             }
         }
 
@@ -119,13 +117,12 @@ impl Renderer {
             _ => {}
         }
 
-        if session.text_edit.is_none() {
-            if let Some(id) = session.selection() {
-                if let Some(object) = objects.iter().find(|object| object.id == id) {
-                    let bounds = object_paint_bounds(&mut session.text_system, object).padded(1);
-                    draw_selection(&mut self.pixmap, &self.mask, bounds, &clip);
-                }
-            }
+        if session.text_edit.is_none()
+            && let Some(id) = session.selection()
+            && let Some(object) = objects.iter().find(|object| object.id == id)
+        {
+            let bounds = object_paint_bounds(&mut session.text_system, object).padded(1);
+            draw_selection(&mut self.pixmap, &self.mask, bounds, &clip);
         }
 
         if let Some(edit) = session.text_edit.as_mut() {
@@ -190,20 +187,24 @@ impl Renderer {
                 let [red, green, blue] = object.color;
                 let color = TextColor::rgb(red, green, blue);
                 let pixmap = &mut self.pixmap;
-                text_system.draw_object(object, color, |x, y, width, height, red, green, blue, alpha| {
-                    blend_rect(
-                        pixmap,
-                        x + object.origin.x,
-                        y + object.origin.y,
-                        width,
-                        height,
-                        red,
-                        green,
-                        blue,
-                        alpha,
-                        clip,
-                    );
-                });
+                text_system.draw_object(
+                    object,
+                    color,
+                    |x, y, width, height, red, green, blue, alpha| {
+                        blend_rect(
+                            pixmap,
+                            x + object.origin.x,
+                            y + object.origin.y,
+                            width,
+                            height,
+                            red,
+                            green,
+                            blue,
+                            alpha,
+                            clip,
+                        );
+                    },
+                );
             }
         }
     }
@@ -212,9 +213,7 @@ impl Renderer {
 /// Paint bounds of an object, including antialiasing room.
 pub(crate) fn object_paint_bounds(text_system: &mut TextSystem, object: &Object) -> Rect {
     match &object.data {
-        ObjectData::Pen { points, width_px } => {
-            stroke_bounds(object.origin, points, *width_px)
-        }
+        ObjectData::Pen { points, width_px } => stroke_bounds(object.origin, points, *width_px),
         ObjectData::Line { end, width_px } => {
             stroke_bounds(object.origin, &[Point::default(), *end], *width_px)
         }
@@ -286,16 +285,9 @@ fn draw_polyline(
     }
     let absolute: Vec<(f32, f32)> = points
         .iter()
-        .map(|point| {
-            (
-                (origin.x + point.x) as f32,
-                (origin.y + point.y) as f32,
-            )
-        })
+        .map(|point| ((origin.x + point.x) as f32, (origin.y + point.y) as f32))
         .collect();
-    let degenerate = absolute
-        .windows(2)
-        .all(|pair| pair[0] == pair[1]);
+    let degenerate = absolute.windows(2).all(|pair| pair[0] == pair[1]);
     let mut paint = Paint::default();
     paint.set_color_rgba8(color[0], color[1], color[2], 255);
     paint.anti_alias = true;
@@ -455,6 +447,7 @@ fn draw_border(pixmap: &mut Pixmap, mask: &Mask, bounds: Rect, color: [u8; 3], c
     pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), Some(mask));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn blend_rect(
     pixmap: &mut Pixmap,
     x: i32,
@@ -474,12 +467,8 @@ fn blend_rect(
     let pixmap_height = pixmap.height() as i32;
     let start_x = x.max(clip.x).max(0);
     let start_y = y.max(clip.y).max(0);
-    let end_x = (x + width as i32)
-        .min(clip.right())
-        .min(pixmap_width);
-    let end_y = (y + height as i32)
-        .min(clip.bottom())
-        .min(pixmap_height);
+    let end_x = (x + width as i32).min(clip.right()).min(pixmap_width);
+    let end_y = (y + height as i32).min(clip.bottom()).min(pixmap_height);
     if end_x <= start_x || end_y <= start_y {
         return;
     }
@@ -500,8 +489,7 @@ fn blend_rect(
                 (source_green + data[offset + 1] as u32 * inverse / 255).min(255) as u8;
             data[offset + 2] =
                 (source_blue + data[offset + 2] as u32 * inverse / 255).min(255) as u8;
-            data[offset + 3] =
-                (source_alpha + destination_alpha * inverse / 255).min(255) as u8;
+            data[offset + 3] = (source_alpha + destination_alpha * inverse / 255).min(255) as u8;
         }
     }
 }
@@ -539,6 +527,138 @@ mod parity_tests {
     use crate::document::Point as CanvasPoint;
 
     #[test]
+    #[ignore = "release-mode rendering benchmark"]
+    fn render_bench() {
+        use std::time::Instant;
+
+        for (width, height) in [(1920, 1080), (3840, 2160)] {
+            let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+            session.command(AnnotationCommand::On).unwrap();
+            session.ownership(Some(1));
+
+            session
+                .command(AnnotationCommand::Tool(AnnotationTool::Pen))
+                .unwrap();
+            for stroke in 0..24 {
+                let y = 40 + stroke * 24;
+                session.pointer(
+                    1,
+                    PointerInput::Down {
+                        root: Point { x: 40, y },
+                        time: Duration::from_millis(stroke as u64 * 10),
+                    },
+                );
+                session.pointer(
+                    1,
+                    PointerInput::Move {
+                        root: Point {
+                            x: width as i32 - 40,
+                            y,
+                        },
+                        time: Duration::from_millis(stroke as u64 * 10 + 5),
+                    },
+                );
+                session.pointer(
+                    1,
+                    PointerInput::Up {
+                        root: Point {
+                            x: width as i32 - 40,
+                            y,
+                        },
+                        time: Duration::from_millis(stroke as u64 * 10 + 6),
+                    },
+                );
+            }
+
+            session
+                .command(AnnotationCommand::Tool(AnnotationTool::Line))
+                .unwrap();
+            for line in 0..8 {
+                let x = 120 + line * 80;
+                session.pointer(
+                    1,
+                    PointerInput::Down {
+                        root: Point { x, y: 60 },
+                        time: Duration::from_millis(600 + line as u64),
+                    },
+                );
+                session.pointer(
+                    1,
+                    PointerInput::Up {
+                        root: Point {
+                            x,
+                            y: height as i32 - 80,
+                        },
+                        time: Duration::from_millis(700 + line as u64),
+                    },
+                );
+            }
+
+            session
+                .command(AnnotationCommand::Tool(AnnotationTool::Text))
+                .unwrap();
+            session.pointer(
+                1,
+                PointerInput::Down {
+                    root: Point { x: 80, y: 80 },
+                    time: Duration::from_millis(1000),
+                },
+            );
+            if let Some(edit) = session.text_edit.as_mut() {
+                edit.draft
+                    .insert("Annotation benchmark", &mut session.text_system);
+            }
+            session.key(
+                1,
+                crate::KeyInput {
+                    keysym: 0xff0d,
+                    text: None,
+                    modifiers: crate::Modifiers::default(),
+                },
+            );
+
+            let objects = session.document().objects().len();
+            let mut renderer = Renderer::new(width, height).unwrap();
+            let whole = renderer.full_bounds();
+            let started = Instant::now();
+            renderer.redraw(&mut session, whole).unwrap();
+            let full = started.elapsed();
+
+            session
+                .command(AnnotationCommand::Tool(AnnotationTool::Pen))
+                .ok();
+            session.take_damage();
+            session.pointer(
+                1,
+                PointerInput::Down {
+                    root: Point { x: 60, y: 60 },
+                    time: Duration::from_millis(2000),
+                },
+            );
+            session.pointer(
+                1,
+                PointerInput::Up {
+                    root: Point { x: 60, y: 60 },
+                    time: Duration::from_millis(2001),
+                },
+            );
+            if let Some(damage) = session.take_damage() {
+                let started = Instant::now();
+                renderer.redraw(&mut session, damage).unwrap();
+                eprintln!(
+                    "{}x{}: {objects} objects, full {:?}, partial {:?} ({}x{} px)",
+                    width,
+                    height,
+                    full,
+                    started.elapsed(),
+                    damage.width,
+                    damage.height,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn partial_redraw_matches_full_scene() {
         let mut session = Session::new(&AnnotationConfig::default()).unwrap();
         session.command(AnnotationCommand::On).unwrap();
@@ -560,10 +680,7 @@ mod parity_tests {
             session.pointer(
                 1,
                 PointerInput::Up {
-                    root: CanvasPoint {
-                        x: end.0,
-                        y: end.1,
-                    },
+                    root: CanvasPoint { x: end.0, y: end.1 },
                     time: Duration::from_millis(10),
                 },
             );
@@ -680,16 +797,16 @@ mod parity_tests {
             .command(AnnotationCommand::Tool(AnnotationTool::Text))
             .unwrap();
         click(&mut session, 12, 14, 100);
-        assert_parity(&mut session, &mut partial, &mut reference, whole, "draft opened");
+        assert_parity(
+            &mut session,
+            &mut partial,
+            &mut reference,
+            whole,
+            "draft opened",
+        );
         for character in "Hi".chars() {
             press(&mut session, character as u32, Some(character));
-            assert_parity(
-                &mut session,
-                &mut partial,
-                &mut reference,
-                whole,
-                "typing",
-            );
+            assert_parity(&mut session, &mut partial, &mut reference, whole, "typing");
         }
         press(&mut session, 0xff0d, None);
         assert_parity(&mut session, &mut partial, &mut reference, whole, "commit");
@@ -699,12 +816,7 @@ mod parity_tests {
             .unwrap();
         let object = session.document().objects()[0].clone();
         let bounds = crate::render::object_paint_bounds(&mut session.text_system, &object);
-        click(
-            &mut session,
-            bounds.x + 3,
-            bounds.y + 3,
-            1000,
-        );
+        click(&mut session, bounds.x + 3, bounds.y + 3, 1000);
         assert_parity(
             &mut session,
             &mut partial,
@@ -712,14 +824,12 @@ mod parity_tests {
             whole,
             "selection",
         );
-        drag(&mut session, (bounds.x + 3, bounds.y + 3), (bounds.x + 15, bounds.y + 25));
-        assert_parity(
+        drag(
             &mut session,
-            &mut partial,
-            &mut reference,
-            whole,
-            "moved",
+            (bounds.x + 3, bounds.y + 3),
+            (bounds.x + 15, bounds.y + 25),
         );
+        assert_parity(&mut session, &mut partial, &mut reference, whole, "moved");
 
         session
             .command(AnnotationCommand::Tool(AnnotationTool::Eraser))
@@ -731,22 +841,10 @@ mod parity_tests {
             (moved_bounds.x - 10, moved_bounds.y + 4),
             (moved_bounds.right() + 10, moved_bounds.y + 4),
         );
-        assert_parity(
-            &mut session,
-            &mut partial,
-            &mut reference,
-            whole,
-            "erased",
-        );
+        assert_parity(&mut session, &mut partial, &mut reference, whole, "erased");
 
         session.command(AnnotationCommand::Undo).unwrap();
-        assert_parity(
-            &mut session,
-            &mut partial,
-            &mut reference,
-            whole,
-            "undo",
-        );
+        assert_parity(&mut session, &mut partial, &mut reference, whole, "undo");
 
         session
             .command(AnnotationCommand::Tool(AnnotationTool::Text))

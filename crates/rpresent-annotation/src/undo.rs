@@ -54,7 +54,10 @@ impl History {
 
 /// Entries for the affected objects, indexed as if the affected objects were
 /// already removed from the list.
-pub(crate) fn reduced_entries(objects: &[Object], affected: &BTreeSet<ObjectId>) -> Vec<(usize, Object)> {
+pub(crate) fn reduced_entries(
+    objects: &[Object],
+    affected: &BTreeSet<ObjectId>,
+) -> Vec<(usize, Object)> {
     let mut index = 0;
     let mut entries = Vec::new();
     for object in objects {

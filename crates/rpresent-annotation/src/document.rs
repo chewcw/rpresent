@@ -105,13 +105,7 @@ impl Document {
         true
     }
 
-    pub fn replace(
-        &mut self,
-        id: ObjectId,
-        origin: Point,
-        color: Rgb,
-        data: ObjectData,
-    ) -> bool {
+    pub fn replace(&mut self, id: ObjectId, origin: Point, color: Rgb, data: ObjectData) -> bool {
         let Some(index) = self.objects.iter().position(|object| object.id == id) else {
             return false;
         };
@@ -195,10 +189,7 @@ mod tests {
     use super::*;
 
     fn line(end: Point) -> ObjectData {
-        ObjectData::Line {
-            end,
-            width_px: 6,
-        }
+        ObjectData::Line { end, width_px: 6 }
     }
 
     #[test]

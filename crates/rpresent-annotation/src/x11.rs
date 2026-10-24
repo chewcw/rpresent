@@ -130,12 +130,7 @@ impl X11AnnotationBackend {
 
         let colormap = connection.generate_id().map_err(lost)?;
         connection
-            .create_colormap(
-                ColormapAlloc::NONE,
-                colormap,
-                root,
-                visual_id,
-            )
+            .create_colormap(ColormapAlloc::NONE, colormap, root, visual_id)
             .map_err(lost)?;
         let window = connection.generate_id().map_err(lost)?;
         let aux = CreateWindowAux::new()
@@ -271,9 +266,14 @@ impl X11AnnotationBackend {
         let mut type_atom = 0u32;
         let mut format = 0u8;
         loop {
-            let reply = self
-                .connection
-                .get_property(false, requestor, atom, AtomEnum::ANY, offset, long_length);
+            let reply = self.connection.get_property(
+                false,
+                requestor,
+                atom,
+                AtomEnum::ANY,
+                offset,
+                long_length,
+            );
             let reply = match reply {
                 Ok(cookie) => match cookie.reply() {
                     Ok(reply) => reply,
@@ -364,7 +364,15 @@ impl AnnotationBackend for X11AnnotationBackend {
         while y < clip.bottom() {
             if row_bytes <= maximum {
                 let rows = (clip.bottom() - y).min(rows_per_request) as u16;
-                let data = pack_region(pixels, source_width, clip.x, y, clip.width as u16, rows, self.byte_order);
+                let data = pack_region(
+                    pixels,
+                    source_width,
+                    clip.x,
+                    y,
+                    clip.width as u16,
+                    rows,
+                    self.byte_order,
+                );
                 self.put_image(clip.x, y, clip.width as u16, rows, &data)?;
                 y += rows as i32;
             } else {
@@ -641,8 +649,7 @@ mod tests {
         use x11rb::protocol::Event;
         use x11rb::protocol::xproto::{PropMode, SELECTION_NOTIFY_EVENT, SelectionNotifyEvent};
 
-        let (owner_connection, screen) =
-            x11rb::connect(None).expect("owner needs an X11 session");
+        let (owner_connection, screen) = x11rb::connect(None).expect("owner needs an X11 session");
         let root = owner_connection.setup().roots[screen].root;
         let utf8 = owner_connection
             .intern_atom(false, b"UTF8_STRING")
@@ -747,7 +754,8 @@ mod tests {
     fn annotation_native_map_upload_unmap() {
         let mut backend = X11AnnotationBackend::new().expect("X11 backend requires a compositor");
         let mut renderer = Renderer::new(64, 64).unwrap();
-        let mut session = crate::Session::new(&rpresent_config::AnnotationConfig::default()).unwrap();
+        let mut session =
+            crate::Session::new(&rpresent_config::AnnotationConfig::default()).unwrap();
         session.command(crate::AnnotationCommand::On).unwrap();
         session.ownership(Some(1));
         session.pointer(
@@ -764,7 +772,9 @@ mod tests {
                 time: std::time::Duration::from_millis(10),
             },
         );
-        renderer.redraw(&mut session, renderer.full_bounds()).unwrap();
+        renderer
+            .redraw(&mut session, renderer.full_bounds())
+            .unwrap();
 
         backend.present(true).expect("map");
         backend

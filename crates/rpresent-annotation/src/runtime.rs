@@ -37,14 +37,19 @@ pub struct AnnotationStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnnotationEvent {
     Status(AnnotationStatus),
-    CommandRejected { command: String, error: String },
+    CommandRejected {
+        command: String,
+        error: String,
+    },
     Presented {
         operation: u64,
         generation: u64,
         visible: bool,
         result: Result<(), String>,
     },
-    Cancelled { operation: u64 },
+    Cancelled {
+        operation: u64,
+    },
     Failed {
         generation: u64,
         error: String,
@@ -204,7 +209,9 @@ impl AnnotationRuntime {
     }
 
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
-        self.backend.as_ref().and_then(|backend| backend.next_deadline())
+        self.backend
+            .as_ref()
+            .and_then(|backend| backend.next_deadline())
     }
 
     pub(crate) fn is_exited(&self) -> bool {
@@ -212,7 +219,9 @@ impl AnnotationRuntime {
     }
 
     pub(crate) fn connection_fd(&self) -> Option<RawFd> {
-        self.backend.as_ref().and_then(|backend| backend.connection_fd())
+        self.backend
+            .as_ref()
+            .and_then(|backend| backend.connection_fd())
     }
 
     fn present(&mut self, operation: u64, visible: bool) {
@@ -223,7 +232,10 @@ impl AnnotationRuntime {
                 "annotation backend unavailable".to_owned(),
             )),
         };
-        let reported = result.as_ref().map(|()| ()).map_err(ToString::to_string);
+        let reported = match &result {
+            Ok(()) => Ok(()),
+            Err(error) => Err(error.to_string()),
+        };
         match result {
             Ok(()) => {
                 self.visible = visible;
@@ -394,10 +406,7 @@ pub fn run_overlay(
 }
 
 #[cfg(target_os = "linux")]
-fn wait_for_events(
-    inbox: &crate::transport::AnnotationInbox,
-    runtime: &AnnotationRuntime,
-) {
+fn wait_for_events(inbox: &crate::transport::AnnotationInbox, runtime: &AnnotationRuntime) {
     let mut descriptors = [
         libc::pollfd {
             fd: inbox.wake_fd(),
@@ -444,8 +453,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    use rpresent_config::{AnnotationConfig, Config};
     use rpresent_config::ConfigService;
+    use rpresent_config::{AnnotationConfig, Config};
 
     use crate::document::Point;
 
@@ -520,7 +529,14 @@ mod tests {
         }
     }
 
-    fn setup(fail_upload: bool) -> (AnnotationRuntime, Arc<Mutex<Log>>, Arc<Mutex<Vec<AnnotationEvent>>>) {
+    #[allow(clippy::type_complexity)]
+    fn setup(
+        fail_upload: bool,
+    ) -> (
+        AnnotationRuntime,
+        Arc<Mutex<Log>>,
+        Arc<Mutex<Vec<AnnotationEvent>>>,
+    ) {
         let config = Arc::new(ConfigService::new(
             PathBuf::from("test.toml"),
             Config::default(),
@@ -559,10 +575,7 @@ mod tests {
     }
 
     fn draw_dot(runtime: &mut AnnotationRuntime) {
-        runtime.process(
-            AnnotationRequest::Ownership { epoch: Some(1) },
-            now(),
-        );
+        runtime.process(AnnotationRequest::Ownership { epoch: Some(1) }, now());
         runtime.process(
             AnnotationRequest::Pointer {
                 epoch: 1,
@@ -635,10 +648,7 @@ mod tests {
         );
         runtime.flush(now());
         log.lock().unwrap().uploads.clear();
-        runtime.process(
-            AnnotationRequest::Command(AnnotationCommand::On),
-            now(),
-        );
+        runtime.process(AnnotationRequest::Command(AnnotationCommand::On), now());
         draw_dot(&mut runtime);
         let log = log.lock().unwrap();
         assert_eq!(log.uploads.len(), 1);
@@ -694,10 +704,7 @@ mod tests {
             },
             now(),
         );
-        runtime.process(
-            AnnotationRequest::Command(AnnotationCommand::On),
-            now(),
-        );
+        runtime.process(AnnotationRequest::Command(AnnotationCommand::On), now());
         draw_dot(&mut runtime);
 
         let all = all_events(&events);
@@ -722,10 +729,7 @@ mod tests {
         assert!(failed_status.has_content);
 
         log.lock().unwrap().fail_upload = false;
-        runtime.process(
-            AnnotationRequest::Command(AnnotationCommand::On),
-            now(),
-        );
+        runtime.process(AnnotationRequest::Command(AnnotationCommand::On), now());
         let all = all_events(&events);
         let recovered = all
             .iter()
@@ -823,20 +827,14 @@ mod tests {
         let (mut runtime, _, events) = setup(false);
         let config = AnnotationConfig::default();
         assert_eq!(config.text_size_px, 24);
-        runtime.process(
-            AnnotationRequest::Command(AnnotationCommand::On),
-            now(),
-        );
+        runtime.process(AnnotationRequest::Command(AnnotationCommand::On), now());
         runtime.process(
             AnnotationRequest::Command(AnnotationCommand::Tool(
                 rpresent_config::AnnotationTool::Text,
             )),
             now(),
         );
-        runtime.process(
-            AnnotationRequest::Ownership { epoch: Some(2) },
-            now(),
-        );
+        runtime.process(AnnotationRequest::Ownership { epoch: Some(2) }, now());
         runtime.process(
             AnnotationRequest::Pointer {
                 epoch: 2,

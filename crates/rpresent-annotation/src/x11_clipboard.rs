@@ -81,9 +81,9 @@ pub(crate) enum ClipboardAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
-    AwaitSelection,
-    AwaitInitialRead,
-    AwaitChunk,
+    Selection,
+    InitialRead,
+    Chunk,
 }
 
 struct Active {
@@ -124,7 +124,8 @@ impl PasteQueue {
     }
 
     pub(crate) fn cancel_session(&mut self, session: u64, now: Instant) {
-        self.queued.retain(|(request, _)| request.session != session);
+        self.queued
+            .retain(|(request, _)| request.session != session);
         let cancelled = self
             .active
             .as_ref()
@@ -146,7 +147,7 @@ impl PasteQueue {
         property: Option<&'static str>,
         now: Instant,
     ) {
-        let Some(expected) = self.expected(requestor, Stage::AwaitSelection, target) else {
+        let Some(expected) = self.expected(requestor, Stage::Selection, target) else {
             return;
         };
         let Some(property) = property else {
@@ -157,7 +158,7 @@ impl PasteQueue {
             return;
         }
         if let Some(active) = self.active.as_mut() {
-            active.stage = Stage::AwaitInitialRead;
+            active.stage = Stage::InitialRead;
         }
         self.actions.push(ClipboardAction::Read {
             requestor,
@@ -188,11 +189,11 @@ impl PasteQueue {
             return;
         }
         match stage {
-            Stage::AwaitInitialRead => match read.kind {
+            Stage::InitialRead => match read.kind {
                 PropertyKind::None => self.conversion_failed(now),
                 PropertyKind::Incr => {
                     if let Some(active) = self.active.as_mut() {
-                        active.stage = Stage::AwaitChunk;
+                        active.stage = Stage::Chunk;
                         active.buffer.clear();
                     }
                 }
@@ -202,7 +203,7 @@ impl PasteQueue {
                     now,
                 ),
             },
-            Stage::AwaitChunk => match read.kind {
+            Stage::Chunk => match read.kind {
                 PropertyKind::None | PropertyKind::Unknown => self.finish(
                     Err("clipboard property has an unsupported type".to_owned()),
                     now,
@@ -214,14 +215,16 @@ impl PasteQueue {
                             .active
                             .as_ref()
                             .map(|active| decode_text(target, &active.buffer))
-                            .unwrap_or_else(|| Err("clipboard transfer is no longer active".to_owned()));
+                            .unwrap_or_else(|| {
+                                Err("clipboard transfer is no longer active".to_owned())
+                            });
                         self.finish(text, now);
                     } else if let Some(active) = self.active.as_mut() {
                         active.buffer.extend_from_slice(&read.bytes);
                     }
                 }
             },
-            Stage::AwaitSelection => {}
+            Stage::Selection => {}
         }
     }
 
@@ -230,7 +233,7 @@ impl PasteQueue {
         let Some(active) = self.active.as_ref() else {
             return;
         };
-        if active.requestor != requestor || active.stage != Stage::AwaitChunk {
+        if active.requestor != requestor || active.stage != Stage::Chunk {
             return;
         }
         let property = active.target.property();
@@ -276,7 +279,11 @@ impl PasteQueue {
         Some(active.target)
     }
 
-    fn read_target(&self, requestor: u32, property: &'static str) -> Option<(Stage, ClipboardTarget)> {
+    fn read_target(
+        &self,
+        requestor: u32,
+        property: &'static str,
+    ) -> Option<(Stage, ClipboardTarget)> {
         let active = self.active.as_ref()?;
         if active.requestor != requestor || active.target.property() != property {
             return None;
@@ -289,17 +296,21 @@ impl PasteQueue {
             if active.retried {
                 None
             } else {
-                active.target.fallback().map(|target| (active.requestor, target))
+                active
+                    .target
+                    .fallback()
+                    .map(|target| (active.requestor, target))
             }
         });
         if let Some((requestor, target)) = fallback {
             if let Some(active) = self.active.as_mut() {
                 active.retried = true;
                 active.target = target;
-                active.stage = Stage::AwaitSelection;
+                active.stage = Stage::Selection;
                 active.buffer.clear();
             }
-            self.actions.push(ClipboardAction::Convert { requestor, target });
+            self.actions
+                .push(ClipboardAction::Convert { requestor, target });
             return;
         }
         self.finish(Err("clipboard conversion failed".to_owned()), now);
@@ -317,7 +328,7 @@ impl PasteQueue {
             request,
             requestor,
             target: ClipboardTarget::Utf8String,
-            stage: Stage::AwaitSelection,
+            stage: Stage::Selection,
             retried: false,
             buffer: Vec::new(),
             deadline: now + PASTE_DEADLINE,
@@ -408,12 +419,7 @@ mod tests {
                 delete: false,
             }]
         );
-        queue.property_read(
-            10,
-            "RPRESENT_PASTE_UTF8",
-            text_read("hello"),
-            start,
-        );
+        queue.property_read(10, "RPRESENT_PASTE_UTF8", text_read("hello"), start);
         assert_eq!(
             queue.take_results(),
             vec![PasteResult {
@@ -496,10 +502,7 @@ mod tests {
             },
             start,
         );
-        assert_eq!(
-            queue.take_results()[0].text,
-            Ok("\u{e9}".to_owned())
-        );
+        assert_eq!(queue.take_results()[0].text, Ok("\u{e9}".to_owned()));
     }
 
     #[test]
@@ -680,7 +683,11 @@ mod tests {
         let results = queue.take_results();
         assert_eq!(results.len(), 1);
         assert!(results[0].text.is_err());
-        assert!(queue.take_actions().contains(&ClipboardAction::Destroy { requestor: 41 }));
+        assert!(
+            queue
+                .take_actions()
+                .contains(&ClipboardAction::Destroy { requestor: 41 })
+        );
     }
 
     #[test]
@@ -716,14 +723,7 @@ mod tests {
         let start = now();
         let mut queue = PasteQueue::new();
         for (session, sequence, requestor) in [(1, 1, 60), (1, 2, 61)] {
-            queue.enqueue(
-                PasteRequest {
-                    session,
-                    sequence,
-                },
-                requestor,
-                start,
-            );
+            queue.enqueue(PasteRequest { session, sequence }, requestor, start);
         }
         assert_eq!(
             queue.take_actions(),

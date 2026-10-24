@@ -3,9 +3,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
-use rpresent_annotation::{
-    AnnotationEvent, AnnotationHandle, AnnotationRequest, AnnotationStatus,
-};
+use rpresent_annotation::{AnnotationEvent, AnnotationHandle, AnnotationRequest, AnnotationStatus};
 use rpresent_config::ConfigService;
 use rpresent_spotlight::{
     SpotlightController, SpotlightEvent, SpotlightRuntimeMessage, SpotlightState,
@@ -720,18 +718,14 @@ pub(crate) fn annotation_pointer(input: RawPointer) -> rpresent_annotation::Poin
         y: root.1,
     };
     match input {
-        RawPointer::Down { root, time } => {
-            rpresent_annotation::PointerInput::Down {
-                root: point(root),
-                time,
-            }
-        }
-        RawPointer::Move { root, time } => {
-            rpresent_annotation::PointerInput::Move {
-                root: point(root),
-                time,
-            }
-        }
+        RawPointer::Down { root, time } => rpresent_annotation::PointerInput::Down {
+            root: point(root),
+            time,
+        },
+        RawPointer::Move { root, time } => rpresent_annotation::PointerInput::Move {
+            root: point(root),
+            time,
+        },
         RawPointer::Up { root, time } => rpresent_annotation::PointerInput::Up {
             root: point(root),
             time,
@@ -924,15 +918,13 @@ mod tests {
     fn shutdown_is_forwarded_before_the_sender_is_released() {
         let (mut coordinator, _, _, _, annotation) = coordinator();
         coordinator.shutdown();
-        assert_eq!(
-            annotation.try_recv(),
-            Ok(AnnotationRequest::Shutdown)
-        );
+        assert_eq!(annotation.try_recv(), Ok(AnnotationRequest::Shutdown));
     }
 
     #[test]
     fn activation_does_not_prepare_before_spotlight_hide_acknowledgment() {
-        let (mut coordinator, spotlight_events, zoom_events, native_events, _annotation) = coordinator();
+        let (mut coordinator, spotlight_events, zoom_events, native_events, _annotation) =
+            coordinator();
 
         coordinator
             .handle_event(AppEvent::SpotlightRuntime(SpotlightEvent::Ready {
