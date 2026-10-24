@@ -3,6 +3,7 @@ pub mod command;
 pub mod input;
 pub mod ipc;
 pub mod logging;
+pub mod overlay_lifecycle;
 #[cfg(target_os = "linux")]
 pub(crate) mod x11_input;
 
