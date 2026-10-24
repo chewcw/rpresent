@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
 
-use rpresent_annotation::AnnotationState;
+use rpresent_annotation::{AnnotationEventSink, channel as annotation_channel};
 use rpresent_config::{ConfigService, default_config_path, write_default_config};
 use rpresent_spotlight::SpotlightRuntimeMessage;
 use rpresent_zoom::{channel as zoom_channel, run_overlay};
@@ -179,8 +179,13 @@ fn run_daemon(config_service: Arc<ConfigService>) -> Result<(), AppError> {
     let (ipc_tx, ipc_rx) = mpsc::channel::<AppCommand>();
     let (event_tx, event_rx) = mpsc::channel::<AppEvent>();
     let (spotlight_tx, spotlight_rx) = mpsc::channel::<SpotlightRuntimeMessage>();
-    let (annotation_tx, annotation_rx) = mpsc::channel::<AnnotationState>();
     config_service.zoom().validate()?;
+    config_service.annotation().validate()?;
+    let (annotation_handle_channel, annotation_inbox) = annotation_channel().map_err(|error| {
+        AppError::Annotation(rpresent_annotation::OverlayError::Runtime(format!(
+            "failed to create annotation transport: {error}"
+        )))
+    })?;
     let (zoom_handle, zoom_inbox) = zoom_channel().map_err(|error| {
         AppError::Zoom(rpresent_zoom::OverlayError::Runtime(format!(
             "failed to create zoom transport: {error}"
@@ -241,9 +246,19 @@ fn run_daemon(config_service: Arc<ConfigService>) -> Result<(), AppError> {
     let spotlight_handle = std::thread::spawn(move || {
         rpresent_spotlight::run_overlay(spotlight_service, spotlight_rx, spotlight_events)
     });
+    let annotation_events: AnnotationEventSink = {
+        let events = event_tx.clone();
+        Arc::new(move |event| {
+            let _ = events.send(AppEvent::AnnotationRuntime(event));
+        })
+    };
     let annotation_service = Arc::clone(&config_service);
     let annotation_handle = std::thread::spawn(move || {
-        rpresent_annotation::run_overlay(annotation_service, annotation_rx)
+        rpresent_annotation::run_annotation_overlay(
+            annotation_service,
+            annotation_inbox,
+            annotation_events,
+        )
     });
     let zoom_service = Arc::clone(&config_service);
     let zoom_runtime =
@@ -253,7 +268,7 @@ fn run_daemon(config_service: Arc<ConfigService>) -> Result<(), AppError> {
         spotlight: spotlight_tx,
         zoom: zoom_handle,
         native: native_handle,
-        annotation: annotation_tx,
+        annotation: annotation_handle_channel,
     };
     let coordinator_result = Coordinator::run(Arc::clone(&config_service), event_rx, outputs);
 

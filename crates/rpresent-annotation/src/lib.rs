@@ -1,11 +1,8 @@
 mod catalog;
 mod command;
-mod controller;
 mod document;
 mod error;
 mod geometry;
-mod history;
-mod overlay;
 mod render;
 mod runtime;
 mod session;
@@ -19,12 +16,9 @@ mod x11;
 
 pub use catalog::{Preset, Rgb, TOOLS, cycle_index, parse_rgb};
 pub use command::{AnnotationCommand, AnnotationCommandParseError};
-pub use controller::{AnnotationController, AnnotationState};
 pub use document::{Document, Object, ObjectData, ObjectId, Point};
 pub use error::OverlayError;
 pub use geometry::Rect;
-pub use history::{Stroke, StrokeHistory};
-pub use overlay::run_overlay;
 pub use render::Renderer;
 pub use rpresent_config::AnnotationTool;
 pub use runtime::{

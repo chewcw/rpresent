@@ -5,7 +5,7 @@ use tiny_skia::{
 
 use crate::document::{Object, ObjectData, Point};
 use crate::geometry::Rect;
-use crate::overlay::OverlayError;
+use crate::error::OverlayError;
 use crate::session::{
     Gesture, Session, TEXT_BOX_PADDING_PX, TextEdit,
 };

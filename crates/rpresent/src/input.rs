@@ -47,6 +47,7 @@ pub enum AppEvent {
     Command(crate::command::AppCommand),
     Input(InputAction),
     Native(NativeEvent),
+    AnnotationRuntime(rpresent_annotation::AnnotationEvent),
     SpotlightRuntime(rpresent_spotlight::SpotlightEvent),
     ZoomRuntime(rpresent_zoom::ZoomEvent),
     IpcFailed(String),

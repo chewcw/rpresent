@@ -3,7 +3,9 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
-use rpresent_annotation::{AnnotationController, AnnotationState};
+use rpresent_annotation::{
+    AnnotationEvent, AnnotationHandle, AnnotationRequest, AnnotationStatus,
+};
 use rpresent_config::ConfigService;
 use rpresent_spotlight::{
     SpotlightController, SpotlightEvent, SpotlightRuntimeMessage, SpotlightState,
@@ -23,14 +25,13 @@ pub struct CoordinatorOutputs {
     pub spotlight: std::sync::mpsc::Sender<SpotlightRuntimeMessage>,
     pub zoom: ZoomHandle,
     pub native: NativeHandle,
-    pub annotation: std::sync::mpsc::Sender<AnnotationState>,
+    pub annotation: AnnotationHandle,
 }
 
 pub struct Coordinator {
     config: Arc<ConfigService>,
     outputs: CoordinatorOutputs,
     spotlight: SpotlightController,
-    annotation: AnnotationController,
     input: InputCoordinator,
     lifecycle: WindowLifecycle,
     layers: LayerSnapshot,
@@ -42,6 +43,10 @@ pub struct Coordinator {
     native_ready: bool,
     startup_applied: bool,
     zoom_worker_failed: bool,
+    annotation_ready: bool,
+    annotation_editing: bool,
+    annotation_generation: u64,
+    annotation_started: bool,
 }
 
 impl Coordinator {
@@ -55,15 +60,9 @@ impl Coordinator {
     }
 
     fn new(config: Arc<ConfigService>, outputs: CoordinatorOutputs) -> Self {
-        let annotation = AnnotationController::new(
-            false,
-            config.annotation().default_tool,
-            config.annotation().history_depth,
-        );
         let mut coordinator = Self {
             input: InputCoordinator::new(InputBindings::from(config.shortcuts())),
             spotlight: SpotlightController::new(false),
-            annotation,
             config,
             outputs,
             lifecycle: WindowLifecycle::new(),
@@ -76,9 +75,12 @@ impl Coordinator {
             native_ready: false,
             startup_applied: false,
             zoom_worker_failed: false,
+            annotation_ready: false,
+            annotation_editing: false,
+            annotation_generation: 0,
+            annotation_started: false,
         };
         coordinator.update_input_status();
-        let _ = coordinator.outputs.annotation.send(AnnotationState::Off);
         coordinator
     }
 
@@ -93,12 +95,18 @@ impl Coordinator {
                             self.expire()?;
                             continue;
                         }
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            self.shutdown();
+                            return Ok(());
+                        }
                     }
                 }
                 None => match events.recv() {
                     Ok(event) => event,
-                    Err(_) => return Ok(()),
+                    Err(_) => {
+                        self.shutdown();
+                        return Ok(());
+                    }
                 },
             };
             self.handle_event(event)?;
@@ -110,6 +118,7 @@ impl Coordinator {
             AppEvent::Command(command) => self.handle_command(command),
             AppEvent::Input(action) => self.dispatch_input(action),
             AppEvent::Native(event) => self.handle_native(event),
+            AppEvent::AnnotationRuntime(event) => self.handle_annotation(event),
             AppEvent::SpotlightRuntime(event) => self.handle_spotlight(event),
             AppEvent::ZoomRuntime(event) => self.handle_zoom(event),
             AppEvent::IpcFailed(error) => {
@@ -129,16 +138,16 @@ impl Coordinator {
                 }
             }
             AppCommand::Annotation(command) => {
-                if self.annotation.apply(command) {
-                    self.layers.annotation.requested =
-                        matches!(self.annotation.state(), AnnotationState::On);
-                    self.outputs
-                        .annotation
-                        .send(self.annotation.state())
-                        .map_err(|error| error.to_string())?;
-                    self.update_input_status();
-                    self.reconcile(Layer::Annotation)?;
+                if matches!(command, rpresent_annotation::AnnotationCommand::On)
+                    && self.annotation_ready
+                {
+                    // An explicit On retries an unavailable backend.
+                    self.annotation_ready = self.layers.annotation.input_ready;
                 }
+                self.outputs
+                    .annotation
+                    .send(AnnotationRequest::Command(command))
+                    .map_err(|error| error.to_string())?;
             }
             AppCommand::Zoom(command) => {
                 match command {
@@ -198,8 +207,13 @@ impl Coordinator {
                 .map_err(|error| error.to_string()),
             Effect::Present {
                 layer: Layer::Annotation,
+                visible,
                 ..
-            } => Err("annotation presentation is not available".to_owned()),
+            } => self
+                .outputs
+                .annotation
+                .send(AnnotationRequest::Present { operation, visible })
+                .map_err(|error| error.to_string()),
             Effect::Present {
                 layer: Layer::Zoom, ..
             } => Err("zoom presentation is controlled by preparation and close".to_owned()),
@@ -216,12 +230,21 @@ impl Coordinator {
                     bottom_to_top,
                 })
                 .map_err(|error| error.to_string()),
+            Effect::CancelAnnotation { .. } => self
+                .outputs
+                .annotation
+                .send(AnnotationRequest::Cancel { operation })
+                .map_err(|error| error.to_string()),
             Effect::SetOwner {
                 window,
                 restore_focus,
                 ..
             } => {
                 self.input.revoke_owner();
+                let _ = self
+                    .outputs
+                    .annotation
+                    .send(AnnotationRequest::Ownership { epoch: None });
                 self.outputs
                     .native
                     .send(NativeRequest::SetOwner {
@@ -384,25 +407,56 @@ impl Coordinator {
                 };
                 if result.is_ok() {
                     if let Some(Some(window)) = owner_window {
-                        self.input.confirm_owner(
-                            if window == self.layers.annotation.window.unwrap_or(0) {
-                                PointerOwner::Annotation
-                            } else if window == self.layers.zoom.window.unwrap_or(0) {
-                                PointerOwner::Zoom
-                            } else {
-                                PointerOwner::Desktop
-                            },
-                            operation,
-                        );
+                        let owner = if window == self.layers.annotation.window.unwrap_or(0) {
+                            PointerOwner::Annotation
+                        } else if window == self.layers.zoom.window.unwrap_or(0) {
+                            PointerOwner::Zoom
+                        } else {
+                            PointerOwner::Desktop
+                        };
+                        self.input.confirm_owner(owner, operation);
+                        if owner == PointerOwner::Annotation {
+                            self.outputs
+                                .annotation
+                                .send(AnnotationRequest::Ownership {
+                                    epoch: Some(operation),
+                                })
+                                .map_err(|error| error.to_string())?;
+                        }
                     } else if owner_window == Some(None) {
                         self.input.confirm_owner(PointerOwner::Desktop, operation);
+                        let _ = self
+                            .outputs
+                            .annotation
+                            .send(AnnotationRequest::Ownership { epoch: None });
                     }
+                } else if let Some(Some(window)) = owner_window
+                    && Some(window) == self.layers.annotation.window
+                {
+                    // Failed annotation grabs clear editing eligibility until the
+                    // runtime confirms a new state; the backend stays usable.
+                    self.input.revoke_owner();
+                    self.outputs
+                        .annotation
+                        .send(AnnotationRequest::Command(
+                            rpresent_annotation::AnnotationCommand::Off,
+                        ))
+                        .map_err(|error| error.to_string())?;
                 }
                 self.complete(operation, result.map(|()| Completion::NativeApplied))
             }
             NativeEvent::Pointer { epoch, input } => {
                 if let Some((owner, input)) = self.input.handle_pointer(epoch, input) {
                     match owner {
+                        PointerOwner::Annotation => {
+                            self.outputs
+                                .annotation
+                                .send(AnnotationRequest::Pointer {
+                                    epoch,
+                                    input: annotation_pointer(input),
+                                })
+                                .map_err(|error| error.to_string())?;
+                        }
                         PointerOwner::Zoom => {
                             let Some(monitor) = self.zoom_monitor else {
                                 return Ok(());
@@ -412,7 +466,7 @@ impl Coordinator {
                                 .send(ZoomRuntimeRequest::Pointer(zoom_pointer(input, monitor)))
                                 .map_err(|error| error.to_string())?;
                         }
-                        PointerOwner::Annotation | PointerOwner::Desktop => {}
+                        PointerOwner::Desktop => {}
                     }
                 }
                 Ok(())
@@ -430,7 +484,10 @@ impl Coordinator {
             }
             NativeEvent::AnnotationKey { epoch, input } => {
                 if self.input.owns_epoch(PointerOwner::Annotation, epoch) {
-                    Ok(())
+                    self.outputs
+                        .annotation
+                        .send(AnnotationRequest::Key { epoch, input })
+                        .map_err(|error| error.to_string())
                 } else if input.keysym == 0xff1b {
                     self.handle_command(AppCommand::Zoom(rpresent_zoom::ZoomCommand::Off))
                 } else {
@@ -440,9 +497,19 @@ impl Coordinator {
             NativeEvent::Escape => {
                 self.handle_command(AppCommand::Zoom(rpresent_zoom::ZoomCommand::Off))
             }
-            NativeEvent::Lost { .. } => {
-                self.input.cancel_gesture();
-                self.handle_command(AppCommand::Zoom(rpresent_zoom::ZoomCommand::Off))
+            NativeEvent::Lost { epoch, reason } => {
+                if self.input.owns_epoch(PointerOwner::Annotation, epoch) {
+                    tracing::warn!(%reason, "annotation input ownership was lost");
+                    self.input.revoke_owner();
+                    let _ = self
+                        .outputs
+                        .annotation
+                        .send(AnnotationRequest::Ownership { epoch: None });
+                    Ok(())
+                } else {
+                    self.input.cancel_gesture();
+                    self.handle_command(AppCommand::Zoom(rpresent_zoom::ZoomCommand::Off))
+                }
             }
             NativeEvent::Exited(result) => {
                 self.native_ready = false;
@@ -503,7 +570,12 @@ impl Coordinator {
     }
 
     fn maybe_startup(&mut self) -> Result<(), String> {
-        if self.startup_applied || !self.spotlight_ready || !self.zoom_ready || !self.native_ready {
+        if self.startup_applied
+            || !self.spotlight_ready
+            || !self.zoom_ready
+            || !self.native_ready
+            || !self.annotation_started
+        {
             return Ok(());
         }
         self.startup_applied = true;
@@ -523,13 +595,147 @@ impl Coordinator {
         Ok(())
     }
 
+    fn handle_annotation(&mut self, event: AnnotationEvent) -> Result<(), String> {
+        match event {
+            AnnotationEvent::Status(status) => self.annotation_status(status),
+            AnnotationEvent::CommandRejected { command, error } => {
+                tracing::warn!(%command, %error, "annotation command rejected");
+                Ok(())
+            }
+            AnnotationEvent::Presented {
+                operation,
+                generation,
+                visible,
+                result,
+            } => {
+                if generation != self.annotation_generation {
+                    return Ok(());
+                }
+                let result = match result {
+                    Ok(()) => {
+                        self.layers.annotation.mapped = visible;
+                        Ok(Completion::Presented {
+                            layer: Layer::Annotation,
+                            visible,
+                        })
+                    }
+                    Err(error) => Err(error),
+                };
+                let effects =
+                    self.lifecycle
+                        .complete(operation, result, self.layers, Instant::now());
+                self.dispatch_effects(effects)
+            }
+            AnnotationEvent::Cancelled { operation } => {
+                let effects = self.lifecycle.complete(
+                    operation,
+                    Ok(Completion::AnnotationCancelled),
+                    self.layers,
+                    Instant::now(),
+                );
+                self.dispatch_effects(effects)
+            }
+            AnnotationEvent::Failed {
+                generation,
+                error,
+                recoverable,
+            } => {
+                tracing::warn!(%error, recoverable, "annotation runtime failed");
+                if generation == self.annotation_generation {
+                    self.annotation_ready = false;
+                    self.annotation_editing = false;
+                    self.layers.annotation.input_ready = false;
+                    self.layers.annotation.requested = false;
+                    self.layers.annotation.window = None;
+                    self.layers.annotation.mapped = false;
+                    self.input.revoke_owner();
+                    self.update_input_status();
+                    let effects = self.lifecycle.visibility_changed(
+                        Layer::Annotation,
+                        self.layers,
+                        Instant::now(),
+                    );
+                    self.dispatch_effects(effects)?;
+                }
+                Ok(())
+            }
+            AnnotationEvent::Exited(result) => {
+                self.annotation_ready = false;
+                self.layers.annotation.input_ready = false;
+                match result {
+                    Ok(()) => tracing::debug!("annotation runtime exited"),
+                    Err(error) => tracing::warn!(%error, "annotation runtime exited"),
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn annotation_status(&mut self, status: AnnotationStatus) -> Result<(), String> {
+        self.annotation_generation = status.generation;
+        self.annotation_ready = status.ready;
+        self.annotation_editing = status.editing_requested;
+        self.layers.annotation.window = status.window;
+        self.layers.annotation.input_ready = status.ready;
+        self.layers.annotation.requested = status.ready
+            && crate::overlay_lifecycle::annotation_needs_presentation(
+                status.editing_requested,
+                status.has_content,
+            );
+        if !status.ready {
+            self.layers.annotation.mapped = false;
+            self.annotation_editing = false;
+            self.input.revoke_owner();
+        }
+        self.update_input_status();
+        let first = !self.annotation_started;
+        self.annotation_started = true;
+        let effects =
+            self.lifecycle
+                .visibility_changed(Layer::Annotation, self.layers, Instant::now());
+        self.dispatch_effects(effects)?;
+        if first {
+            self.maybe_startup()?;
+        }
+        Ok(())
+    }
+
+    fn shutdown(&mut self) {
+        let _ = self.outputs.annotation.send(AnnotationRequest::Shutdown);
+    }
+
     fn update_input_status(&mut self) {
         self.input.set_status(InputStatus {
             zoom_ready: self.zoom_ready && !self.zoom_worker_failed,
             zoom_active: self.lifecycle.is_zoom_active(),
-            annotation_enabled: self.layers.annotation.requested,
+            annotation_enabled: self.annotation_editing,
             annotation_ready: self.layers.annotation.input_ready,
         });
+    }
+}
+
+pub(crate) fn annotation_pointer(input: RawPointer) -> rpresent_annotation::PointerInput {
+    let point = |root: (i32, i32)| rpresent_annotation::Point {
+        x: root.0,
+        y: root.1,
+    };
+    match input {
+        RawPointer::Down { root, time } => {
+            rpresent_annotation::PointerInput::Down {
+                root: point(root),
+                time,
+            }
+        }
+        RawPointer::Move { root, time } => {
+            rpresent_annotation::PointerInput::Move {
+                root: point(root),
+                time,
+            }
+        }
+        RawPointer::Up { root, time } => rpresent_annotation::PointerInput::Up {
+            root: point(root),
+            time,
+        },
     }
 }
 
@@ -570,6 +776,7 @@ mod tests {
         mpsc::Receiver<SpotlightRuntimeMessage>,
         rpresent_zoom::ZoomInbox,
         crate::native_input::NativeInbox,
+        rpresent_annotation::AnnotationInbox,
     ) {
         let config = Arc::new(ConfigService::new(
             PathBuf::from("test.toml"),
@@ -578,17 +785,19 @@ mod tests {
         let (spotlight, spotlight_events) = mpsc::channel();
         let (zoom, zoom_events) = zoom_channel().unwrap();
         let (native, native_events) = native_channel().unwrap();
+        let (annotation, annotation_inbox) = rpresent_annotation::channel().unwrap();
         let outputs = CoordinatorOutputs {
             spotlight,
             zoom,
             native,
-            annotation: mpsc::channel().0,
+            annotation,
         };
         (
             Coordinator::new(config, outputs),
             spotlight_events,
             zoom_events,
             native_events,
+            annotation_inbox,
         )
     }
 
@@ -619,8 +828,111 @@ mod tests {
     }
 
     #[test]
+    fn annotation_status_preserves_viewing_without_input() {
+        let (mut coordinator, _, _, _, annotation) = coordinator();
+        coordinator
+            .handle_event(AppEvent::AnnotationRuntime(AnnotationEvent::Status(
+                AnnotationStatus {
+                    generation: 1,
+                    window: Some(3),
+                    ready: true,
+                    editing_requested: false,
+                    has_content: true,
+                    text_editing: false,
+                },
+            )))
+            .unwrap();
+        assert!(coordinator.layers.annotation.requested);
+        assert!(!coordinator.annotation_editing);
+        assert!(!coordinator.input.owns_epoch(PointerOwner::Annotation, 1));
+        assert!(matches!(
+            annotation.try_recv(),
+            Ok(AnnotationRequest::Present { visible: true, .. })
+        ));
+    }
+
+    #[test]
+    fn a_stale_presentation_acknowledgment_is_ignored() {
+        let (mut coordinator, _, _, _, annotation) = coordinator();
+        coordinator
+            .handle_event(AppEvent::AnnotationRuntime(AnnotationEvent::Status(
+                AnnotationStatus {
+                    generation: 1,
+                    window: Some(3),
+                    ready: true,
+                    editing_requested: true,
+                    has_content: false,
+                    text_editing: false,
+                },
+            )))
+            .unwrap();
+        let mut operation = 0;
+        while let Ok(request) = annotation.try_recv() {
+            if let AnnotationRequest::Present { operation: id, .. } = request {
+                operation = id;
+            }
+        }
+        coordinator
+            .handle_event(AppEvent::AnnotationRuntime(AnnotationEvent::Presented {
+                operation,
+                generation: 2,
+                visible: true,
+                result: Ok(()),
+            }))
+            .unwrap();
+        assert!(!coordinator.layers.annotation.mapped);
+    }
+
+    #[test]
+    fn a_failed_backend_is_retried_by_an_explicit_on() {
+        let (mut coordinator, _, _, _, annotation) = coordinator();
+        coordinator
+            .handle_event(AppEvent::AnnotationRuntime(AnnotationEvent::Status(
+                AnnotationStatus {
+                    generation: 1,
+                    window: Some(3),
+                    ready: true,
+                    editing_requested: true,
+                    has_content: false,
+                    text_editing: false,
+                },
+            )))
+            .unwrap();
+        coordinator
+            .handle_event(AppEvent::AnnotationRuntime(AnnotationEvent::Failed {
+                generation: 1,
+                error: "presentation failed".to_owned(),
+                recoverable: true,
+            }))
+            .unwrap();
+        assert!(!coordinator.layers.annotation.requested);
+        while annotation.try_recv().is_ok() {}
+        coordinator
+            .handle_event(AppEvent::Command(AppCommand::Annotation(
+                rpresent_annotation::AnnotationCommand::On,
+            )))
+            .unwrap();
+        assert!(matches!(
+            annotation.try_recv(),
+            Ok(AnnotationRequest::Command(
+                rpresent_annotation::AnnotationCommand::On
+            ))
+        ));
+    }
+
+    #[test]
+    fn shutdown_is_forwarded_before_the_sender_is_released() {
+        let (mut coordinator, _, _, _, annotation) = coordinator();
+        coordinator.shutdown();
+        assert_eq!(
+            annotation.try_recv(),
+            Ok(AnnotationRequest::Shutdown)
+        );
+    }
+
+    #[test]
     fn activation_does_not_prepare_before_spotlight_hide_acknowledgment() {
-        let (mut coordinator, spotlight_events, zoom_events, native_events) = coordinator();
+        let (mut coordinator, spotlight_events, zoom_events, native_events, _annotation) = coordinator();
 
         coordinator
             .handle_event(AppEvent::SpotlightRuntime(SpotlightEvent::Ready {

@@ -65,6 +65,13 @@ pub struct LayerSnapshot {
     pub zoom: LayerState,
     pub spotlight: LayerState,
     pub annotation: LayerState,
+    /// Editing intent, independent of whether artwork stays visible.
+    pub annotation_editing: bool,
+}
+
+/// Viewing keeps finished artwork on screen without requesting input.
+pub fn annotation_needs_presentation(editing: bool, has_content: bool) -> bool {
+    editing || has_content
 }
 
 impl LayerSnapshot {
@@ -115,6 +122,9 @@ pub enum Effect {
         window: Option<u32>,
         restore_focus: bool,
     },
+    CancelAnnotation {
+        operation: u64,
+    },
     CommitZoom {
         operation: u64,
     },
@@ -137,6 +147,7 @@ impl Effect {
             | Self::PrepareZoom { operation, .. }
             | Self::Restack { operation, .. }
             | Self::SetOwner { operation, .. }
+            | Self::CancelAnnotation { operation }
             | Self::CommitZoom { operation }
             | Self::CloseZoom { operation }
             | Self::ResetZoom { operation }
@@ -151,6 +162,7 @@ pub enum Completion {
     Presented { layer: Layer, visible: bool },
     ZoomPrepared { window: u32 },
     NativeApplied,
+    AnnotationCancelled,
     ZoomCommitted,
     ZoomClosed,
     ZoomReset,
@@ -164,6 +176,7 @@ enum Expect {
     Prepared,
     Restack,
     Owner,
+    CancelAnnotation,
     Commit,
     Close,
     Reset,
@@ -178,6 +191,7 @@ impl Expect {
             Self::Prepared => "zoom preparation",
             Self::Restack => "window restacking",
             Self::Owner => "pointer ownership",
+            Self::CancelAnnotation => "annotation cancellation",
             Self::Commit => "zoom commit",
             Self::Close => "zoom close",
             Self::Reset => "zoom reset",
@@ -190,6 +204,7 @@ impl Expect {
             (Self::Monitor, Completion::MonitorSelected(_))
             | (Self::Prepared, Completion::ZoomPrepared { .. })
             | (Self::Restack | Self::Owner, Completion::NativeApplied)
+            | (Self::CancelAnnotation, Completion::AnnotationCancelled)
             | (Self::Commit, Completion::ZoomCommitted)
             | (Self::Close, Completion::ZoomClosed)
             | (Self::Reset, Completion::ZoomReset)
@@ -235,6 +250,13 @@ enum Stage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerAction {
+    Continue,
+    Commit,
+    AdvanceStop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StopStep {
     CancelMotion,
     Release,
@@ -257,6 +279,9 @@ pub struct WindowLifecycle {
     pending_order: Option<[Option<u32>; 3]>,
     owner_window: Option<u32>,
     pending_owner: Option<Option<u32>>,
+    owner_action: OwnerAction,
+    annotation_cancel_done: bool,
+    capture_owner_released: bool,
     outstanding: Option<Outstanding>,
     deadline: Option<Instant>,
     present_blocked: [bool; 3],
@@ -287,6 +312,9 @@ impl WindowLifecycle {
             pending_order: None,
             owner_window: None,
             pending_owner: None,
+            owner_action: OwnerAction::Continue,
+            annotation_cancel_done: false,
+            capture_owner_released: false,
             outstanding: None,
             deadline: None,
             present_blocked: [false; 3],
@@ -413,15 +441,29 @@ impl WindowLifecycle {
                 self.deadline = None;
                 self.errors
                     .push(format!("{} failed: {error}", outstanding.expect.describe()));
-                if self.stage == Stage::Stopping {
-                    if self.stop_step == StopStep::Restore {
-                        // Keep restoring the items that still can succeed.
-                        self.block_failed(outstanding.expect);
-                    } else {
-                        self.advance_stop_step();
+                match self.stage {
+                    Stage::Stopping => {
+                        if self.stop_step == StopStep::Restore {
+                            // Keep restoring the items that still can succeed.
+                            self.block_failed(outstanding.expect);
+                        } else {
+                            self.advance_stop_step();
+                        }
                     }
-                } else {
-                    self.begin_stopping();
+                    Stage::Idle | Stage::Active => match outstanding.expect {
+                        // A missing annotation input owner must not stop zoom.
+                        Expect::Owner => {}
+                        // Keep viewing artwork even when one presentation fails.
+                        Expect::Present {
+                            layer: Layer::Annotation,
+                            ..
+                        } => {
+                            self.present_blocked[Layer::Annotation.index()] = true;
+                        }
+                        Expect::CancelAnnotation => {}
+                        _ => self.begin_stopping(),
+                    },
+                    _ => self.begin_stopping(),
                 }
             }
         }
@@ -470,6 +512,9 @@ impl WindowLifecycle {
 
     fn begin_activation(&mut self) {
         self.suppressed = true;
+        self.annotation_cancel_done = false;
+        self.capture_owner_released = false;
+        self.owner_action = OwnerAction::Continue;
         self.committed = false;
         self.selected_monitor = None;
         self.zoom_window = None;
@@ -486,6 +531,7 @@ impl WindowLifecycle {
 
     fn begin_stopping(&mut self) {
         self.suppressed = false;
+        self.annotation_cancel_done = false;
         self.committed = false;
         self.stage = Stage::Stopping;
         self.stop_step = StopStep::CancelMotion;
@@ -535,12 +581,17 @@ impl WindowLifecycle {
             }
             (Expect::Owner, Completion::NativeApplied) => {
                 self.owner_window = self.pending_owner.take().flatten();
-                if self.stage == Stage::Stopping {
-                    self.advance_stop_step();
-                } else {
-                    self.stage = Stage::Committing;
+                match self.owner_action {
+                    OwnerAction::Continue => {}
+                    OwnerAction::Commit => self.stage = Stage::Committing,
+                    OwnerAction::AdvanceStop => {
+                        if self.stage == Stage::Stopping {
+                            self.advance_stop_step();
+                        }
+                    }
                 }
             }
+            (Expect::CancelAnnotation, Completion::AnnotationCancelled) => {}
             (Expect::Commit, Completion::ZoomCommitted) => {
                 self.committed = true;
                 self.stage = Stage::Active;
@@ -583,9 +634,19 @@ impl WindowLifecycle {
                     if self.drain_next_command() {
                         continue;
                     }
-                    return self.reconcile(layers, now, true);
+                    let effects = self.reconcile(layers, now, true);
+                    if !effects.is_empty() {
+                        return effects;
+                    }
+                    if self.reconcile_owner(layers, now) {
+                        continue;
+                    }
+                    return Vec::new();
                 }
                 Stage::Suppressing => {
+                    if let Some(effects) = self.maybe_cancel_annotation(layers, now) {
+                        return effects;
+                    }
                     if self.selected_monitor.is_none() {
                         return self.emit(
                             Effect::SelectZoom {
@@ -594,6 +655,9 @@ impl WindowLifecycle {
                             Expect::Monitor,
                             now,
                         );
+                    }
+                    if let Some(effects) = self.release_owner_for_capture(now) {
+                        return effects;
                     }
                     let effects = self.reconcile(layers, now, false);
                     if !effects.is_empty() {
@@ -624,6 +688,7 @@ impl WindowLifecycle {
                     match self.preferred_owner_window(layers) {
                         Some(window) => {
                             self.stage = Stage::AcquiringOwner;
+                            self.owner_action = OwnerAction::Commit;
                             self.pending_owner = Some(Some(window));
                             return self.emit(
                                 Effect::SetOwner {
@@ -731,6 +796,13 @@ impl WindowLifecycle {
                 // Transfer to a ready annotation window, or give focus back to
                 // the desktop window that held it before zoom.
                 let transfer = self.eligible_annotation_window(layers);
+                if transfer != layers.annotation.window
+                    && self.owner_window == layers.annotation.window
+                    && let Some(effects) = self.maybe_cancel_annotation(layers, now)
+                {
+                    return effects;
+                }
+                self.owner_action = OwnerAction::AdvanceStop;
                 self.pending_owner = Some(transfer);
                 self.emit(
                     Effect::SetOwner {
@@ -843,11 +915,82 @@ impl WindowLifecycle {
     }
 
     fn eligible_annotation_window(&self, layers: &LayerSnapshot) -> Option<u32> {
-        if layers.annotation.requested && layers.annotation.input_ready {
+        if layers.annotation_editing
+            && layers.annotation.requested
+            && layers.annotation.input_ready
+            && layers.annotation.mapped
+        {
             layers.annotation.window
         } else {
             None
         }
+    }
+
+    /// Transfer ownership only after the current annotation edit is cancelled.
+    fn maybe_cancel_annotation(
+        &mut self,
+        layers: &LayerSnapshot,
+        now: Instant,
+    ) -> Option<Vec<Effect>> {
+        if self.annotation_cancel_done
+            || !layers.annotation_editing
+            || layers.annotation.window.is_none()
+        {
+            return None;
+        }
+        self.annotation_cancel_done = true;
+        Some(self.emit(
+            Effect::CancelAnnotation {
+                operation: self.next_operation(),
+            },
+            Expect::CancelAnnotation,
+            now,
+        ))
+    }
+
+    /// Release the upper-layer pointer grab before capture hides its window.
+    fn release_owner_for_capture(&mut self, now: Instant) -> Option<Vec<Effect>> {
+        if self.owner_window.is_none() || self.capture_owner_released {
+            return None;
+        }
+        self.capture_owner_released = true;
+        self.owner_action = OwnerAction::Continue;
+        self.pending_owner = Some(None);
+        Some(self.emit(
+            Effect::SetOwner {
+                operation: self.next_operation(),
+                window: None,
+                restore_focus: true,
+            },
+            Expect::Owner,
+            now,
+        ))
+    }
+
+    /// Reconcile ownership while zoom is idle or already active.
+    fn reconcile_owner(&mut self, layers: &LayerSnapshot, now: Instant) -> bool {
+        let preferred = self.preferred_owner_window(layers);
+        if preferred == self.owner_window {
+            return false;
+        }
+        if preferred != layers.annotation.window
+            && self.owner_window == layers.annotation.window
+            && let Some(_) = self.maybe_cancel_annotation(layers, now)
+        {
+            return true;
+        }
+        self.owner_action = OwnerAction::Continue;
+        self.pending_owner = Some(preferred);
+        self.emit(
+            Effect::SetOwner {
+                operation: self.next_operation(),
+                window: preferred,
+                restore_focus: preferred.is_none(),
+            },
+            Expect::Owner,
+            now,
+        );
+        true
     }
 
     fn emit(&mut self, effect: Effect, expect: Expect, now: Instant) -> Vec<Effect> {
@@ -912,6 +1055,7 @@ mod tests {
                 mapped: annotation_requested,
                 input_ready: annotation_ready,
             },
+            annotation_editing: annotation_ready,
         }
     }
 
@@ -930,6 +1074,7 @@ mod tests {
                 restore_focus,
                 ..
             } => format!("owner {window:?} restore_focus={restore_focus}"),
+            Effect::CancelAnnotation { .. } => "cancel-annotation".to_owned(),
             Effect::CommitZoom { .. } => "commit".to_owned(),
             Effect::CloseZoom { .. } => "close".to_owned(),
             Effect::ResetZoom { .. } => "reset".to_owned(),
@@ -987,6 +1132,7 @@ mod tests {
                     Completion::ZoomPrepared { window: ZOOM }
                 }
                 Effect::Restack { .. } | Effect::SetOwner { .. } => Completion::NativeApplied,
+                Effect::CancelAnnotation { .. } => Completion::AnnotationCancelled,
                 Effect::CommitZoom { .. } => Completion::ZoomCommitted,
                 Effect::CloseZoom { .. } => {
                     self.layers.zoom = LayerState::default();
@@ -1037,6 +1183,69 @@ mod tests {
                 effects = self.ack(&effect);
             }
         }
+    }
+
+    #[test]
+    fn viewing_artwork_is_visible_without_requesting_editing() {
+        assert!(annotation_needs_presentation(false, true));
+        assert!(annotation_needs_presentation(true, false));
+        assert!(!annotation_needs_presentation(false, false));
+    }
+
+    #[test]
+    fn viewing_artwork_never_owns_input() {
+        let mut driver = Driver::new(layers((false, false), (true, false, ANNOTATION)));
+        driver.layers.annotation_editing = false;
+        let effects = driver.request(ZoomCommand::On);
+        driver.run(effects);
+        assert!(
+            !driver
+                .seen
+                .iter()
+                .any(|seen| seen.contains(&format!("owner Some({ANNOTATION})"))),
+            "{:?}",
+            driver.seen
+        );
+    }
+
+    #[test]
+    fn capture_cancels_annotation_before_hiding_it() {
+        let mut driver = Driver::new(layers((false, false), (true, true, ANNOTATION)));
+        let effects = driver.request(ZoomCommand::On);
+        assert_eq!(describe(&effects[0]), "cancel-annotation");
+        let effects = driver.ack(&effects[0]);
+        assert_eq!(describe(&effects[0]), "select");
+        driver.run(effects);
+        let cancel = driver
+            .seen
+            .iter()
+            .position(|seen| seen == "cancel-annotation")
+            .unwrap();
+        let hide = driver
+            .seen
+            .iter()
+            .position(|seen| seen == "present annotation off")
+            .unwrap();
+        assert!(cancel < hide, "{:?}", driver.seen);
+    }
+
+    #[test]
+    fn viewing_annotation_is_hidden_for_capture_and_restored_afterward() {
+        let mut driver = Driver::new(layers((false, false), (true, false, ANNOTATION)));
+        driver.layers.annotation_editing = false;
+        let effects = driver.request(ZoomCommand::On);
+        driver.run(effects);
+        let hide = driver
+            .seen
+            .iter()
+            .position(|seen| seen == "present annotation off");
+        let show = driver
+            .seen
+            .iter()
+            .position(|seen| seen == "present annotation on");
+        assert!(hide.is_some(), "{:?}", driver.seen);
+        assert!(show.is_some(), "{:?}", driver.seen);
+        assert!(hide.unwrap() < show.unwrap());
     }
 
     #[test]
