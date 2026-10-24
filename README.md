@@ -9,7 +9,7 @@ This repository is a Rust workspace with five crates:
 - `crates/rpresent-config` - shared TOML config loading, defaults, and config-file writing
 - `crates/rpresent-spotlight` - spotlight state and overlay rendering
 - `crates/rpresent-annotation` - drawing tools and stroke history
-- `crates/rpresent-zoom` - live capture and magnified rendering
+- `crates/rpresent-zoom` - frozen screenshot capture and OpenGL magnified rendering
 - `crates/rpresent` - CLI, IPC, shortcut routing, and runtime composition
 
 ## Requirements
@@ -101,21 +101,24 @@ Existing configurations must remove `dim_alpha` and `spot_size_pct`. To migrate 
 When the daemon starts without a command it enters an idle loop — no overlay appears until a shortcut or IPC command triggers one.
 
 **Activate zoom mode:**
-- Press `Ctrl+3` to toggle zoom mode on/off.
+- Press the configured zoom shortcut (the default is `Ctrl+3`) to toggle zoom on/off.
 - Or send a command directly: `cargo run -p rpresent -- zoom=on` / `zoom=off`.
 
+Activation captures the monitor under the pointer once, before the opaque zoom window is shown. The image remains fixed until zoom is closed. Moving the pointer alone does not move the image.
+
 **Change zoom level:**
-While in zoom mode, hold `Ctrl` and scroll the mouse wheel to increase or decrease the zoom scale.
+While zoom is active, hold the configured wheel modifier (the default is `Ctrl`) and scroll the mouse wheel. Wheel direction reverses immediately, and the pointer position stays anchored in the screenshot. Hold the left mouse button to pan; releasing it continues the pan with time-based inertia.
 
 **Reset zoom:**
 ```bash
 cargo run -p rpresent -- zoom=reset
 ```
-Restores the default scale and re-centers the magnified view.
+Restores the initial scale and re-centers the magnified view without capturing again. The next activation captures a fresh screenshot.
 
 **Known limitations:**
 - Linux/X11 only; Wayland is not supported.
-- An ARGB32-capable compositor must be running (e.g., picom, compton, KWin, Mutter) for overlay transparency to render correctly.
+- Linux/X11 GLX with OpenGL 3.3-compatible shaders is required. The renderer uses an opaque window and does not require a compositor.
+- `follow_cursor`, `pan_friction`, and `capture_target` are removed configuration keys. Use `drag_friction` and `scale_friction` for motion damping.
 
 ## Notes
 

@@ -2,16 +2,36 @@
 pub struct CapturedFrame {
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+    pub bgra: Vec<u8>,
 }
 
 impl CapturedFrame {
-    pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Self {
-        Self {
+    /// Validates a full-monitor screenshot: nonzero dimensions and exactly
+    /// `width * height * 4` BGRA bytes.
+    pub fn new(width: u32, height: u32, bgra: Vec<u8>) -> Result<Self, CaptureError> {
+        if width == 0 || height == 0 {
+            return Err(CaptureError::InvalidDimensions);
+        }
+
+        let pixel_count = width as u64 * height as u64;
+        let expected = pixel_count
+            .checked_mul(4)
+            .ok_or(CaptureError::InvalidDimensions)? as usize;
+
+        if bgra.len() != expected {
+            return Err(CaptureError::InvalidByteLength {
+                expected,
+                actual: bgra.len(),
+                width,
+                height,
+            });
+        }
+
+        Ok(Self {
             width,
             height,
-            rgba,
-        }
+            bgra,
+        })
     }
 }
 
@@ -21,30 +41,15 @@ pub enum CaptureError {
     Unavailable,
     #[error("capture backend error: {0}")]
     Backend(String),
-}
-
-pub trait FrameSource {
-    fn capture_frame(&mut self) -> Result<CapturedFrame, CaptureError>;
-}
-
-pub struct ZoomCapture<S> {
-    source: S,
-}
-
-impl<S> ZoomCapture<S> {
-    pub fn new(source: S) -> Self {
-        Self { source }
-    }
-}
-
-impl<S: FrameSource> ZoomCapture<S> {
-    pub fn next_frame(&mut self) -> Result<CapturedFrame, CaptureError> {
-        self.source.capture_frame().inspect_err(|error| {
-            tracing::error!(
-                backend = std::any::type_name::<S>(),
-                ?error,
-                "failed to capture zoom frame"
-            );
-        })
-    }
+    #[error("capture dimensions must be nonzero")]
+    InvalidDimensions,
+    #[error(
+        "capture frame must be {expected} bytes for {width}x{height} BGRA pixels, got {actual}"
+    )]
+    InvalidByteLength {
+        expected: usize,
+        actual: usize,
+        width: u32,
+        height: u32,
+    },
 }

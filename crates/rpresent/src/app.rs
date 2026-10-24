@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use rpresent_annotation::{AnnotationController, AnnotationState};
 use rpresent_config::{ConfigService, default_config_path, write_default_config};
 use rpresent_spotlight::{SpotlightController, SpotlightRuntimeMessage};
-use rpresent_zoom::{ZoomController, ZoomState};
+use rpresent_zoom::{ZoomRequest, channel as zoom_channel, run_overlay};
 
 use crate::command::AppCommand;
 use crate::input::AppEvent;
@@ -178,7 +178,12 @@ fn run_daemon(config_service: Arc<ConfigService>) -> Result<(), AppError> {
     let (event_tx, event_rx) = mpsc::channel::<AppEvent>();
     let (spotlight_tx, spotlight_rx) = mpsc::channel::<SpotlightRuntimeMessage>();
     let (annotation_tx, annotation_rx) = mpsc::channel::<AnnotationState>();
-    let (zoom_tx, zoom_rx) = crossbeam_channel::unbounded::<ZoomState>();
+    config_service.zoom().validate()?;
+    let (zoom_handle, zoom_inbox) = zoom_channel().map_err(|error| {
+        AppError::Zoom(rpresent_zoom::OverlayError::Runtime(format!(
+            "failed to create zoom transport: {error}"
+        )))
+    })?;
     let socket_path = ipc::socket_path_for(&config_service.app().socket_name)?;
 
     // Forward IPC commands into unified event channel
@@ -197,11 +202,12 @@ fn run_daemon(config_service: Arc<ConfigService>) -> Result<(), AppError> {
 
     // X11 input capture (Linux only)
     #[cfg(target_os = "linux")]
-    crate::x11_input::spawn(Arc::clone(&config_service), event_tx);
+    crate::x11_input::spawn(Arc::clone(&config_service), event_tx, zoom_handle.clone());
     #[cfg(not(target_os = "linux"))]
     let _ = event_tx;
 
     let controller_service = Arc::clone(&config_service);
+    let zoom_command_handle = zoom_handle.clone();
     std::thread::spawn(move || {
         let mut spotlight_controller =
             SpotlightController::new(controller_service.spotlight().enabled_on_start);
@@ -210,13 +216,10 @@ fn run_daemon(config_service: Arc<ConfigService>) -> Result<(), AppError> {
             controller_service.annotation().default_tool,
             controller_service.annotation().history_depth,
         );
-        let mut zoom_controller = ZoomController::from_config(controller_service.zoom());
-
         let _ = spotlight_tx.send(SpotlightRuntimeMessage::Visibility(
             spotlight_controller.state(),
         ));
         let _ = annotation_tx.send(annotation_controller.state());
-        let _ = zoom_tx.send(zoom_controller.state());
 
         for event in event_rx {
             match event {
@@ -233,9 +236,7 @@ fn run_daemon(config_service: Arc<ConfigService>) -> Result<(), AppError> {
                     }
                 }
                 AppEvent::Command(AppCommand::Zoom(command)) => {
-                    if zoom_controller.apply(command) {
-                        let _ = zoom_tx.send(zoom_controller.state());
-                    }
+                    let _ = zoom_command_handle.send(ZoomRequest::Command(command));
                 }
                 AppEvent::Input(crate::input::InputAction::SpotlightWheel { delta }) => {
                     let _ = spotlight_tx.send(SpotlightRuntimeMessage::ResizeBy(
@@ -247,9 +248,10 @@ fn run_daemon(config_service: Arc<ConfigService>) -> Result<(), AppError> {
                     cursor_x,
                     cursor_y,
                 }) => {
-                    if zoom_controller.zoom_by_scroll(delta, (cursor_x as f32, cursor_y as f32)) {
-                        let _ = zoom_tx.send(zoom_controller.state());
-                    }
+                    let _ = zoom_command_handle.send(ZoomRequest::Scroll {
+                        delta: f64::from(delta),
+                        root: (i32::from(cursor_x), i32::from(cursor_y)),
+                    });
                 }
             }
         }
@@ -264,10 +266,13 @@ fn run_daemon(config_service: Arc<ConfigService>) -> Result<(), AppError> {
         rpresent_annotation::run_overlay(annotation_service, annotation_rx)
     });
     let zoom_service = Arc::clone(&config_service);
-    let zoom_handle = std::thread::spawn(move || rpresent_zoom::run_overlay(zoom_service, zoom_rx));
+    let zoom_runtime = std::thread::spawn(move || run_overlay(zoom_service, zoom_inbox));
+    if config_service.zoom().enabled_on_start {
+        let _ = zoom_handle.send(ZoomRequest::Command(rpresent_zoom::ZoomCommand::On));
+    }
 
     spotlight_handle.join().unwrap()?;
     annotation_handle.join().unwrap()?;
-    zoom_handle.join().unwrap()?;
+    zoom_runtime.join().unwrap()?;
     Ok(())
 }

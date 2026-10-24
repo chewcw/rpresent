@@ -101,13 +101,14 @@ impl ZoomSession {
             return;
         };
         let before = camera.translation();
+        let dragging_move = matches!(input, PointerInput::Move { .. }) && camera.is_dragging();
         match input {
             PointerInput::Down { local, time } => camera.pointer_down(local, time),
             PointerInput::Move { local, time } => camera.pointer_move(local, time),
             PointerInput::Up { time } => camera.pointer_up(time),
             PointerInput::Cancel => camera.cancel_motion(),
         }
-        self.dirty |= before != camera.translation();
+        self.dirty |= dragging_move || before != camera.translation();
     }
 
     pub fn advance(&mut self, dt: Duration) -> bool {

@@ -375,9 +375,10 @@ impl X11SpotlightOverlay {
                 screen.black_pixel
             })
             .border_pixel(screen.black_pixel)
-            // Bind the colormap to the window so the server knows which
-            // color interpretation applies. For our direct-color visual this
-            // is a formality: the pixel bits already encode full RGBA.
+            // Bind the colormap to the window. The server uses it to read
+            // the pixel format. For our direct-color visual, the pixel bits
+            // already encode full RGBA, so the colormap is not consulted at
+            // draw time.
             .colormap(colormap);
 
         connection

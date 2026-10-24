@@ -117,6 +117,11 @@ fn dragging_marks_dirty_but_idle_pointer_motion_does_not() {
     });
     assert!(!session.take_dirty());
     session.pointer(PointerInput::Move {
+        local: (50.0, 50.0),
+        time: Duration::from_millis(10),
+    });
+    assert!(session.take_dirty());
+    session.pointer(PointerInput::Move {
         local: (80.0, 50.0),
         time: Duration::from_millis(30),
     });

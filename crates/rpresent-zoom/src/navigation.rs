@@ -204,6 +204,10 @@ impl Camera {
         self.pan_velocity_active() || self.zoom_velocity.abs() >= ZOOM_VELOCITY_THRESHOLD
     }
 
+    pub fn is_dragging(&self) -> bool {
+        self.dragging
+    }
+
     fn centered_translation(config: &NavigationConfig, viewport: (f64, f64)) -> (f64, f64) {
         let half = (viewport.0 / 2.0, viewport.1 / 2.0);
         (
@@ -231,28 +235,53 @@ impl Camera {
         } else {
             timeline.push((release_time, release_position));
         }
-        let mut samples: Vec<(Duration, (f64, f64))> = Vec::new();
-        for sample in timeline {
-            if sample.0 < start || sample.0 > release_time {
-                continue;
-            }
-            if samples.last().is_some_and(|last| last.0 == sample.0) {
-                samples.pop();
-            }
-            samples.push(sample);
-        }
-        if samples.len() < 2 {
+        if self
+            .samples
+            .last()
+            .is_some_and(|(time, position)| *time < release_time && *position == release_position)
+        {
             return (0.0, 0.0);
         }
-        let (time, position) = samples[samples.len() - 1];
-        let (previous_time, previous_position) = samples[samples.len() - 2];
-        let elapsed = (time - previous_time).as_secs_f64();
+        timeline.sort_by_key(|sample| sample.0);
+        timeline.dedup_by_key(|sample| sample.0);
+        if timeline.len() < 2 || release_time <= start {
+            return (0.0, 0.0);
+        }
+        let position_at = |time: Duration| {
+            if let Some((_, position)) = timeline.iter().find(|sample| sample.0 == time) {
+                return *position;
+            }
+            let Some((before_time, before_position)) = timeline
+                .iter()
+                .rev()
+                .find(|sample| sample.0 < time)
+                .copied()
+            else {
+                return timeline[0].1;
+            };
+            let Some((after_time, after_position)) =
+                timeline.iter().find(|sample| sample.0 > time).copied()
+            else {
+                return before_position;
+            };
+            let span = (after_time - before_time).as_secs_f64();
+            if span <= 0.0 {
+                return before_position;
+            }
+            let fraction = (time - before_time).as_secs_f64() / span;
+            (
+                before_position.0 + (after_position.0 - before_position.0) * fraction,
+                before_position.1 + (after_position.1 - before_position.1) * fraction,
+            )
+        };
+        let start_position = position_at(start);
+        let elapsed = (release_time - start).as_secs_f64();
         if elapsed <= 0.0 {
             return (0.0, 0.0);
         }
         (
-            (position.0 - previous_position.0) / elapsed,
-            (position.1 - previous_position.1) / elapsed,
+            (release_position.0 - start_position.0) / elapsed,
+            (release_position.1 - start_position.1) / elapsed,
         )
     }
 }

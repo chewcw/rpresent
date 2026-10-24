@@ -8,4 +8,7 @@ rpresent-config = { path = "../rpresent-config" }
 tracing = { workspace = true }
 thiserror = "2"
 crossbeam-channel = "0.5"
-x11rb = { version = "0.13", features = ["render", "image"] }
+x11rb = { version = "0.13", features = ["render", "image", "randr"] }
+glow = "0.16"
+x11 = { version = "2", features = ["glx", "xlib"] }
+libc = "0.2"

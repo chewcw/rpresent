@@ -40,7 +40,7 @@ fn mode_shortcuts_toggle_and_update_the_active_mode() {
         router.handle_key("Ctrl+3"),
         Some(AppCommand::Zoom(ZoomCommand::Toggle))
     );
-    assert_eq!(router.active_mode(), ActiveMode::Zoom);
+    assert_eq!(router.active_mode(), ActiveMode::Annotation);
 }
 
 #[test]
@@ -102,11 +102,10 @@ fn spotlight_wheel_accepts_control_as_configured_modifier() {
 #[test]
 fn zoom_wheel_emits_zoom_wheel_action_in_zoom_mode() {
     let bindings = InputBindings::from(&ShortcutConfig::default());
-    let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);
+    let router = InputRouter::new(bindings, ActiveMode::Spotlight);
 
-    assert!(router.handle_key("Ctrl+3").is_some());
     assert_eq!(
-        router.handle_wheel("Ctrl", -1.0, 100, 200),
+        router.handle_wheel_with_zoom("Ctrl", -1.0, 100, 200, true),
         Some(InputAction::ZoomWheel {
             delta: -1.0,
             cursor_x: 100,
@@ -118,10 +117,12 @@ fn zoom_wheel_emits_zoom_wheel_action_in_zoom_mode() {
 #[test]
 fn zoom_wheel_without_modifier_emits_nothing() {
     let bindings = InputBindings::from(&ShortcutConfig::default());
-    let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);
+    let router = InputRouter::new(bindings, ActiveMode::Spotlight);
 
-    assert!(router.handle_key("Ctrl+3").is_some());
-    assert_eq!(router.handle_wheel("Shift", 1.0, 0, 0), None);
+    assert_eq!(
+        router.handle_wheel_with_zoom("Shift", 1.0, 0, 0, true),
+        None
+    );
 }
 
 #[test]
@@ -143,4 +144,30 @@ fn annotation_mode_emits_nothing_on_wheel() {
 
     assert!(router.handle_key("Ctrl+2").is_some());
     assert_eq!(router.handle_wheel("Ctrl", 1.0, 0, 0), None);
+}
+
+#[test]
+fn active_zoom_owns_wheel_even_when_the_previous_tool_was_spotlight() {
+    let bindings = InputBindings::from(&ShortcutConfig::default());
+    let router = InputRouter::new(bindings, ActiveMode::Spotlight);
+
+    assert_eq!(
+        router.handle_wheel_with_zoom("Ctrl", -1.0, 100, 200, true),
+        Some(InputAction::ZoomWheel {
+            delta: -1.0,
+            cursor_x: 100,
+            cursor_y: 200,
+        })
+    );
+}
+
+#[test]
+fn inactive_zoom_leaves_wheel_with_the_previous_tool() {
+    let bindings = InputBindings::from(&ShortcutConfig::default());
+    let router = InputRouter::new(bindings, ActiveMode::Spotlight);
+
+    assert_eq!(
+        router.handle_wheel_with_zoom("Ctrl", 1.0, 100, 200, false),
+        Some(InputAction::SpotlightWheel { delta: 1.0 })
+    );
 }

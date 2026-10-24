@@ -125,6 +125,11 @@ pub enum ConfigError {
     },
     #[error("could not resolve a user config directory")]
     NoConfigDirectory,
+    #[error("invalid zoom setting {field}: {reason}")]
+    InvalidZoom {
+        field: &'static str,
+        reason: &'static str,
+    },
 }
 
 impl Default for AppConfig {
@@ -174,8 +179,6 @@ impl Default for AnnotationConfig {
 pub struct ZoomConfig {
     #[serde(default = "default_zoom_enabled")]
     pub enabled_on_start: bool,
-    #[serde(default = "default_follow_cursor")]
-    pub follow_cursor: bool,
     #[serde(default = "default_initial_scale")]
     pub initial_scale: f32,
     #[serde(default = "default_min_scale")]
@@ -184,10 +187,10 @@ pub struct ZoomConfig {
     pub max_scale: f32,
     #[serde(default = "default_scroll_speed")]
     pub scroll_speed: f32,
-    #[serde(default = "default_pan_friction")]
-    pub pan_friction: f32,
-    #[serde(default = "default_capture_target")]
-    pub capture_target: String,
+    #[serde(default = "default_drag_friction")]
+    pub drag_friction: f32,
+    #[serde(default = "default_scale_friction")]
+    pub scale_friction: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,14 +210,58 @@ impl Default for ZoomConfig {
     fn default() -> Self {
         Self {
             enabled_on_start: default_zoom_enabled(),
-            follow_cursor: default_follow_cursor(),
             initial_scale: default_initial_scale(),
             min_scale: default_min_scale(),
             max_scale: default_max_scale(),
             scroll_speed: default_scroll_speed(),
-            pan_friction: default_pan_friction(),
-            capture_target: default_capture_target(),
+            drag_friction: default_drag_friction(),
+            scale_friction: default_scale_friction(),
         }
+    }
+}
+
+impl ZoomConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        for (field, value) in [
+            ("initial_scale", self.initial_scale),
+            ("min_scale", self.min_scale),
+            ("max_scale", self.max_scale),
+            ("scroll_speed", self.scroll_speed),
+            ("drag_friction", self.drag_friction),
+            ("scale_friction", self.scale_friction),
+        ] {
+            if !value.is_finite() {
+                return Err(ConfigError::InvalidZoom {
+                    field,
+                    reason: "must be finite",
+                });
+            }
+        }
+        if self.min_scale < 1.0 {
+            return Err(ConfigError::InvalidZoom {
+                field: "min_scale",
+                reason: "must be at least 1.0",
+            });
+        }
+        if !(self.min_scale <= self.initial_scale && self.initial_scale <= self.max_scale) {
+            return Err(ConfigError::InvalidZoom {
+                field: "initial_scale",
+                reason: "must be between min_scale and max_scale",
+            });
+        }
+        for (field, value) in [
+            ("scroll_speed", self.scroll_speed),
+            ("drag_friction", self.drag_friction),
+            ("scale_friction", self.scale_friction),
+        ] {
+            if value <= 0.0 {
+                return Err(ConfigError::InvalidZoom {
+                    field,
+                    reason: "must be positive",
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -230,7 +277,9 @@ impl Default for ShortcutConfig {
 }
 
 pub fn load_from_str(text: &str) -> Result<Config, ConfigError> {
-    toml::from_str(text).map_err(|source| ConfigError::Parse { source })
+    let config: Config = toml::from_str(text).map_err(|source| ConfigError::Parse { source })?;
+    config.zoom.validate()?;
+    Ok(config)
 }
 
 pub fn load_from_path(path: impl AsRef<Path>) -> Result<Config, ConfigError> {
@@ -382,10 +431,6 @@ fn default_zoom_enabled() -> bool {
     false
 }
 
-fn default_follow_cursor() -> bool {
-    true
-}
-
 fn default_initial_scale() -> f32 {
     2.0
 }
@@ -402,12 +447,12 @@ fn default_scroll_speed() -> f32 {
     0.25
 }
 
-fn default_pan_friction() -> f32 {
-    0.82
+fn default_drag_friction() -> f32 {
+    6.0
 }
 
-fn default_capture_target() -> String {
-    "active-monitor".to_owned()
+fn default_scale_friction() -> f32 {
+    5.0
 }
 
 fn default_spotlight_mode_shortcut() -> String {

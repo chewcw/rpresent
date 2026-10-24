@@ -6,7 +6,6 @@ use crate::command::{AnnotationCommand, AppCommand, SpotlightCommand, ZoomComman
 pub enum ActiveMode {
     Spotlight,
     Annotation,
-    Zoom,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,7 +74,6 @@ impl InputRouter {
         }
 
         if shortcut == self.bindings.zoom_mode {
-            self.active_mode = ActiveMode::Zoom;
             return Some(AppCommand::Zoom(ZoomCommand::Toggle));
         }
 
@@ -89,18 +87,31 @@ impl InputRouter {
         cursor_x: i16,
         cursor_y: i16,
     ) -> Option<InputAction> {
+        self.handle_wheel_with_zoom(modifier, delta, cursor_x, cursor_y, false)
+    }
+
+    pub fn handle_wheel_with_zoom(
+        &self,
+        modifier: &str,
+        delta: f32,
+        cursor_x: i16,
+        cursor_y: i16,
+        zoom_active: bool,
+    ) -> Option<InputAction> {
         let active_modifier = normalize_modifier(modifier);
         // wheel_modifier governs both spotlight and zoom wheel resize/zoom
         let configured_modifier = normalize_modifier(&self.bindings.wheel_modifier);
 
-        if self.active_mode == ActiveMode::Spotlight && active_modifier == configured_modifier {
-            Some(InputAction::SpotlightWheel { delta })
-        } else if self.active_mode == ActiveMode::Zoom && active_modifier == configured_modifier {
+        if zoom_active && active_modifier == configured_modifier {
             Some(InputAction::ZoomWheel {
                 delta,
                 cursor_x,
                 cursor_y,
             })
+        } else if self.active_mode == ActiveMode::Spotlight
+            && active_modifier == configured_modifier
+        {
+            Some(InputAction::SpotlightWheel { delta })
         } else {
             None
         }
