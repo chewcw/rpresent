@@ -3,13 +3,7 @@ use std::sync::mpsc::Receiver;
 
 use crate::controller::AnnotationState;
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum OverlayError {
-    #[error("overlay is only supported on Linux in this slice")]
-    UnsupportedPlatform,
-    #[error("overlay runtime error: {0}")]
-    Runtime(String),
-}
+pub use crate::error::OverlayError;
 
 #[cfg(target_os = "linux")]
 pub fn run_overlay(
