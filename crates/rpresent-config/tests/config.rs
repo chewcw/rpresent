@@ -71,6 +71,52 @@ fn parses_module_sections_and_applies_defaults() {
 }
 
 #[test]
+fn annotation_presets_require_valid_initial_selections() {
+    let mut config = rpresent_config::Config::default();
+    assert_eq!(config.annotation.stroke_widths_px, vec![2, 4, 6, 10]);
+    assert_eq!(config.annotation.text_sizes_px, vec![16, 24, 32, 48]);
+    assert!(config.annotation.validate().is_ok());
+    config.annotation.stroke_width_px = 7;
+    assert!(config.annotation.validate().is_err());
+}
+
+#[test]
+fn annotation_rejects_invalid_catalogs() {
+    let cases: [fn(&mut Config); 8] = [
+        |config| config.annotation.colors.clear(),
+        |config| config.annotation.colors[0] = "red".to_owned(),
+        |config| config.annotation.color = "#123456".to_owned(),
+        |config| config.annotation.stroke_widths_px.clear(),
+        |config| config.annotation.stroke_widths_px = vec![0, 6],
+        |config| config.annotation.text_sizes_px.clear(),
+        |config| config.annotation.text_size_px = 0,
+        |config| config.annotation.history_depth = 0,
+    ];
+    for (index, mutate) in cases.into_iter().enumerate() {
+        let mut config = Config::default();
+        mutate(&mut config);
+        assert!(
+            config.annotation.validate().is_err(),
+            "case {index} should be rejected"
+        );
+    }
+}
+
+#[test]
+fn annotation_colors_accept_any_case_and_duplicates() {
+    let config = load_from_str(
+        r##"
+        [annotation]
+        color = "#ff0000"
+        colors = ["#ff0000", "#FF0000", "#00ff00"]
+        "##,
+    )
+    .unwrap();
+    assert_eq!(config.annotation.color, "#ff0000");
+    assert!(config.annotation.validate().is_ok());
+}
+
+#[test]
 fn rejects_unknown_keys() {
     let error = load_from_str("[spotlight]\nunknown = 1").unwrap_err();
     assert!(error.to_string().contains("unknown field"));

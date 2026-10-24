@@ -29,10 +29,12 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AnnotationTool {
+    Select,
     #[default]
     Pen,
     Line,
     Eraser,
+    Text,
 }
 
 /// Shape of the spotlight cutout, mirroring Projecteur's shape variants.
@@ -104,10 +106,92 @@ pub struct AnnotationConfig {
     pub enabled_on_start: bool,
     #[serde(default = "default_annotation_tool")]
     pub default_tool: AnnotationTool,
+    #[serde(default = "default_annotation_colors")]
+    pub colors: Vec<String>,
+    #[serde(default = "default_annotation_color")]
+    pub color: String,
+    #[serde(default = "default_stroke_widths_px")]
+    pub stroke_widths_px: Vec<u32>,
     #[serde(default = "default_stroke_width_px")]
     pub stroke_width_px: u32,
+    #[serde(default = "default_text_sizes_px")]
+    pub text_sizes_px: Vec<u32>,
+    #[serde(default = "default_text_size_px")]
+    pub text_size_px: u32,
     #[serde(default = "default_history_depth")]
     pub history_depth: usize,
+}
+
+impl AnnotationConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.colors.is_empty() {
+            return Err(ConfigError::InvalidAnnotation {
+                field: "colors",
+                reason: "must not be empty",
+            });
+        }
+        let mut parsed_colors = Vec::with_capacity(self.colors.len());
+        for color in &self.colors {
+            let parsed = parse_rgb(color).ok_or(ConfigError::InvalidAnnotation {
+                field: "colors",
+                reason: "must contain #RRGGBB colors",
+            })?;
+            parsed_colors.push(parsed);
+        }
+        let initial_color = parse_rgb(&self.color).ok_or(ConfigError::InvalidAnnotation {
+            field: "color",
+            reason: "must be a #RRGGBB color",
+        })?;
+        if !parsed_colors.contains(&initial_color) {
+            return Err(ConfigError::InvalidAnnotation {
+                field: "color",
+                reason: "must be one of the configured colors",
+            });
+        }
+        if self.stroke_widths_px.is_empty() {
+            return Err(ConfigError::InvalidAnnotation {
+                field: "stroke_widths_px",
+                reason: "must not be empty",
+            });
+        }
+        if self.stroke_widths_px.contains(&0) {
+            return Err(ConfigError::InvalidAnnotation {
+                field: "stroke_widths_px",
+                reason: "must be positive",
+            });
+        }
+        if !self.stroke_widths_px.contains(&self.stroke_width_px) {
+            return Err(ConfigError::InvalidAnnotation {
+                field: "stroke_width_px",
+                reason: "must be one of the configured stroke widths",
+            });
+        }
+        if self.text_sizes_px.is_empty() {
+            return Err(ConfigError::InvalidAnnotation {
+                field: "text_sizes_px",
+                reason: "must not be empty",
+            });
+        }
+        if self.text_sizes_px.contains(&0) {
+            return Err(ConfigError::InvalidAnnotation {
+                field: "text_sizes_px",
+                reason: "must be positive",
+            });
+        }
+        if !self.text_sizes_px.contains(&self.text_size_px) {
+            return Err(ConfigError::InvalidAnnotation {
+                field: "text_size_px",
+                reason: "must be one of the configured text sizes",
+            });
+        }
+        if self.history_depth == 0 {
+            return Err(ConfigError::InvalidAnnotation {
+                field: "history_depth",
+                reason: "must be positive",
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -127,6 +211,11 @@ pub enum ConfigError {
     NoConfigDirectory,
     #[error("invalid zoom setting {field}: {reason}")]
     InvalidZoom {
+        field: &'static str,
+        reason: &'static str,
+    },
+    #[error("invalid annotation setting {field}: {reason}")]
+    InvalidAnnotation {
         field: &'static str,
         reason: &'static str,
     },
@@ -168,7 +257,12 @@ impl Default for AnnotationConfig {
         Self {
             enabled_on_start: default_annotation_enabled(),
             default_tool: default_annotation_tool(),
+            colors: default_annotation_colors(),
+            color: default_annotation_color(),
+            stroke_widths_px: default_stroke_widths_px(),
             stroke_width_px: default_stroke_width_px(),
+            text_sizes_px: default_text_sizes_px(),
+            text_size_px: default_text_size_px(),
             history_depth: default_history_depth(),
         }
     }
@@ -279,6 +373,7 @@ impl Default for ShortcutConfig {
 pub fn load_from_str(text: &str) -> Result<Config, ConfigError> {
     let config: Config = toml::from_str(text).map_err(|source| ConfigError::Parse { source })?;
     config.zoom.validate()?;
+    config.annotation.validate()?;
     Ok(config)
 }
 
@@ -475,6 +570,37 @@ fn default_stroke_width_px() -> u32 {
     6
 }
 
+fn default_annotation_colors() -> Vec<String> {
+    ["#FF0000", "#FFFF00", "#00FF00", "#00FFFF", "#FFFFFF", "#000000"]
+        .map(str::to_owned)
+        .to_vec()
+}
+
+fn default_annotation_color() -> String {
+    "#FF0000".to_owned()
+}
+
+fn default_stroke_widths_px() -> Vec<u32> {
+    vec![2, 4, 6, 10]
+}
+
+fn default_text_sizes_px() -> Vec<u32> {
+    vec![16, 24, 32, 48]
+}
+
+fn default_text_size_px() -> u32 {
+    24
+}
+
 fn default_history_depth() -> usize {
     64
+}
+
+fn parse_rgb(text: &str) -> Option<[u8; 3]> {
+    let digits = text.strip_prefix('#')?;
+    if digits.len() != 6 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel = |start: usize| u8::from_str_radix(&digits[start..start + 2], 16).ok();
+    Some([channel(0)?, channel(2)?, channel(4)?])
 }

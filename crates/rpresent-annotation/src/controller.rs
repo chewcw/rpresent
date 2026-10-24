@@ -92,6 +92,12 @@ impl AnnotationController {
                 }
                 changed
             }
+            // These commands are handled by the session runtime once it replaces
+            // this stub controller in the coordinator wiring task.
+            AnnotationCommand::Delete
+            | AnnotationCommand::Color(_)
+            | AnnotationCommand::Width(_)
+            | AnnotationCommand::TextSize(_) => false,
         }
     }
 

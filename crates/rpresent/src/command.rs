@@ -20,7 +20,7 @@ pub enum AppCommandParseError {
     #[error(transparent)]
     Spotlight(#[from] rpresent_spotlight::CommandParseError),
     #[error(transparent)]
-    Annotation(#[from] rpresent_annotation::AnnotationToolCommandParseError),
+    Annotation(#[from] rpresent_annotation::AnnotationCommandParseError),
     #[error(transparent)]
     Zoom(#[from] rpresent_zoom::CommandParseError),
 }
