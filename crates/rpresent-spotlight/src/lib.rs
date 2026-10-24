@@ -13,7 +13,7 @@ mod x11;
 pub use command::{CommandParseError, SpotlightCommand};
 pub use controller::{SpotlightController, SpotlightState};
 pub use overlay::{
-    CursorPosition, OverlayError, SpotlightFrame, SpotlightRuntimeMessage, run_overlay,
-    spotlight_alpha,
+    CursorPosition, OverlayError, SpotlightEvent, SpotlightEventSink, SpotlightFrame,
+    SpotlightRuntimeMessage, run_overlay, spotlight_alpha,
 };
 pub use render::{build_projecteur_frame, build_projecteur_frame_rect};

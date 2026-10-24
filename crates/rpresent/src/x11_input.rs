@@ -1,222 +1,431 @@
-/// X11 button codes for mouse wheel scroll up/down.
-#[cfg(target_os = "linux")]
+use std::collections::HashMap;
+use std::error::Error;
+use std::os::fd::AsRawFd;
+use std::sync::Arc;
+use std::time::Duration;
+
+use rpresent_config::ConfigService;
+use x11rb::connection::Connection;
+use x11rb::protocol::Event;
+use x11rb::protocol::xproto::{
+    ButtonIndex, ChangeWindowAttributesAux, ConnectionExt, EventMask, GrabMode, GrabStatus,
+    InputFocus, KeyButMask, ModMask, StackMode, Window,
+};
+use x11rb::rust_connection::RustConnection;
+
+use crate::input::{InputBindings, RawPointer};
+use crate::native_input::{NativeEvent, NativeEventSink, NativeInbox, NativeRequest};
+
 const BUTTON_WHEEL_UP: u8 = 4;
-#[cfg(target_os = "linux")]
 const BUTTON_WHEEL_DOWN: u8 = 5;
 
-#[cfg(target_os = "linux")]
 pub(crate) fn spawn(
-    config_service: std::sync::Arc<rpresent_config::ConfigService>,
-    tx: std::sync::mpsc::Sender<crate::input::AppEvent>,
+    config_service: Arc<ConfigService>,
+    inbox: NativeInbox,
+    events: NativeEventSink,
 ) {
     std::thread::spawn(move || {
-        if let Err(e) = run_input_loop(config_service, tx) {
-            tracing::error!(error = %e, "X11 input loop failed");
+        let result = run_input_loop(config_service, inbox, Arc::clone(&events));
+        match &result {
+            Ok(()) => events(NativeEvent::Exited(Ok(()))),
+            Err(error) => events(NativeEvent::Exited(Err(error.to_string()))),
         }
     });
 }
 
-#[cfg(target_os = "linux")]
 fn run_input_loop(
-    config_service: std::sync::Arc<rpresent_config::ConfigService>,
-    tx: std::sync::mpsc::Sender<crate::input::AppEvent>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use std::collections::HashMap;
-    use x11rb::connection::Connection as _;
-    use x11rb::protocol::Event;
-    use x11rb::protocol::xproto::{ButtonIndex, ConnectionExt as _, EventMask, GrabMode, ModMask};
-
-    use crate::input::{ActiveMode, InputBindings, InputRouter};
-
-    let (conn, screen_num) = x11rb::connect(None)?;
-    let root = conn.setup().roots[screen_num].root;
-
-    // Build the keycode map first so we can set up passive key grabs.
-    let keycode_map: HashMap<u8, &'static str> = build_keycode_map(&conn);
-
-    // Passive grab Ctrl+1/2/3 on the root window for global shortcut capture.
-    // ChangeWindowAttributes with KEY_PRESS does NOT capture events over other windows;
-    // GrabKey is required for global hotkey delivery.
-    // Use common lock-mask variants so Ctrl+<key> still works when NumLock/CapsLock is active.
-    let key_grab_modifiers = [
-        ModMask::CONTROL,
-        ModMask::CONTROL | ModMask::LOCK,
-        ModMask::CONTROL | ModMask::M2,
-        ModMask::CONTROL | ModMask::M2 | ModMask::LOCK,
-        ModMask::CONTROL | ModMask::M5,
-        ModMask::CONTROL | ModMask::M5 | ModMask::LOCK,
-        ModMask::CONTROL | ModMask::M2 | ModMask::M5,
-        ModMask::CONTROL | ModMask::M2 | ModMask::M5 | ModMask::LOCK,
-    ];
-    for &keycode in keycode_map.keys() {
-        for modifiers in key_grab_modifiers {
-            match conn.grab_key(
-                false,
-                root,
-                modifiers,
-                keycode,
-                GrabMode::ASYNC,
-                GrabMode::ASYNC,
-            ) {
-                Ok(cookie) => {
-                    if let Err(error) = cookie.check() {
-                        tracing::warn!(
-                            keycode,
-                            ?modifiers,
-                            ?error,
-                            "failed to grab global key shortcut"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        keycode,
-                        ?modifiers,
-                        ?error,
-                        "failed to request global key shortcut grab"
-                    );
-                }
-            }
-        }
-    }
-
-    // Passive grab Ctrl+wheel (buttons 4 and 5) globally on the root window.
-    // ChangeWindowAttributes with BUTTON_PRESS only fires when the pointer is over the root
-    // background; GrabButton is required to intercept wheel events over any window.
-    let wheel_grab_modifiers = [
-        ModMask::CONTROL,
-        ModMask::CONTROL | ModMask::LOCK,
-        ModMask::CONTROL | ModMask::M2,
-        ModMask::CONTROL | ModMask::M2 | ModMask::LOCK,
-        ModMask::CONTROL | ModMask::M5,
-        ModMask::CONTROL | ModMask::M5 | ModMask::LOCK,
-        ModMask::CONTROL | ModMask::M2 | ModMask::M5,
-        ModMask::CONTROL | ModMask::M2 | ModMask::M5 | ModMask::LOCK,
-    ];
-    for button in [ButtonIndex::M4, ButtonIndex::M5] {
-        for modifiers in wheel_grab_modifiers {
-            match conn.grab_button(
-                false,
-                root,
-                EventMask::BUTTON_PRESS,
-                GrabMode::ASYNC,
-                GrabMode::ASYNC,
-                0u32, // confine_to: NONE
-                0u32, // cursor: NONE
-                button,
-                modifiers,
-            ) {
-                Ok(cookie) => {
-                    if let Err(error) = cookie.check() {
-                        tracing::warn!(
-                            ?button,
-                            ?modifiers,
-                            ?error,
-                            "failed to grab global wheel shortcut"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        ?button,
-                        ?modifiers,
-                        ?error,
-                        "failed to request global wheel shortcut grab"
-                    );
-                }
-            }
-        }
-    }
-
-    conn.flush()?;
+    config_service: Arc<ConfigService>,
+    mut inbox: NativeInbox,
+    events: NativeEventSink,
+) -> Result<(), Box<dyn Error>> {
+    let (connection, screen_num) = x11rb::connect(None)?;
+    let root = connection.setup().roots[screen_num].root;
+    let keycode_map = build_keycode_map(&connection);
     let bindings = InputBindings::from(config_service.shortcuts());
-    let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);
+    install_passive_grabs(&connection, root, &keycode_map, &bindings)?;
+    connection.flush()?;
+    events(NativeEvent::Ready);
+
+    let x11_fd = connection.stream().as_raw_fd();
+    let mut owner = None;
+    let mut saved_focus = None;
 
     loop {
-        let event = conn.wait_for_event()?;
-        match event {
-            Event::ButtonPress(ev)
-                if ev.detail == BUTTON_WHEEL_UP || ev.detail == BUTTON_WHEEL_DOWN =>
-            {
-                let modifier = modifier_from_state(ev.state);
-                let delta = if ev.detail == BUTTON_WHEEL_UP {
-                    1.0_f32
-                } else {
-                    -1.0_f32
-                };
-                if let Some(action) = router.handle_wheel(modifier, delta, ev.root_x, ev.root_y) {
-                    let _ = tx.send(crate::input::AppEvent::Input(action));
+        inbox.drain_wake()?;
+        loop {
+            match inbox.try_recv() {
+                Ok(NativeRequest::Restack {
+                    operation,
+                    bottom_to_top,
+                }) => {
+                    let result =
+                        restack(&connection, bottom_to_top).map_err(|error| error.to_string());
+                    events(NativeEvent::Applied { operation, result });
+                }
+                Ok(NativeRequest::SetOwner {
+                    operation,
+                    window,
+                    restore_focus,
+                }) => {
+                    let result = set_owner(
+                        &connection,
+                        &mut owner,
+                        &mut saved_focus,
+                        window,
+                        restore_focus,
+                        operation,
+                    )
+                    .map_err(|error| error.to_string());
+                    events(NativeEvent::Applied { operation, result });
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    release_owner(&connection, &mut owner, &mut saved_focus, true);
+                    return Ok(());
                 }
             }
-            Event::KeyPress(ev) => {
-                if let Some(shortcut) = shortcut_from_keypress(ev.detail, ev.state, &keycode_map)
-                    && let Some(cmd) = router.handle_key(&shortcut)
-                {
-                    let _ = tx.send(crate::input::AppEvent::Command(cmd));
-                }
+        }
+
+        while let Some(event) = connection.poll_for_event()? {
+            translate_event(&event, &connection, &keycode_map, &events, &mut owner);
+        }
+        connection.flush()?;
+
+        let mut descriptors = [
+            libc::pollfd {
+                fd: x11_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: inbox.wake_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let result = unsafe { libc::poll(descriptors.as_mut_ptr(), 2, -1) };
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
             }
-            _ => {}
+            return Err(error.into());
+        }
+        if descriptors[0].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            release_owner(&connection, &mut owner, &mut saved_focus, true);
+            return Err("X11 connection closed".into());
         }
     }
 }
 
-#[cfg(target_os = "linux")]
-fn build_keycode_map(
-    connection: &impl x11rb::connection::Connection,
-) -> std::collections::HashMap<u8, &'static str> {
-    use x11rb::protocol::xproto::ConnectionExt;
-    let setup = connection.setup();
-    let min_keycode = setup.min_keycode;
-    let max_keycode = setup.max_keycode;
-    let count = max_keycode - min_keycode + 1;
+fn install_passive_grabs(
+    connection: &RustConnection,
+    root: Window,
+    keycode_map: &HashMap<u8, &'static str>,
+    bindings: &InputBindings,
+) -> Result<(), Box<dyn Error>> {
+    for (&keycode, digit) in keycode_map {
+        let shortcut = match *digit {
+            "1" => &bindings.spotlight_mode,
+            "2" => &bindings.annotation_mode,
+            "3" => &bindings.zoom_mode,
+            _ => continue,
+        };
+        let modifier = shortcut.split_once('+').map_or("", |(name, _)| name);
+        for modifiers in modifier_masks(modifier) {
+            connection
+                .grab_key(
+                    false,
+                    root,
+                    modifiers,
+                    keycode,
+                    GrabMode::ASYNC,
+                    GrabMode::ASYNC,
+                )?
+                .check()?;
+        }
+    }
 
-    let mut map = std::collections::HashMap::new();
-    if let Ok(cookie) = connection.get_keyboard_mapping(min_keycode, count)
+    for button in [ButtonIndex::M4, ButtonIndex::M5] {
+        for modifiers in modifier_masks(&bindings.wheel_modifier) {
+            connection
+                .grab_button(
+                    false,
+                    root,
+                    EventMask::BUTTON_PRESS,
+                    GrabMode::ASYNC,
+                    GrabMode::ASYNC,
+                    0_u32,
+                    0_u32,
+                    button,
+                    modifiers,
+                )?
+                .check()?;
+        }
+    }
+    Ok(())
+}
+
+fn restack(connection: &impl Connection, windows: [Option<u32>; 3]) -> Result<(), Box<dyn Error>> {
+    for window in windows.into_iter().flatten() {
+        connection
+            .configure_window(
+                window,
+                &x11rb::protocol::xproto::ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+            )?
+            .check()?;
+    }
+    connection.flush()?;
+    Ok(())
+}
+
+fn set_owner(
+    connection: &RustConnection,
+    owner: &mut Option<Owner>,
+    saved_focus: &mut Option<Window>,
+    window: Option<u32>,
+    restore_focus: bool,
+    epoch: u64,
+) -> Result<(), Box<dyn Error>> {
+    release_owner(connection, owner, saved_focus, false);
+    let Some(window) = window else {
+        if restore_focus {
+            restore_focus_window(connection, saved_focus);
+        }
+        connection.flush()?;
+        return Ok(());
+    };
+
+    if saved_focus.is_none() {
+        let focus = connection.get_input_focus()?.reply()?.focus;
+        if focus != 0 {
+            *saved_focus = Some(focus);
+        }
+    }
+
+    connection
+        .change_window_attributes(
+            window,
+            &ChangeWindowAttributesAux::new().event_mask(
+                EventMask::KEY_PRESS
+                    | EventMask::BUTTON_PRESS
+                    | EventMask::BUTTON_RELEASE
+                    | EventMask::POINTER_MOTION
+                    | EventMask::STRUCTURE_NOTIFY
+                    | EventMask::FOCUS_CHANGE,
+            ),
+        )?
+        .check()?;
+    let reply = connection
+        .grab_pointer(
+            false,
+            window,
+            EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+            GrabMode::ASYNC,
+            GrabMode::ASYNC,
+            0_u32,
+            0_u32,
+            x11rb::CURRENT_TIME,
+        )?
+        .reply()?;
+    if reply.status != GrabStatus::SUCCESS {
+        return Err(format!("pointer grab failed with status {:?}", reply.status).into());
+    }
+    connection
+        .set_input_focus(InputFocus::NONE, window, x11rb::CURRENT_TIME)?
+        .check()?;
+    connection.flush()?;
+    *owner = Some(Owner { window, epoch });
+    Ok(())
+}
+
+fn release_owner(
+    connection: &RustConnection,
+    owner: &mut Option<Owner>,
+    saved_focus: &mut Option<Window>,
+    restore_focus: bool,
+) {
+    if owner.take().is_some() {
+        let _ = connection.ungrab_pointer(x11rb::CURRENT_TIME);
+        let _ = connection.flush();
+    }
+    if restore_focus {
+        restore_focus_window(connection, saved_focus);
+    }
+}
+
+fn restore_focus_window(connection: &RustConnection, saved_focus: &mut Option<Window>) {
+    let Some(window) = saved_focus.take() else {
+        return;
+    };
+    if let Ok(cookie) = connection.get_geometry(window)
+        && cookie.reply().is_ok()
+    {
+        if let Ok(cookie) =
+            connection.set_input_focus(InputFocus::NONE, window, x11rb::CURRENT_TIME)
+        {
+            let _ = cookie.check();
+        }
+        let _ = connection.flush();
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Owner {
+    window: Window,
+    epoch: u64,
+}
+
+fn translate_event(
+    event: &Event,
+    connection: &RustConnection,
+    keycode_map: &HashMap<u8, &'static str>,
+    events: &NativeEventSink,
+    owner: &mut Option<Owner>,
+) {
+    match event {
+        Event::ButtonPress(event)
+            if event.detail == BUTTON_WHEEL_UP || event.detail == BUTTON_WHEEL_DOWN =>
+        {
+            events(NativeEvent::Wheel {
+                modifier: modifier_from_state(event.state).to_owned(),
+                delta: if event.detail == BUTTON_WHEEL_UP {
+                    1.0
+                } else {
+                    -1.0
+                },
+                root: (event.root_x, event.root_y),
+            });
+        }
+        Event::ButtonPress(event) if event.detail == 1 => {
+            if let Some(owner) = owner {
+                events(NativeEvent::Pointer {
+                    epoch: owner.epoch,
+                    input: RawPointer::Down {
+                        root: (i32::from(event.root_x), i32::from(event.root_y)),
+                        time: Duration::from_millis(u64::from(event.time)),
+                    },
+                });
+            }
+        }
+        Event::ButtonRelease(event) if event.detail == 1 => {
+            if let Some(owner) = owner {
+                events(NativeEvent::Pointer {
+                    epoch: owner.epoch,
+                    input: RawPointer::Up {
+                        time: Duration::from_millis(u64::from(event.time)),
+                    },
+                });
+            }
+        }
+        Event::MotionNotify(event) => {
+            if let Some(owner) = owner {
+                events(NativeEvent::Pointer {
+                    epoch: owner.epoch,
+                    input: RawPointer::Move {
+                        root: (i32::from(event.root_x), i32::from(event.root_y)),
+                        time: Duration::from_millis(u64::from(event.time)),
+                    },
+                });
+            }
+        }
+        Event::KeyPress(event) => {
+            if keycode_map.get(&event.detail) == Some(&"Escape") {
+                events(NativeEvent::Escape);
+            } else if let Some(shortcut) =
+                shortcut_from_keypress(event.detail, event.state, keycode_map)
+            {
+                events(NativeEvent::Key(shortcut));
+            }
+        }
+        Event::DestroyNotify(event) if owner.is_some_and(|owner| owner.window == event.window) => {
+            let epoch = owner.take().map_or(0, |owner| owner.epoch);
+            events(NativeEvent::Lost {
+                epoch,
+                reason: "owned window was destroyed".to_owned(),
+            });
+            let _ = connection.ungrab_pointer(x11rb::CURRENT_TIME);
+        }
+        _ => {}
+    }
+}
+
+fn build_keycode_map(connection: &impl Connection) -> HashMap<u8, &'static str> {
+    let setup = connection.setup();
+    let count = setup.max_keycode - setup.min_keycode + 1;
+    let mut map = HashMap::new();
+    if let Ok(cookie) = connection.get_keyboard_mapping(setup.min_keycode, count)
         && let Ok(reply) = cookie.reply()
     {
-        let keysyms_per_keycode = reply.keysyms_per_keycode as usize;
-        for (i, chunk) in reply.keysyms.chunks(keysyms_per_keycode).enumerate() {
-            let keycode = min_keycode + i as u8;
-            // Only index the first (unshifted) keysym
-            let keysym = match chunk.first().copied() {
-                Some(k) => k,
-                None => continue,
+        let per_keycode = usize::from(reply.keysyms_per_keycode);
+        for (index, chunk) in reply.keysyms.chunks(per_keycode).enumerate() {
+            let Some(keysym) = chunk.first().copied() else {
+                continue;
             };
-            let digit = match keysym {
+            let value = match keysym {
                 0x0031 => "1",
                 0x0032 => "2",
                 0x0033 => "3",
+                0xff1b => "Escape",
                 _ => continue,
             };
-            map.insert(keycode, digit);
+            map.insert(setup.min_keycode + index as u8, value);
         }
     }
     map
 }
 
-#[cfg(target_os = "linux")]
-fn modifier_from_state(state: x11rb::protocol::xproto::KeyButMask) -> &'static str {
-    use x11rb::protocol::xproto::KeyButMask;
+fn modifier_from_state(state: KeyButMask) -> &'static str {
     if state.contains(KeyButMask::CONTROL) {
         "Ctrl"
     } else if state.contains(KeyButMask::SHIFT) {
         "Shift"
+    } else if state.contains(KeyButMask::MOD1) {
+        "Alt"
+    } else if state.contains(KeyButMask::MOD4) {
+        "Super"
     } else {
         ""
     }
 }
 
-#[cfg(target_os = "linux")]
+fn modifier_masks(name: &str) -> Vec<ModMask> {
+    let base = match name {
+        "Ctrl" | "Control" => ModMask::CONTROL,
+        "Shift" => ModMask::SHIFT,
+        "Alt" => ModMask::M1,
+        "Super" | "Meta" => ModMask::M4,
+        other => {
+            tracing::warn!(
+                modifier = other,
+                "unsupported shortcut modifier; using no modifier"
+            );
+            ModMask::from(0_u8)
+        }
+    };
+    [
+        base,
+        base | ModMask::LOCK,
+        base | ModMask::M2,
+        base | ModMask::M2 | ModMask::LOCK,
+        base | ModMask::M5,
+        base | ModMask::M5 | ModMask::LOCK,
+        base | ModMask::M2 | ModMask::M5,
+        base | ModMask::M2 | ModMask::M5 | ModMask::LOCK,
+    ]
+    .into_iter()
+    .collect()
+}
+
 fn shortcut_from_keypress(
     keycode: u8,
-    state: x11rb::protocol::xproto::KeyButMask,
-    keycode_map: &std::collections::HashMap<u8, &'static str>,
+    state: KeyButMask,
+    keycode_map: &HashMap<u8, &'static str>,
 ) -> Option<String> {
-    use x11rb::protocol::xproto::KeyButMask;
     let digit = keycode_map.get(&keycode)?;
-    if state.contains(KeyButMask::CONTROL) {
-        Some(format!("Ctrl+{digit}"))
-    } else {
-        None
+    if *digit == "Escape" {
+        return None;
     }
+    let modifier = modifier_from_state(state);
+    (!modifier.is_empty()).then(|| format!("{modifier}+{digit}"))
 }

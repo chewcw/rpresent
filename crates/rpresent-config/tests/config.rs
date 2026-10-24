@@ -24,7 +24,8 @@ fn parses_module_sections_and_applies_defaults() {
 
         [zoom]
         initial_scale = 2.5
-        capture_target = "active-monitor"
+        drag_friction = 6.0
+        scale_friction = 5.0
 
         [shortcuts]
         spotlight_mode = "Ctrl+1"
@@ -58,11 +59,11 @@ fn parses_module_sections_and_applies_defaults() {
     assert_eq!(config.annotation.stroke_width_px, 6);
     assert_eq!(config.annotation.history_depth, 64);
     assert!(!config.zoom.enabled_on_start);
-    assert!(config.zoom.follow_cursor);
     assert_eq!(config.zoom.initial_scale, 2.5);
     assert_eq!(config.zoom.min_scale, 1.0);
     assert_eq!(config.zoom.max_scale, 6.0);
-    assert_eq!(config.zoom.capture_target, "active-monitor");
+    assert_eq!(config.zoom.drag_friction, 6.0);
+    assert_eq!(config.zoom.scale_friction, 5.0);
     assert_eq!(config.shortcuts.spotlight_mode, "Ctrl+1");
     assert_eq!(config.shortcuts.annotation_mode, "Ctrl+2");
     assert_eq!(config.shortcuts.zoom_mode, "Ctrl+3");
@@ -103,6 +104,33 @@ fn rotation_is_no_longer_a_spotlight_config_key() {
 fn rejects_unknown_top_level_keys() {
     let error = load_from_str("unexpected = true").unwrap_err();
     assert!(error.to_string().contains("unknown field"));
+}
+
+#[test]
+fn rejects_removed_zoom_keys() {
+    for entry in [
+        "follow_cursor = true",
+        "pan_friction = 0.8",
+        "capture_target = \"root\"",
+    ] {
+        let error = load_from_str(&format!("[zoom]\n{entry}\n")).unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+    }
+}
+
+#[test]
+fn zoom_requires_valid_finite_motion_parameters() {
+    for body in [
+        "initial_scale = nan",
+        "min_scale = 0.5",
+        "initial_scale = 7.0",
+        "scroll_speed = 0.0",
+        "drag_friction = -1.0",
+        "scale_friction = inf",
+    ] {
+        let text = format!("[zoom]\n{body}\n");
+        assert!(load_from_str(&text).is_err(), "{body}");
+    }
 }
 
 #[test]

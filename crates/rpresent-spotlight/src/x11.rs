@@ -5,10 +5,11 @@ use x11rb::protocol::render::{
     self, ChangePictureAux, Color, ConnectionExt as RenderConnectionExt, CreatePictureAux, Fixed,
     PictOp, PictType, Pictformat, Picture, PictureWrapper, Pointfix, Repeat,
 };
+use x11rb::protocol::shape::{ConnectionExt as ShapeConnectionExt, SK, SO};
 use x11rb::protocol::shm::ConnectionExt as ShmConnectionExt;
 use x11rb::protocol::xproto::{
-    ColormapAlloc, ConfigureWindowAux, ConnectionExt as XprotoConnectionExt, CreateGCAux,
-    CreateWindowAux, Gcontext, ImageFormat, Rectangle, Visualid, Window, WindowClass,
+    ClipOrdering, ColormapAlloc, ConfigureWindowAux, ConnectionExt as XprotoConnectionExt,
+    CreateGCAux, CreateWindowAux, Gcontext, ImageFormat, Rectangle, Visualid, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -375,9 +376,10 @@ impl X11SpotlightOverlay {
                 screen.black_pixel
             })
             .border_pixel(screen.black_pixel)
-            // Bind the colormap to the window so the server knows which
-            // color interpretation applies. For our direct-color visual this
-            // is a formality: the pixel bits already encode full RGBA.
+            // Bind the colormap to the window. The server uses it to read
+            // the pixel format. For our direct-color visual, the pixel bits
+            // already encode full RGBA, so the colormap is not consulted at
+            // draw time.
             .colormap(colormap);
 
         connection
@@ -397,6 +399,20 @@ impl X11SpotlightOverlay {
             .inspect_err(|error| {
                 tracing::error!(screen_num, ?error, "failed to create spotlight window");
             })
+            .map_err(runtime_error)?;
+
+        connection
+            .shape_rectangles(
+                SO::SET,
+                SK::INPUT,
+                ClipOrdering::UNSORTED,
+                window,
+                0,
+                0,
+                &[],
+            )
+            .map_err(runtime_error)?
+            .check()
             .map_err(runtime_error)?;
 
         let backend = create_backend(&connection, window, screen_num, visual_id, depth)?;
@@ -777,6 +793,7 @@ fn ensure_decoration_cache(
 
 impl Drop for X11SpotlightOverlay {
     fn drop(&mut self) {
+        let _ = self.connection.unmap_window(self.window);
         if let Some(cache) = self.decoration_cache.take() {
             free_decoration_cache(&self.connection, cache);
         }
@@ -789,10 +806,18 @@ impl Drop for X11SpotlightOverlay {
             }
         }
         self.shm.destroy(&self.connection);
+        // Complete teardown before a replacement worker opens another X11 connection.
+        if let Ok(cookie) = self.connection.get_input_focus() {
+            let _ = cookie.reply();
+        }
     }
 }
 
 impl SpotlightOverlayBackend for X11SpotlightOverlay {
+    fn window_id(&self) -> u32 {
+        self.window
+    }
+
     fn show(&mut self) -> Result<(), OverlayError> {
         self.needs_full_redraw = true;
         self.connection
@@ -804,6 +829,8 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
                     "failed to show spotlight overlay"
                 );
             })
+            .map_err(runtime_error)?
+            .check()
             .map_err(runtime_error)?;
         self.flush()
     }
@@ -818,6 +845,8 @@ impl SpotlightOverlayBackend for X11SpotlightOverlay {
                     "failed to hide spotlight overlay"
                 );
             })
+            .map_err(runtime_error)?
+            .check()
             .map_err(runtime_error)?;
         self.flush()
     }
@@ -930,6 +959,13 @@ fn check_required_extensions(connection: &RustConnection) -> Result<(), OverlayE
     {
         return Err(runtime_error("the MIT-SHM extension is unavailable"));
     }
+    if connection
+        .extension_information(x11rb::protocol::shape::X11_EXTENSION_NAME)
+        .map_err(runtime_error)?
+        .is_none()
+    {
+        return Err(runtime_error("the SHAPE extension is unavailable"));
+    }
 
     let version = connection
         .shm_query_version()
@@ -940,6 +976,20 @@ fn check_required_extensions(connection: &RustConnection) -> Result<(), OverlayE
         return Err(runtime_error(format!(
             "MIT-SHM 1.2 is required, server reports {}.{}",
             version.major_version, version.minor_version
+        )));
+    }
+
+    let shape_version = connection
+        .shape_query_version()
+        .map_err(runtime_error)?
+        .reply()
+        .map_err(runtime_error)?;
+    if shape_version.major_version < 1
+        || (shape_version.major_version == 1 && shape_version.minor_version < 1)
+    {
+        return Err(runtime_error(format!(
+            "SHAPE 1.1 is required, server reports {}.{}",
+            shape_version.major_version, shape_version.minor_version
         )));
     }
 
