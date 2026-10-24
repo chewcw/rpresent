@@ -12,6 +12,7 @@ mod session;
 mod text;
 mod transport;
 mod undo;
+mod x11_clipboard;
 
 #[cfg(target_os = "linux")]
 mod x11;

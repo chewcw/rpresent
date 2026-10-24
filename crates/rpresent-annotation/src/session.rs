@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use cosmic_text::{Action, Motion};
@@ -11,6 +12,9 @@ use crate::geometry::{
     segment_segment_distance,
 };
 use crate::text::{TextDraft, TextSystem};
+use crate::x11_clipboard::{
+    PasteRequest, PasteResult, normalize_newlines, paste_belongs_to_session,
+};
 
 /// Extra screen pixels accepted around a visible path when hit testing.
 pub(crate) const HIT_TOLERANCE_PX: f64 = 4.0;
@@ -104,6 +108,7 @@ pub(crate) enum Gesture {
 }
 
 pub(crate) struct TextEdit {
+    pub id: u64,
     pub object: Option<ObjectId>,
     pub origin: Point,
     pub color: Rgb,
@@ -128,6 +133,10 @@ pub struct Session {
     pub(crate) damage: Option<Rect>,
     last_click: Option<(ObjectId, Duration, Point)>,
     next_draft_id: u64,
+    next_paste_sequence: u64,
+    next_paste_expected: u64,
+    paste_requests: Vec<PasteRequest>,
+    pending_pastes: BTreeMap<u64, Result<String, String>>,
 }
 
 impl Session {
@@ -171,6 +180,10 @@ impl Session {
             damage: None,
             last_click: None,
             next_draft_id: 1,
+            next_paste_sequence: 1,
+            next_paste_expected: 1,
+            paste_requests: Vec::new(),
+            pending_pastes: BTreeMap::new(),
         })
     }
 
@@ -204,6 +217,36 @@ impl Session {
 
     pub fn text_size_px(&self) -> u32 {
         self.text_sizes[self.text_size_index]
+    }
+
+    pub fn draft_id(&self) -> Option<u64> {
+        self.text_edit.as_ref().map(|edit| edit.id)
+    }
+
+    pub fn take_paste_requests(&mut self) -> Vec<PasteRequest> {
+        std::mem::take(&mut self.paste_requests)
+    }
+
+    /// Apply an ordered clipboard result to the active draft. Results that
+    /// arrive ahead of their sequence wait until earlier ones are applied.
+    pub fn accept_paste(&mut self, result: PasteResult) {
+        if !paste_belongs_to_session(self.draft_id(), result.request) {
+            return;
+        }
+        if result.request.sequence < self.next_paste_expected {
+            return;
+        }
+        self.pending_pastes
+            .insert(result.request.sequence, result.text);
+        while let Some(text) = self.pending_pastes.remove(&self.next_paste_expected) {
+            self.next_paste_expected += 1;
+            if let Ok(text) = text {
+                let text = normalize_newlines(&text);
+                if !text.is_empty() {
+                    self.draft_insert(&text);
+                }
+            }
+        }
     }
 
     pub fn command(&mut self, command: AnnotationCommand) -> Result<(), String> {
@@ -309,6 +352,7 @@ impl Session {
         self.mark_transient();
         self.gesture = None;
         self.text_edit = None;
+        self.clear_pastes();
         self.last_click = None;
     }
 
@@ -317,6 +361,7 @@ impl Session {
         self.mark_transient();
         self.gesture = None;
         self.text_edit = None;
+        self.clear_pastes();
         self.last_click = None;
     }
 
@@ -453,6 +498,15 @@ impl Session {
                 Some('a') => {
                     if let Some(edit) = self.text_edit.as_mut() {
                         edit.draft.select_all();
+                    }
+                }
+                Some('v') => {
+                    if let Some(id) = self.text_edit.as_ref().map(|edit| edit.id) {
+                        self.paste_requests.push(PasteRequest {
+                            session: id,
+                            sequence: self.next_paste_sequence,
+                        });
+                        self.next_paste_sequence += 1;
                     }
                 }
                 _ => {}
@@ -769,7 +823,8 @@ impl Session {
         );
         self.next_draft_id += 1;
         self.gesture = None;
-        self.text_edit = Some(TextEdit {
+        self.begin_text_edit(TextEdit {
+            id: draft.id(),
             object: None,
             origin,
             color: self.color(),
@@ -806,7 +861,8 @@ impl Session {
         self.next_draft_id += 1;
         self.gesture = None;
         self.selection = Some(id);
-        self.text_edit = Some(TextEdit {
+        self.begin_text_edit(TextEdit {
+            id: draft.id(),
             object: Some(id),
             origin,
             color,
@@ -817,6 +873,7 @@ impl Session {
 
     fn commit_text(&mut self) {
         self.mark_transient();
+        self.clear_pastes();
         let Some(edit) = self.text_edit.take() else {
             return;
         };
@@ -854,6 +911,20 @@ impl Session {
         self.mark_transient();
         self.mark_selection();
         self.text_edit = None;
+        self.clear_pastes();
+    }
+
+    fn begin_text_edit(&mut self, edit: TextEdit) {
+        self.paste_requests.clear();
+        self.pending_pastes.clear();
+        self.next_paste_sequence = 1;
+        self.next_paste_expected = 1;
+        self.text_edit = Some(edit);
+    }
+
+    fn clear_pastes(&mut self) {
+        self.paste_requests.clear();
+        self.pending_pastes.clear();
     }
 
     fn mark_edited_object(&mut self) {
@@ -1371,6 +1442,110 @@ mod tests {
             ObjectData::Text { text, .. } => assert_eq!(text, "Hi!"),
             other => panic!("unexpected object {other:?}"),
         }
+    }
+
+    fn ctrl_v(session: &mut Session) {
+        key(
+            session,
+            'v' as u32,
+            Some('v'),
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        );
+    }
+
+    #[test]
+    fn paste_is_inserted_at_the_current_caret_and_normalizes_newlines() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Text))
+            .unwrap();
+        click(&mut session, Point { x: 20, y: 20 }, Duration::ZERO);
+        type_text(&mut session, "Hi");
+        key(&mut session, KEY_LEFT, None, Modifiers::default());
+        ctrl_v(&mut session);
+        let requests = session.take_paste_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].session, session.draft_id().unwrap());
+        session.accept_paste(PasteResult {
+            request: requests[0],
+            text: Ok(" there\r\n".to_owned()),
+        });
+        assert_eq!(
+            session.text_edit.as_ref().unwrap().draft.plain_text(),
+            "H there\ni"
+        );
+    }
+
+    #[test]
+    fn out_of_order_paste_results_wait_for_their_sequence() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Text))
+            .unwrap();
+        click(&mut session, Point { x: 20, y: 20 }, Duration::ZERO);
+        type_text(&mut session, "A");
+        ctrl_v(&mut session);
+        ctrl_v(&mut session);
+        let requests = session.take_paste_requests();
+        assert_eq!(requests.len(), 2);
+        session.accept_paste(PasteResult {
+            request: requests[1],
+            text: Ok("C".to_owned()),
+        });
+        assert_eq!(
+            session.text_edit.as_ref().unwrap().draft.plain_text(),
+            "A"
+        );
+        session.accept_paste(PasteResult {
+            request: requests[0],
+            text: Ok("B".to_owned()),
+        });
+        assert_eq!(
+            session.text_edit.as_ref().unwrap().draft.plain_text(),
+            "ABC"
+        );
+    }
+
+    #[test]
+    fn paste_from_an_ended_draft_is_ignored() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Text))
+            .unwrap();
+        click(&mut session, Point { x: 20, y: 20 }, Duration::ZERO);
+        ctrl_v(&mut session);
+        let requests = session.take_paste_requests();
+        let old = requests[0];
+        key(&mut session, KEY_ESCAPE, None, Modifiers::default());
+        assert!(session.draft_id().is_none());
+        session.accept_paste(PasteResult {
+            request: old,
+            text: Ok("late".to_owned()),
+        });
+        assert!(session.document().objects().is_empty());
+    }
+
+    #[test]
+    fn failed_paste_leaves_the_draft_unchanged() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Text))
+            .unwrap();
+        click(&mut session, Point { x: 20, y: 20 }, Duration::ZERO);
+        type_text(&mut session, "Keep");
+        ctrl_v(&mut session);
+        let request = session.take_paste_requests()[0];
+        session.accept_paste(PasteResult {
+            request,
+            text: Err("clipboard request timed out".to_owned()),
+        });
+        assert_eq!(
+            session.text_edit.as_ref().unwrap().draft.plain_text(),
+            "Keep"
+        );
     }
 
     #[test]

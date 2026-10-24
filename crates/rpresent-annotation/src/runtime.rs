@@ -9,6 +9,7 @@ use crate::error::OverlayError;
 use crate::geometry::Rect;
 use crate::render::Renderer;
 use crate::session::{KeyInput, PointerInput, Session};
+use crate::x11_clipboard::{PasteRequest, PasteResult};
 
 pub type AnnotationEventSink = Arc<dyn Fn(AnnotationEvent) + Send + Sync>;
 
@@ -52,10 +53,11 @@ pub enum AnnotationEvent {
     Exited(Result<(), String>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BackendEvent {
     Exposed,
     Resized { width: u32, height: u32 },
+    Paste(PasteResult),
 }
 
 /// Native presentation owned by the runtime. The trait stays private so the
@@ -68,6 +70,8 @@ pub(crate) trait AnnotationBackend {
     fn connection_fd(&self) -> Option<RawFd>;
     fn poll_event(&mut self, now: Instant) -> Result<Option<BackendEvent>, OverlayError>;
     fn next_deadline(&self) -> Option<Instant>;
+    fn request_paste(&mut self, request: PasteRequest) -> Result<(), OverlayError>;
+    fn cancel_paste(&mut self, session: u64);
 }
 
 type BackendFactory = Box<dyn FnMut() -> Result<Box<dyn AnnotationBackend>, OverlayError>>;
@@ -83,6 +87,7 @@ pub(crate) struct AnnotationRuntime {
     visible: bool,
     force_full: bool,
     exited: bool,
+    paste_session: Option<u64>,
 }
 
 impl AnnotationRuntime {
@@ -104,6 +109,7 @@ impl AnnotationRuntime {
             visible: false,
             force_full: true,
             exited: false,
+            paste_session: None,
         };
         runtime.recreate_backend();
         runtime.publish_status();
@@ -155,6 +161,7 @@ impl AnnotationRuntime {
             }
         }
         let _ = now;
+        self.service_pastes();
         self.publish_status();
     }
 
@@ -162,6 +169,7 @@ impl AnnotationRuntime {
         if self.exited {
             return;
         }
+        self.service_pastes();
         self.poll_backend(now);
         let Some(renderer) = self.renderer.as_ref() else {
             self.session.take_damage();
@@ -232,22 +240,60 @@ impl AnnotationRuntime {
     }
 
     fn poll_backend(&mut self, now: Instant) {
-        let Some(backend) = self.backend.as_mut() else {
-            return;
-        };
-        match backend.poll_event(now) {
-            Ok(None) => {}
-            Ok(Some(BackendEvent::Exposed)) => self.force_full = true,
-            Ok(Some(BackendEvent::Resized { width, height })) => {
-                match Renderer::new(width, height) {
+        loop {
+            let Some(backend) = self.backend.as_mut() else {
+                return;
+            };
+            let event = match backend.poll_event(now) {
+                Ok(None) => return,
+                Ok(Some(event)) => event,
+                Err(error) => {
+                    self.backend_failed(error);
+                    return;
+                }
+            };
+            match event {
+                BackendEvent::Exposed => self.force_full = true,
+                BackendEvent::Resized { width, height } => match Renderer::new(width, height) {
                     Ok(renderer) => {
                         self.renderer = Some(renderer);
                         self.force_full = true;
                     }
-                    Err(error) => self.backend_failed(error),
-                }
+                    Err(error) => {
+                        self.backend_failed(error);
+                        return;
+                    }
+                },
+                BackendEvent::Paste(result) => self.session.accept_paste(result),
             }
-            Err(error) => self.backend_failed(error),
+        }
+    }
+
+    /// Cancel transfers for a draft that ended, forward queued paste requests,
+    /// and keep the runtime bound to the draft that owns the current input.
+    fn service_pastes(&mut self) {
+        let draft = self.session.draft_id();
+        if self.paste_session != draft {
+            let previous = self.paste_session;
+            self.paste_session = draft;
+            if let (Some(session), Some(backend)) = (previous, self.backend.as_mut()) {
+                backend.cancel_paste(session);
+            }
+        }
+        let requests = self.session.take_paste_requests();
+        for request in requests {
+            let result = match self.backend.as_mut() {
+                Some(backend) => backend.request_paste(request),
+                None => Err(OverlayError::Recoverable(
+                    "annotation backend unavailable".to_owned(),
+                )),
+            };
+            if let Err(error) = result {
+                self.session.accept_paste(PasteResult {
+                    request,
+                    text: Err(error.to_string()),
+                });
+            }
         }
     }
 
@@ -255,6 +301,7 @@ impl AnnotationRuntime {
         self.backend = None;
         self.renderer = None;
         self.visible = false;
+        self.paste_session = None;
         let error = match (self.factory)() {
             Ok(backend) => {
                 let (width, height) = backend.size();
@@ -286,6 +333,7 @@ impl AnnotationRuntime {
         self.backend = None;
         self.renderer = None;
         self.visible = false;
+        self.paste_session = None;
         self.emit(AnnotationEvent::Failed {
             generation,
             error: error.to_string(),
@@ -407,6 +455,9 @@ mod tests {
         presents: Vec<bool>,
         uploads: Vec<Rect>,
         fail_upload: bool,
+        pastes: Vec<PasteRequest>,
+        cancelled_pastes: Vec<u64>,
+        auto_paste: bool,
     }
 
     struct FakeBackend {
@@ -448,6 +499,24 @@ mod tests {
 
         fn next_deadline(&self) -> Option<Instant> {
             None
+        }
+
+        fn request_paste(&mut self, request: PasteRequest) -> Result<(), OverlayError> {
+            let mut log = self.log.lock().unwrap();
+            log.pastes.push(request);
+            let auto = log.auto_paste;
+            drop(log);
+            if auto {
+                self.events.push_back(BackendEvent::Paste(PasteResult {
+                    request,
+                    text: Ok("pasted".to_owned()),
+                }));
+            }
+            Ok(())
+        }
+
+        fn cancel_paste(&mut self, session: u64) {
+            self.log.lock().unwrap().cancelled_pastes.push(session);
         }
     }
 
@@ -683,6 +752,70 @@ mod tests {
             .count();
         assert_eq!(exits, 1);
         assert!(runtime.is_exited());
+    }
+
+    #[test]
+    fn paste_requests_are_forwarded_and_results_reach_the_draft() {
+        let (mut runtime, log, _) = setup(false);
+        log.lock().unwrap().auto_paste = true;
+        runtime.process(AnnotationRequest::Command(AnnotationCommand::On), now());
+        runtime.process(
+            AnnotationRequest::Command(AnnotationCommand::Tool(
+                rpresent_config::AnnotationTool::Text,
+            )),
+            now(),
+        );
+        runtime.process(AnnotationRequest::Ownership { epoch: Some(2) }, now());
+        runtime.process(
+            AnnotationRequest::Pointer {
+                epoch: 2,
+                input: PointerInput::Down {
+                    root: Point { x: 5, y: 5 },
+                    time: std::time::Duration::ZERO,
+                },
+            },
+            now(),
+        );
+        runtime.process(
+            AnnotationRequest::Key {
+                epoch: 2,
+                input: KeyInput {
+                    keysym: 'v' as u32,
+                    text: Some('v'),
+                    modifiers: crate::Modifiers {
+                        ctrl: true,
+                        ..crate::Modifiers::default()
+                    },
+                },
+            },
+            now(),
+        );
+        runtime.flush(now());
+        assert_eq!(log.lock().unwrap().pastes.len(), 1);
+        assert_eq!(
+            runtime
+                .session
+                .text_edit
+                .as_ref()
+                .unwrap()
+                .draft
+                .plain_text(),
+            "pasted"
+        );
+        let session = log.lock().unwrap().pastes[0].session;
+        runtime.process(
+            AnnotationRequest::Key {
+                epoch: 2,
+                input: KeyInput {
+                    keysym: 0xff1b,
+                    text: None,
+                    modifiers: crate::Modifiers::default(),
+                },
+            },
+            now(),
+        );
+        runtime.flush(now());
+        assert_eq!(log.lock().unwrap().cancelled_pastes, vec![session]);
     }
 
     #[test]
