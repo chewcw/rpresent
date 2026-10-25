@@ -6,13 +6,13 @@ use rpresent_config::{AnnotationConfig, AnnotationTool, ConfigError};
 
 use crate::catalog::{Preset, Rgb, cycle_index, parse_rgb};
 use crate::command::AnnotationCommand;
-use crate::toolbar::{DisplayGeometry, Toolbar, ToolbarLayout};
 use crate::document::{Document, Object, ObjectData, ObjectId, Point};
 use crate::geometry::{
     Rect, point_rect_distance, point_segment_distance, segment_rect_distance,
     segment_segment_distance,
 };
 use crate::text::{TextDraft, TextSystem};
+use crate::toolbar::{DisplayGeometry, Toolbar, ToolbarLayout};
 use crate::x11_clipboard::{
     PasteRequest, PasteResult, normalize_newlines, paste_belongs_to_session,
 };
@@ -1377,7 +1377,9 @@ mod tests {
         assert!(!values.can_redo);
         assert!(!values.has_selection);
         assert!(!values.has_content);
-        session.command(AnnotationCommand::Tool(AnnotationTool::Text)).unwrap();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Text))
+            .unwrap();
         assert_eq!(session.toolbar_values().tool, AnnotationTool::Text);
     }
 

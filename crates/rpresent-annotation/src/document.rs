@@ -373,7 +373,10 @@ mod tests {
         document.insert(
             Point { x: 10, y: 20 },
             [255, 0, 0],
-            ObjectData::Line { end: Point { x: 30, y: 0 }, width_px: 4 },
+            ObjectData::Line {
+                end: Point { x: 30, y: 0 },
+                width_px: 4,
+            },
         );
         assert!(document.can_undo());
         assert!(!document.can_redo());
@@ -385,8 +388,12 @@ mod tests {
         assert!(!document.can_redo());
         assert!(document.undo());
         document.insert(
-            Point::default(), [0, 255, 0],
-            ObjectData::Line { end: Point { x: 1, y: 1 }, width_px: 2 },
+            Point::default(),
+            [0, 255, 0],
+            ObjectData::Line {
+                end: Point { x: 1, y: 1 },
+                width_px: 2,
+            },
         );
         assert!(!document.can_redo());
     }

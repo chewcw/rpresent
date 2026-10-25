@@ -144,7 +144,10 @@ fn picker_specs(values: &ToolbarValues<'_>, kind: PickerKind) -> Vec<Spec> {
 
 pub(super) fn clamp_origin(origin: Point, size: (u32, u32), monitor: Rect) -> Point {
     let max_x = monitor.right().saturating_sub(size.0 as i32).max(monitor.x);
-    let max_y = monitor.bottom().saturating_sub(size.1 as i32).max(monitor.y);
+    let max_y = monitor
+        .bottom()
+        .saturating_sub(size.1 as i32)
+        .max(monitor.y);
     Point {
         x: origin.x.clamp(monitor.x, max_x),
         y: origin.y.clamp(monitor.y, max_y),
@@ -246,7 +249,10 @@ fn build_bar(
         + (rows.len().max(1) as i32 - 1) * GAP_PX;
     let origin = clamp_origin(
         origin,
-        ((2 * PADDING_PX + widest.max(0)) as u32, height.max(0) as u32),
+        (
+            (2 * PADDING_PX + widest.max(0)) as u32,
+            height.max(0) as u32,
+        ),
         monitor,
     );
     let bar = Rect {
@@ -353,16 +359,14 @@ fn picker_plan(
     };
     let show_pages = pages > 1;
 
-    let width = (2 * PADDING_PX as u32 + columns as u32 * cell_width + (columns as u32 - 1) * GAP_PX as u32)
+    let width = (2 * PADDING_PX as u32
+        + columns as u32 * cell_width
+        + (columns as u32 - 1) * GAP_PX as u32)
         .min(monitor.width.max(1));
     let height = 2 * PADDING_PX as u32
         + used_rows as u32 * ROW_PX
         + (used_rows as u32 - 1) * GAP_PX as u32
-        + if show_pages {
-            page_rows as u32
-        } else {
-            0
-        };
+        + if show_pages { page_rows as u32 } else { 0 };
 
     let x = anchor
         .x
@@ -372,7 +376,13 @@ fn picker_plan(
     } else {
         bar.y - GAP_PX - height as i32
     };
-    let y = y.clamp(monitor.y, monitor.bottom().saturating_sub(height as i32).max(monitor.y));
+    let y = y.clamp(
+        monitor.y,
+        monitor
+            .bottom()
+            .saturating_sub(height as i32)
+            .max(monitor.y),
+    );
     let rect = Rect {
         x,
         y,
@@ -452,8 +462,7 @@ pub(super) fn build_layout(
                 .map(|control| control.bounds);
             anchor.and_then(|anchor| {
                 let entries = picker_specs(values, kind);
-                let (rect, picker_controls, _) =
-                    picker_plan(anchor, bar, monitor, &entries, page);
+                let (rect, picker_controls, _) = picker_plan(anchor, bar, monitor, &entries, page);
                 controls.extend(picker_controls);
                 Some(rect)
             })

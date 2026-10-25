@@ -4,10 +4,25 @@ use rpresent_config::AnnotationConfig;
 
 fn geometry() -> DisplayGeometry {
     DisplayGeometry {
-        root: Rect { x: 0, y: 0, width: 2560, height: 1080 },
+        root: Rect {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1080,
+        },
         monitors: vec![
-            Rect { x: 0, y: 0, width: 1280, height: 1080 },
-            Rect { x: 1280, y: 0, width: 1280, height: 1080 },
+            Rect {
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 1080,
+            },
+            Rect {
+                x: 1280,
+                y: 0,
+                width: 1280,
+                height: 1080,
+            },
         ],
         pointer: Point { x: 1800, y: 400 },
     }
@@ -81,14 +96,27 @@ fn selected_tool(layout: &ToolbarLayout) -> Vec<AnnotationTool> {
 fn narrow_monitor_wraps_groups_and_keeps_controls_inside() {
     let session = editing_session();
     let geometry = DisplayGeometry {
-        root: Rect { x: 0, y: 0, width: 640, height: 480 },
-        monitors: vec![Rect { x: 0, y: 0, width: 640, height: 480 }],
+        root: Rect {
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 480,
+        },
+        monitors: vec![Rect {
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 480,
+        }],
         pointer: Point { x: 320, y: 240 },
     };
     let mut toolbar = Toolbar::new(geometry);
     assert!(toolbar.sync(&session.toolbar_values()).is_some());
     let layout = toolbar.layout().unwrap();
-    assert!(layout.bar.height > ROW_PX + 2 * PADDING_PX as u32, "expected wrapped rows");
+    assert!(
+        layout.bar.height > ROW_PX + 2 * PADDING_PX as u32,
+        "expected wrapped rows"
+    );
     assert!(layout.bar.width <= 640);
     assert_controls_fit(layout);
 }
@@ -97,8 +125,18 @@ fn narrow_monitor_wraps_groups_and_keeps_controls_inside() {
 fn empty_monitor_list_falls_back_to_root_bounds() {
     let session = editing_session();
     let geometry = DisplayGeometry {
-        root: Rect { x: 0, y: 0, width: 1024, height: 768 },
-        monitors: vec![Rect { x: 0, y: 0, width: 0, height: 0 }],
+        root: Rect {
+            x: 0,
+            y: 0,
+            width: 1024,
+            height: 768,
+        },
+        monitors: vec![Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        }],
         pointer: Point { x: 500, y: 400 },
     };
     let mut toolbar = Toolbar::new(geometry);
@@ -111,10 +149,25 @@ fn empty_monitor_list_falls_back_to_root_bounds() {
 
 fn offset_geometry(pointer: Point) -> DisplayGeometry {
     DisplayGeometry {
-        root: Rect { x: 0, y: 0, width: 1800, height: 900 },
+        root: Rect {
+            x: 0,
+            y: 0,
+            width: 1800,
+            height: 900,
+        },
         monitors: vec![
-            Rect { x: 0, y: 0, width: 800, height: 600 },
-            Rect { x: 901, y: 200, width: 800, height: 600 },
+            Rect {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
+            Rect {
+                x: 901,
+                y: 200,
+                width: 800,
+                height: 600,
+            },
         ],
         pointer,
     }
@@ -138,13 +191,19 @@ fn pointer_in_a_gap_uses_the_nearest_monitor_and_ties_use_reported_order() {
     let mut toolbar = Toolbar::new(offset_geometry(Point { x: 870, y: 300 }));
     toolbar.sync(&session.toolbar_values());
     let bar = toolbar.layout().unwrap().bar;
-    assert!(bar.x >= 901 && bar.right() <= 1701, "expected the second monitor");
+    assert!(
+        bar.x >= 901 && bar.right() <= 1701,
+        "expected the second monitor"
+    );
 
     // Equal distance to both monitors: the first reported monitor wins.
     let mut toolbar = Toolbar::new(offset_geometry(Point { x: 850, y: 300 }));
     toolbar.sync(&session.toolbar_values());
     let bar = toolbar.layout().unwrap().bar;
-    assert!(bar.x >= 0 && bar.right() <= 800, "expected the first monitor");
+    assert!(
+        bar.x >= 0 && bar.right() <= 800,
+        "expected the first monitor"
+    );
 }
 
 #[test]
@@ -156,7 +215,12 @@ fn width_picker_pages_cover_every_configured_value_in_order() {
     session.command(AnnotationCommand::On).unwrap();
 
     let geometry = DisplayGeometry {
-        root: Rect { x: 0, y: 0, width: 640, height: 480 },
+        root: Rect {
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 480,
+        },
         monitors: Vec::new(),
         pointer: Point { x: 320, y: 240 },
     };
@@ -169,8 +233,18 @@ fn width_picker_pages_cover_every_configured_value_in_order() {
     for page in 0..pages {
         let built = layout::build_layout(&geometry, origin, &values, Some(PickerKind::Width), page);
         assert_controls_fit(&built);
-        assert!(built.controls.iter().any(|control| control.target == Target::PreviousPage));
-        assert!(built.controls.iter().any(|control| control.target == Target::NextPage));
+        assert!(
+            built
+                .controls
+                .iter()
+                .any(|control| control.target == Target::PreviousPage)
+        );
+        assert!(
+            built
+                .controls
+                .iter()
+                .any(|control| control.target == Target::NextPage)
+        );
         for control in &built.controls {
             if let Target::Width(width) = control.target {
                 seen.push(width);
@@ -178,14 +252,22 @@ fn width_picker_pages_cover_every_configured_value_in_order() {
         }
     }
     let expected: Vec<u32> = (1..=200).collect();
-    assert_eq!(seen, expected, "every configured width appears once, in order");
+    assert_eq!(
+        seen, expected,
+        "every configured width appears once, in order"
+    );
 }
 
 #[test]
 fn single_page_picker_shows_no_page_controls() {
     let session = editing_session();
     let geometry = DisplayGeometry {
-        root: Rect { x: 0, y: 0, width: 1280, height: 720 },
+        root: Rect {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 720,
+        },
         monitors: Vec::new(),
         pointer: Point { x: 640, y: 360 },
     };
@@ -194,10 +276,12 @@ fn single_page_picker_shows_no_page_controls() {
     assert!(toolbar.sync(&session.toolbar_values()).is_some());
     let layout = toolbar.layout().unwrap();
     assert!(layout.picker.is_some());
-    assert!(!layout.controls.iter().any(|control| matches!(
-        control.target,
-        Target::PreviousPage | Target::NextPage
-    )));
+    assert!(
+        !layout
+            .controls
+            .iter()
+            .any(|control| matches!(control.target, Target::PreviousPage | Target::NextPage))
+    );
     assert_controls_fit(layout);
 }
 
@@ -235,22 +319,41 @@ fn tool_changes_swap_applicable_presets_and_highlight() {
     // Default tool is Pen: color and width apply, Pen is highlighted.
     assert_eq!(
         picker_targets(toolbar.layout().unwrap()),
-        vec![Target::Picker(PickerKind::Color), Target::Picker(PickerKind::Width)]
+        vec![
+            Target::Picker(PickerKind::Color),
+            Target::Picker(PickerKind::Width)
+        ]
     );
-    assert_eq!(selected_tool(toolbar.layout().unwrap()), vec![AnnotationTool::Pen]);
+    assert_eq!(
+        selected_tool(toolbar.layout().unwrap()),
+        vec![AnnotationTool::Pen]
+    );
 
-    session.command(AnnotationCommand::Tool(AnnotationTool::Text)).unwrap();
+    session
+        .command(AnnotationCommand::Tool(AnnotationTool::Text))
+        .unwrap();
     assert!(toolbar.sync(&session.toolbar_values()).is_some());
     assert_eq!(
         picker_targets(toolbar.layout().unwrap()),
-        vec![Target::Picker(PickerKind::Color), Target::Picker(PickerKind::TextSize)]
+        vec![
+            Target::Picker(PickerKind::Color),
+            Target::Picker(PickerKind::TextSize)
+        ]
     );
-    assert_eq!(selected_tool(toolbar.layout().unwrap()), vec![AnnotationTool::Text]);
+    assert_eq!(
+        selected_tool(toolbar.layout().unwrap()),
+        vec![AnnotationTool::Text]
+    );
 
-    session.command(AnnotationCommand::Tool(AnnotationTool::Select)).unwrap();
+    session
+        .command(AnnotationCommand::Tool(AnnotationTool::Select))
+        .unwrap();
     assert!(toolbar.sync(&session.toolbar_values()).is_some());
     assert!(picker_targets(toolbar.layout().unwrap()).is_empty());
-    assert_eq!(selected_tool(toolbar.layout().unwrap()), vec![AnnotationTool::Select]);
+    assert_eq!(
+        selected_tool(toolbar.layout().unwrap()),
+        vec![AnnotationTool::Select]
+    );
     assert_controls_fit(toolbar.layout().unwrap());
 }
 
@@ -264,12 +367,16 @@ fn toolbar_starts_on_pointer_monitor_without_creating_content() {
     assert!(bar.x >= 1280);
     assert!(bar.right() <= 2560);
     assert_eq!(bar.y, 12);
-    let tools: Vec<_> = toolbar.layout().unwrap().controls.iter().filter_map(|control| {
-        match control.target {
+    let tools: Vec<_> = toolbar
+        .layout()
+        .unwrap()
+        .controls
+        .iter()
+        .filter_map(|control| match control.target {
             Target::Tool(tool) => Some(tool),
             _ => None,
-        }
-    }).collect();
+        })
+        .collect();
     assert_eq!(tools, crate::TOOLS);
     assert!(session.document().objects().is_empty());
     assert!(toolbar.sync(&session.toolbar_values()).is_none());

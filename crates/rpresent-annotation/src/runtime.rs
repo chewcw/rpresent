@@ -220,7 +220,7 @@ impl AnnotationRuntime {
         }
     }
 
-    pub(crate)    fn next_deadline(&self) -> Option<Instant> {
+    pub(crate) fn next_deadline(&self) -> Option<Instant> {
         self.backend
             .as_ref()
             .and_then(|backend| backend.next_deadline())
@@ -593,12 +593,14 @@ mod tests {
             let auto = log.auto_paste;
             drop(log);
             if auto {
-                self.log.lock().unwrap().events.push_back(BackendEvent::Paste(
-                    PasteResult {
+                self.log
+                    .lock()
+                    .unwrap()
+                    .events
+                    .push_back(BackendEvent::Paste(PasteResult {
                         request,
                         text: Ok("pasted".to_owned()),
-                    },
-                ));
+                    }));
             }
             Ok(())
         }
@@ -699,11 +701,7 @@ mod tests {
         );
     }
 
-    fn pointer_event(
-        runtime: &mut AnnotationRuntime,
-        epoch: u64,
-        input: PointerInput,
-    ) {
+    fn pointer_event(runtime: &mut AnnotationRuntime, epoch: u64, input: PointerInput) {
         runtime.process(AnnotationRequest::Pointer { epoch, input }, now());
     }
 
@@ -725,7 +723,10 @@ mod tests {
     fn show_editing(runtime: &mut AnnotationRuntime) {
         runtime.process(AnnotationRequest::Command(AnnotationCommand::On), now());
         runtime.process(
-            AnnotationRequest::Present { operation: 1, visible: true },
+            AnnotationRequest::Present {
+                operation: 1,
+                visible: true,
+            },
             now(),
         );
         runtime.process(AnnotationRequest::Ownership { epoch: Some(1) }, now());
@@ -960,7 +961,10 @@ mod tests {
         let (mut runtime, log, events) = setup(false);
         runtime.process(AnnotationRequest::Command(AnnotationCommand::On), now());
         runtime.process(
-            AnnotationRequest::Present { operation: 10, visible: true },
+            AnnotationRequest::Present {
+                operation: 10,
+                visible: true,
+            },
             now(),
         );
         runtime.process(AnnotationRequest::Ownership { epoch: Some(1) }, now());
@@ -1047,10 +1051,7 @@ mod tests {
             },
         );
         assert_eq!(runtime.session.toolbar_layout().unwrap().bar, bar_before);
-        assert_eq!(
-            runtime.session.tool(),
-            rpresent_config::AnnotationTool::Pen
-        );
+        assert_eq!(runtime.session.tool(), rpresent_config::AnnotationTool::Pen);
         assert!(runtime.session.document().objects().is_empty());
     }
 
@@ -1062,7 +1063,10 @@ mod tests {
 
         // Hidden for capture; the editing preference changes while hidden.
         runtime.process(
-            AnnotationRequest::Present { operation: 2, visible: false },
+            AnnotationRequest::Present {
+                operation: 2,
+                visible: false,
+            },
             now(),
         );
         runtime.process(AnnotationRequest::Command(AnnotationCommand::Off), now());
@@ -1078,7 +1082,10 @@ mod tests {
         assert!(runtime.session.toolbar_layout().is_none());
 
         runtime.process(
-            AnnotationRequest::Present { operation: 3, visible: true },
+            AnnotationRequest::Present {
+                operation: 3,
+                visible: true,
+            },
             now(),
         );
         runtime.flush(now());
@@ -1099,7 +1106,10 @@ mod tests {
         // that must fail with the picker open and a press latched.
         runtime.process(AnnotationRequest::Command(AnnotationCommand::On), now());
         runtime.process(
-            AnnotationRequest::Present { operation: 1, visible: true },
+            AnnotationRequest::Present {
+                operation: 1,
+                visible: true,
+            },
             now(),
         );
         runtime.process(AnnotationRequest::Ownership { epoch: Some(1) }, now());
@@ -1130,7 +1140,10 @@ mod tests {
         runtime.flush(now());
         assert!(all_events(&events).iter().any(|event| matches!(
             event,
-            AnnotationEvent::Failed { recoverable: true, .. }
+            AnnotationEvent::Failed {
+                recoverable: true,
+                ..
+            }
         )));
         assert!(runtime.session.toolbar_layout().unwrap().picker.is_none());
         assert!(runtime.session.gesture.is_none());

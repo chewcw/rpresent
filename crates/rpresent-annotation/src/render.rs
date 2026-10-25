@@ -414,7 +414,13 @@ fn draw_text_edit(
     );
 }
 
-pub(crate) fn fill_clipped(pixmap: &mut Pixmap, rect: Rect, color: [u8; 3], alpha: u8, clip: &Rect) {
+pub(crate) fn fill_clipped(
+    pixmap: &mut Pixmap,
+    rect: Rect,
+    color: [u8; 3],
+    alpha: u8,
+    clip: &Rect,
+) {
     let Some(visible) = rect.intersect(clip) else {
         return;
     };
@@ -432,7 +438,13 @@ pub(crate) fn fill_clipped(pixmap: &mut Pixmap, rect: Rect, color: [u8; 3], alph
     );
 }
 
-pub(crate) fn draw_border(pixmap: &mut Pixmap, mask: &Mask, bounds: Rect, color: [u8; 3], clip: &Rect) {
+pub(crate) fn draw_border(
+    pixmap: &mut Pixmap,
+    mask: &Mask,
+    bounds: Rect,
+    color: [u8; 3],
+    clip: &Rect,
+) {
     if bounds.intersect(clip).is_none() {
         return;
     }

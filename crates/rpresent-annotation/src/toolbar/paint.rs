@@ -60,27 +60,40 @@ fn paint_control(
         // A swatch border contrasted against its own luminance keeps both
         // black and white swatches visible on the dark bar.
         let luminance = 0.299 * color[0] as f32 + 0.587 * color[1] as f32 + 0.114 * color[2] as f32;
-        let edge = if luminance > 140.0 { [0, 0, 0] } else { [255, 255, 255] };
+        let edge = if luminance > 140.0 {
+            [0, 0, 0]
+        } else {
+            [255, 255, 255]
+        };
         draw_border(pixmap, mask, swatch, edge, clip);
         label_x += SWATCH_PX as i32 + GAP_PX;
     }
 
-    let text_color = if control.enabled { TEXT_LIGHT } else { TEXT_MUTED };
+    let text_color = if control.enabled {
+        TEXT_LIGHT
+    } else {
+        TEXT_MUTED
+    };
     let color = TextColor::rgb(text_color[0], text_color[1], text_color[2]);
     let origin_x = label_x;
     let origin_y = control.bounds.y + ((ROW_PX - UI_FONT_PX) as i32) / 2;
-    text_system.draw_label(&control.label, UI_FONT_PX, color, |x, y, width, height, red, green, blue, alpha| {
-        blend_rect(
-            pixmap,
-            x + origin_x,
-            y + origin_y,
-            width,
-            height,
-            red,
-            green,
-            blue,
-            alpha,
-            clip,
-        );
-    });
+    text_system.draw_label(
+        &control.label,
+        UI_FONT_PX,
+        color,
+        |x, y, width, height, red, green, blue, alpha| {
+            blend_rect(
+                pixmap,
+                x + origin_x,
+                y + origin_y,
+                width,
+                height,
+                red,
+                green,
+                blue,
+                alpha,
+                clip,
+            );
+        },
+    );
 }

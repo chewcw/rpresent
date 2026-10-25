@@ -6,18 +6,25 @@ use std::time::Duration;
 
 fn geometry(width: u32, height: u32) -> DisplayGeometry {
     DisplayGeometry {
-        root: Rect { x: 0, y: 0, width, height },
+        root: Rect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        },
         monitors: Vec::new(),
-        pointer: crate::Point { x: width as i32 / 2, y: height as i32 / 2 },
+        pointer: crate::Point {
+            x: width as i32 / 2,
+            y: height as i32 / 2,
+        },
     }
 }
 
 /// A session with no display geometry: canvas-only until `update_display`.
 fn base_scene(config: &AnnotationConfig) -> Session {
     let mut session = Session::new(config).unwrap();
-    session.text_system = crate::TextSystem::with_font(include_bytes!(
-        "../../tests/fixtures/DejaVuSans.ttf"
-    ));
+    session.text_system =
+        crate::TextSystem::with_font(include_bytes!("../../tests/fixtures/DejaVuSans.ttf"));
     session.command(AnnotationCommand::On).unwrap();
     session.ownership(Some(1));
     session
@@ -29,9 +36,8 @@ fn scene() -> Session {
 
 fn scene_with(config: &AnnotationConfig, width: u32, height: u32) -> Session {
     let mut session = Session::new(config).unwrap();
-    session.text_system = crate::TextSystem::with_font(include_bytes!(
-        "../../tests/fixtures/DejaVuSans.ttf"
-    ));
+    session.text_system =
+        crate::TextSystem::with_font(include_bytes!("../../tests/fixtures/DejaVuSans.ttf"));
     session.update_display(geometry(width, height));
     session.command(AnnotationCommand::On).unwrap();
     session.ownership(Some(1));
@@ -62,8 +68,20 @@ fn control_center(session: &Session, target: Target) -> crate::Point {
 }
 
 fn click(session: &mut Session, at: crate::Point, millis: u64) {
-    session.pointer(1, PointerInput::Down { root: at, time: Duration::from_millis(millis) });
-    session.pointer(1, PointerInput::Up { root: at, time: Duration::from_millis(millis + 10) });
+    session.pointer(
+        1,
+        PointerInput::Down {
+            root: at,
+            time: Duration::from_millis(millis),
+        },
+    );
+    session.pointer(
+        1,
+        PointerInput::Up {
+            root: at,
+            time: Duration::from_millis(millis + 10),
+        },
+    );
 }
 
 fn press(session: &mut Session, keysym: u32) {
@@ -78,9 +96,27 @@ fn press(session: &mut Session, keysym: u32) {
 }
 
 fn drag(session: &mut Session, from: crate::Point, to: crate::Point, millis: u64) {
-    session.pointer(1, PointerInput::Down { root: from, time: Duration::from_millis(millis) });
-    session.pointer(1, PointerInput::Move { root: to, time: Duration::from_millis(millis + 5) });
-    session.pointer(1, PointerInput::Up { root: to, time: Duration::from_millis(millis + 10) });
+    session.pointer(
+        1,
+        PointerInput::Down {
+            root: from,
+            time: Duration::from_millis(millis),
+        },
+    );
+    session.pointer(
+        1,
+        PointerInput::Move {
+            root: to,
+            time: Duration::from_millis(millis + 5),
+        },
+    );
+    session.pointer(
+        1,
+        PointerInput::Up {
+            root: to,
+            time: Duration::from_millis(millis + 10),
+        },
+    );
 }
 
 fn below_bar(session: &Session) -> crate::Point {
@@ -89,7 +125,10 @@ fn below_bar(session: &Session) -> crate::Point {
     if let Some(picker) = layout.picker {
         bottom = bottom.max(picker.bottom());
     }
-    crate::Point { x: 640, y: bottom + 50 }
+    crate::Point {
+        x: 640,
+        y: bottom + 50,
+    }
 }
 
 #[test]
@@ -110,7 +149,9 @@ fn moving_the_toolbar_repaints_the_artwork_underneath() {
     // Committed line across the future toolbar area, created before any
     // geometry exists.
     let mut session = base_scene(&AnnotationConfig::default());
-    session.command(AnnotationCommand::Tool(AnnotationTool::Line)).unwrap();
+    session
+        .command(AnnotationCommand::Tool(AnnotationTool::Line))
+        .unwrap();
     drag(
         &mut session,
         crate::Point { x: 200, y: 40 },
@@ -129,14 +170,26 @@ fn moving_the_toolbar_repaints_the_artwork_underneath() {
     // The toolbar appears over the line: partial damage must equal a full
     // frame.
     session.update_display(geometry(1280, 720));
-    parity(&mut session, &mut partial, &mut full, "toolbar appears over artwork");
+    parity(
+        &mut session,
+        &mut partial,
+        &mut full,
+        "toolbar appears over artwork",
+    );
     let old = session.toolbar_layout().unwrap().bar;
     let offset = ((old.y as usize * 1280) + old.x as usize) * 4;
-    assert_ne!(partial.pixels()[offset + 3], 0, "toolbar must cover the artwork");
+    assert_ne!(
+        partial.pixels()[offset + 3],
+        0,
+        "toolbar must cover the artwork"
+    );
 
     // Drag the toolbar away; the old position must show the original line.
     let handle = control_center(&session, Target::Handle);
-    let moved = crate::Point { x: handle.x, y: 300 };
+    let moved = crate::Point {
+        x: handle.x,
+        y: 300,
+    };
     drag(&mut session, handle, moved, 100);
     parity(&mut session, &mut partial, &mut full, "toolbar moved");
     let new = session.toolbar_layout().unwrap().bar;
@@ -165,13 +218,18 @@ fn every_toolbar_transition_keeps_partial_frames_identical_to_full_frames() {
     let mut full = Renderer::new(1280, 720).unwrap();
 
     // Committed artwork below the bar.
-    session.command(AnnotationCommand::Tool(AnnotationTool::Line)).unwrap();
+    session
+        .command(AnnotationCommand::Tool(AnnotationTool::Line))
+        .unwrap();
     parity(&mut session, &mut partial, &mut full, "tool change");
     let from = below_bar(&session);
     drag(
         &mut session,
         from,
-        crate::Point { x: from.x + 80, y: from.y + 10 },
+        crate::Point {
+            x: from.x + 80,
+            y: from.y + 10,
+        },
         0,
     );
     parity(&mut session, &mut partial, &mut full, "line drawn");
@@ -200,14 +258,25 @@ fn every_toolbar_transition_keeps_partial_frames_identical_to_full_frames() {
     parity(&mut session, &mut partial, &mut full, "picker closed");
 
     // Selection change.
-    session.command(AnnotationCommand::Tool(AnnotationTool::Select)).unwrap();
+    session
+        .command(AnnotationCommand::Tool(AnnotationTool::Select))
+        .unwrap();
     parity(&mut session, &mut partial, &mut full, "select tool");
-    click(&mut session, crate::Point { x: from.x + 40, y: from.y + 5 }, 300);
+    click(
+        &mut session,
+        crate::Point {
+            x: from.x + 40,
+            y: from.y + 5,
+        },
+        300,
+    );
     assert!(session.selection().is_some());
     parity(&mut session, &mut partial, &mut full, "selected");
 
     // Preset change through the picker while selected.
-    session.command(AnnotationCommand::Tool(AnnotationTool::Pen)).unwrap();
+    session
+        .command(AnnotationCommand::Tool(AnnotationTool::Pen))
+        .unwrap();
     parity(&mut session, &mut partial, &mut full, "pen tool");
     let at = control_center(&session, Target::Picker(PickerKind::Color));
     click(&mut session, at, 400);
@@ -231,7 +300,9 @@ fn every_toolbar_transition_keeps_partial_frames_identical_to_full_frames() {
     parity(&mut session, &mut partial, &mut full, "cleared for draft");
 
     // A text draft underneath the open picker.
-    session.command(AnnotationCommand::Tool(AnnotationTool::Text)).unwrap();
+    session
+        .command(AnnotationCommand::Tool(AnnotationTool::Text))
+        .unwrap();
     parity(&mut session, &mut partial, &mut full, "text tool");
     let draft_at = crate::Point { x: 640, y: 130 };
     click(&mut session, draft_at, 600);
@@ -251,7 +322,12 @@ fn every_toolbar_transition_keeps_partial_frames_identical_to_full_frames() {
     assert!(session.toolbar_layout().unwrap().picker.is_some());
     parity(&mut session, &mut partial, &mut full, "picker over draft");
     press(&mut session, 0xff1b);
-    parity(&mut session, &mut partial, &mut full, "picker closed over draft");
+    parity(
+        &mut session,
+        &mut partial,
+        &mut full,
+        "picker closed over draft",
+    );
     press(&mut session, 0xff0d);
     parity(&mut session, &mut partial, &mut full, "draft committed");
 
@@ -281,7 +357,11 @@ fn paging_the_picker_keeps_partial_frames_identical() {
     parity(&mut session, &mut partial, &mut full, "paged picker opened");
 
     for label in ["next", "next", "previous"] {
-        let target = if label == "next" { Target::NextPage } else { Target::PreviousPage };
+        let target = if label == "next" {
+            Target::NextPage
+        } else {
+            Target::PreviousPage
+        };
         let at = control_center(&session, target);
         click(&mut session, at, 100);
         parity(&mut session, &mut partial, &mut full, label);
@@ -299,20 +379,33 @@ fn unchanged_toolbar_state_reports_no_damage() {
     session.take_damage();
 
     // A completed draw, then clear its damage.
-    session.command(AnnotationCommand::Tool(AnnotationTool::Line)).unwrap();
+    session
+        .command(AnnotationCommand::Tool(AnnotationTool::Line))
+        .unwrap();
     let from = below_bar(&session);
     drag(
         &mut session,
         from,
-        crate::Point { x: from.x + 40, y: from.y },
+        crate::Point {
+            x: from.x + 40,
+            y: from.y,
+        },
         0,
     );
     assert!(session.take_damage().is_some());
     assert!(session.toolbar_layout().is_some());
 
     // A no-op command and an unchanged geometry refresh report nothing.
-    session.command(AnnotationCommand::Tool(AnnotationTool::Line)).unwrap();
-    assert!(session.take_damage().is_none(), "no-op command must not damage the toolbar");
+    session
+        .command(AnnotationCommand::Tool(AnnotationTool::Line))
+        .unwrap();
+    assert!(
+        session.take_damage().is_none(),
+        "no-op command must not damage the toolbar"
+    );
     session.update_display(geometry(1280, 720));
-    assert!(session.take_damage().is_none(), "unchanged geometry must not damage the toolbar");
+    assert!(
+        session.take_damage().is_none(),
+        "unchanged geometry must not damage the toolbar"
+    );
 }

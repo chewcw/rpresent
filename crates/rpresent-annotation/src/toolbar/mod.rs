@@ -1,4 +1,4 @@
-use crate::{AnnotationCommand, AnnotationTool, PointerInput, Point, Preset, Rect, Rgb};
+use crate::{AnnotationCommand, AnnotationTool, Point, PointerInput, Preset, Rect, Rgb};
 
 mod layout;
 pub(crate) mod paint;
@@ -123,10 +123,9 @@ impl ToolbarLayout {
     pub(crate) fn hit(&self, point: Point) -> Option<&ToolbarControl> {
         if let Some(picker) = self.picker {
             if picker.contains(point) {
-                return self
-                    .controls
-                    .iter()
-                    .find(|control| picker_target(control.target) && control.bounds.contains(point));
+                return self.controls.iter().find(|control| {
+                    picker_target(control.target) && control.bounds.contains(point)
+                });
             }
         }
         if self.bar.contains(point) {
@@ -219,7 +218,9 @@ impl Toolbar {
             return None;
         }
         let damage = match (&self.layout, &next) {
-            (Some(previous), Some(next)) => Some(previous.paint_bounds().union(&next.paint_bounds())),
+            (Some(previous), Some(next)) => {
+                Some(previous.paint_bounds().union(&next.paint_bounds()))
+            }
             (Some(previous), None) => Some(previous.paint_bounds()),
             (None, Some(next)) => Some(next.paint_bounds()),
             (None, None) => None,
@@ -295,8 +296,8 @@ impl Toolbar {
             self.sequence = Sequence::Idle;
             return;
         };
-        let inside = layout.bar.contains(root)
-            || layout.picker.is_some_and(|picker| picker.contains(root));
+        let inside =
+            layout.bar.contains(root) || layout.picker.is_some_and(|picker| picker.contains(root));
         match layout.hit(root) {
             Some(control) if control.enabled => {
                 reply.consumed = true;
