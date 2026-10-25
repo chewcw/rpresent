@@ -135,13 +135,22 @@ While annotation editing owns input, spotlight stays at its last rendered positi
 - The eraser deletes whole objects, and drag with the Select tool moves one object.
 - Turning annotation off keeps finished artwork visible but click-through. Input returns to spotlight if it is active, then zoom, then the desktop.
 
+A drawing toolbar appears automatically while editing, at the top of the monitor under the pointer (or of the root desktop when monitor information is unavailable). It offers the tools, the configured color, stroke-width, and text-size pickers, and the Undo, Redo, Delete, Clear, and Exit actions. Preset pickers only appear for the active tool, and actions that would do nothing are disabled.
+
+- Drag the handle to move the toolbar. It stays within a visible monitor, can be dragged onto another monitor, and wraps onto extra rows when a monitor is too narrow. Its position is remembered for the current daemon session only and is never saved to disk.
+- Clicking a picker opens it; clicking another picker replaces it; clicking outside dismisses it without drawing or changing the selection; Escape closes an open picker before any other Escape behavior.
+- Clear erases all committed objects immediately, without a confirmation dialog, and the next Undo restores them exactly.
+- Exit stops editing while finished artwork stays visible and click-through.
+- Choosing a tool or preset from the toolbar cancels an uncommitted text draft, just like the keyboard shortcuts do.
+- Toolbar Undo and Redo act on the document history; `Ctrl+Z` while editing text remains local to the draft.
+
 Colors can also be selected from the command line; quote the value so the shell keeps the `#`:
 
 ```bash
 cargo run -p rpresent -- 'annotation=color=#00FF00'
 ```
 
-Deferred for now: a toolbar, IME input, automatic text wrapping, partial-stroke erasing, and disk persistence.
+Deferred for now: IME input, automatic text wrapping, partial-stroke erasing, and disk persistence.
 
 **Known limitations:**
 - Linux/X11 only; Wayland is not supported.

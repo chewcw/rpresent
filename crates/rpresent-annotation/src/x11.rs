@@ -732,6 +732,9 @@ fn lost(error: impl std::fmt::Display) -> OverlayError {
 }
 
 #[cfg(test)]
+mod toolbar_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
