@@ -75,7 +75,9 @@ for section in "${ORDER[@]}"; do
 done
 
 if [[ -z "${PREVIOUS}" ]]; then
-  RANGE="$(git rev-list --max-parents=0 "${TAG}" | head -n 1)"
+  # The range starts at the repository root, so an initial release covers
+  # every commit reachable from the tag.
+  RANGE="${TAG}"
 else
   RANGE="${PREVIOUS}..${TAG}"
 fi
