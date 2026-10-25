@@ -1,6 +1,7 @@
 use crate::{AnnotationCommand, AnnotationTool, PointerInput, Point, Preset, Rect, Rgb};
 
 mod layout;
+pub(crate) mod paint;
 
 #[cfg(test)]
 mod tests;

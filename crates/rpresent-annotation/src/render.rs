@@ -142,6 +142,17 @@ impl Renderer {
             }
         }
 
+        // The toolbar paints last so it always covers the artwork beneath it
+        // inside the same damage clip.
+        if let Some(layout) = session.toolbar_layout().cloned() {
+            crate::toolbar::paint::draw_toolbar(
+                &mut self.pixmap,
+                &self.mask,
+                &mut session.text_system,
+                &layout,
+                &clip,
+            );
+        }
         Ok(())
     }
 
@@ -403,7 +414,7 @@ fn draw_text_edit(
     );
 }
 
-fn fill_clipped(pixmap: &mut Pixmap, rect: Rect, color: [u8; 3], alpha: u8, clip: &Rect) {
+pub(crate) fn fill_clipped(pixmap: &mut Pixmap, rect: Rect, color: [u8; 3], alpha: u8, clip: &Rect) {
     let Some(visible) = rect.intersect(clip) else {
         return;
     };
@@ -421,7 +432,7 @@ fn fill_clipped(pixmap: &mut Pixmap, rect: Rect, color: [u8; 3], alpha: u8, clip
     );
 }
 
-fn draw_border(pixmap: &mut Pixmap, mask: &Mask, bounds: Rect, color: [u8; 3], clip: &Rect) {
+pub(crate) fn draw_border(pixmap: &mut Pixmap, mask: &Mask, bounds: Rect, color: [u8; 3], clip: &Rect) {
     if bounds.intersect(clip).is_none() {
         return;
     }
@@ -448,7 +459,7 @@ fn draw_border(pixmap: &mut Pixmap, mask: &Mask, bounds: Rect, color: [u8; 3], c
 }
 
 #[allow(clippy::too_many_arguments)]
-fn blend_rect(
+pub(crate) fn blend_rect(
     pixmap: &mut Pixmap,
     x: i32,
     y: i32,
@@ -493,6 +504,9 @@ fn blend_rect(
         }
     }
 }
+
+#[cfg(test)]
+mod toolbar_tests;
 
 #[cfg(test)]
 mod tests {

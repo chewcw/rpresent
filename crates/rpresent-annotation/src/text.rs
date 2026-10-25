@@ -123,6 +123,39 @@ impl TextSystem {
         );
     }
 
+    /// Draw a UI label and hand every shaded glyph pixel to `plot` as
+    /// `(x, y, width, height, red, green, blue, alpha)`. Coordinates are
+    /// relative to the label origin. This never creates an annotation
+    /// object or touches document history.
+    pub(crate) fn draw_label<F>(
+        &mut self,
+        text: &str,
+        size_px: u32,
+        color: cosmic_text::Color,
+        mut plot: F,
+    ) where
+        F: FnMut(i32, i32, u32, u32, u8, u8, u8, u8),
+    {
+        let mut buffer = self.layout_buffer(text, "monospace", size_px);
+        buffer.draw(
+            &mut self.font_system,
+            &mut self.swash_cache,
+            color,
+            |x, y, width, height, color| {
+                plot(
+                    x,
+                    y,
+                    width,
+                    height,
+                    color.r(),
+                    color.g(),
+                    color.b(),
+                    color.a(),
+                );
+            },
+        );
+    }
+
     fn layout_buffer(&mut self, text: &str, family: &str, size_px: u32) -> Buffer {
         let mut buffer = Buffer::new_empty(metrics(size_px));
         buffer.set_wrap(Wrap::None);
