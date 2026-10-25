@@ -9,6 +9,9 @@ members = [
 default-members = ["crates/rpresent"]
 resolver = "2"
 
+[workspace.package]
+version = "0.1.0"
+
 [workspace.dependencies]
 tracing = "0.1"
 tracing-log = "0.2"
