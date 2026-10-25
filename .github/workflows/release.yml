@@ -1,0 +1,98 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: write
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify the tag matches the workspace version
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          tag="${GITHUB_REF_NAME}"
+          case "${tag}" in
+            v*) expected="${tag#v}" ;;
+            *)
+              echo "Tag ${tag} must start with v" >&2
+              exit 1
+              ;;
+          esac
+          if [ "${expected}" != "${version}" ]; then
+            echo "Tag ${tag} does not match workspace version ${version}" >&2
+            exit 1
+          fi
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libgl-dev pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+      - name: Build the release binary in Ubuntu 22.04
+        run: |
+          docker run --rm \
+            -v "${PWD}":/src \
+            -w /src \
+            ubuntu:22.04 \
+            bash -c '
+              set -euo pipefail
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                build-essential curl ca-certificates libx11-dev libgl-dev pkg-config
+              curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+              . "${CARGO_HOME:-$HOME/.cargo}/env"
+              cargo build --release --locked -p rpresent
+              target/release/rpresent --version
+            '
+          sudo chown -R "$(id -u):$(id -g)" target
+
+      - name: Package the archive
+        run: |
+          name="rpresent-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+          mkdir -p "dist/${name}"
+          cp target/release/rpresent "dist/${name}/rpresent"
+          cp README.md config.toml "dist/${name}/"
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+            --mtime='UTC 1970-01-01' \
+            --transform "s,^,${name}/," \
+            -czf "dist/${name}.tar.gz" -C "dist/${name}" rpresent README.md config.toml
+          rm -rf "dist/${name}"
+          (cd dist && sha256sum "${name}.tar.gz" > SHA256SUMS)
+
+      - name: Generate release notes
+        run: .github/scripts/release-notes.sh "${GITHUB_REF_NAME}" dist/RELEASE_NOTES.md
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          name="rpresent-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+          args=(--title "rpresent ${GITHUB_REF_NAME}" --notes-file dist/RELEASE_NOTES.md)
+          case "${GITHUB_REF_NAME#v}" in
+            *-*) args+=(--prerelease) ;;
+          esac
+          gh release create "${GITHUB_REF_NAME}" \
+            "dist/${name}.tar.gz" \
+            dist/SHA256SUMS \
+            "${args[@]}"
