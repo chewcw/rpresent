@@ -12,6 +12,7 @@ use crate::geometry::{
     segment_segment_distance,
 };
 use crate::text::{TextDraft, TextSystem};
+use crate::toolbar::{DisplayGeometry, Toolbar, ToolbarLayout};
 use crate::x11_clipboard::{
     PasteRequest, PasteResult, normalize_newlines, paste_belongs_to_session,
 };
@@ -137,6 +138,9 @@ pub struct Session {
     next_paste_expected: u64,
     paste_requests: Vec<PasteRequest>,
     pending_pastes: BTreeMap<u64, Result<String, String>>,
+    /// Present only after display geometry is known; canvas-only sessions
+    /// (and tests without geometry) keep it `None`.
+    toolbar: Option<Toolbar>,
 }
 
 impl Session {
@@ -184,6 +188,7 @@ impl Session {
             next_paste_expected: 1,
             paste_requests: Vec::new(),
             pending_pastes: BTreeMap::new(),
+            toolbar: None,
         })
     }
 
@@ -219,6 +224,26 @@ impl Session {
         self.text_sizes[self.text_size_index]
     }
 
+    /// Read-only view of the authoritative drawing settings and action
+    /// availability for the toolbar. Borrows the configured catalogs in
+    /// place; never clones them or mutates history.
+    pub(crate) fn toolbar_values(&self) -> crate::toolbar::ToolbarValues<'_> {
+        crate::toolbar::ToolbarValues {
+            editing: self.editing_requested,
+            tool: self.tool,
+            color: self.color(),
+            width_px: self.width_px(),
+            text_size_px: self.text_size_px(),
+            colors: &self.colors,
+            widths: &self.widths,
+            text_sizes: &self.text_sizes,
+            can_undo: self.document.can_undo(),
+            can_redo: self.document.can_redo(),
+            has_selection: self.selection.is_some(),
+            has_content: !self.document.objects().is_empty(),
+        }
+    }
+
     pub fn draft_id(&self) -> Option<u64> {
         self.text_edit.as_ref().map(|edit| edit.id)
     }
@@ -250,6 +275,12 @@ impl Session {
     }
 
     pub fn command(&mut self, command: AnnotationCommand) -> Result<(), String> {
+        let result = self.apply_command(command);
+        self.refresh_toolbar();
+        result
+    }
+
+    fn apply_command(&mut self, command: AnnotationCommand) -> Result<(), String> {
         match command {
             AnnotationCommand::On => {
                 self.editing_requested = true;
@@ -325,6 +356,27 @@ impl Session {
         if self.owner_epoch != Some(epoch) || !self.editing_requested {
             return;
         }
+        let reply = if let Some(mut toolbar) = self.toolbar.take() {
+            let reply = toolbar.pointer(input, &self.toolbar_values());
+            self.toolbar = Some(toolbar);
+            reply
+        } else {
+            crate::toolbar::ToolbarReply::default()
+        };
+        if let Some(damage) = reply.damage {
+            self.mark(damage);
+        }
+        if let Some(command) = reply.command {
+            self.command(command)
+                .expect("toolbar command uses a configured value");
+        }
+        if !reply.consumed {
+            self.canvas_pointer(input);
+        }
+        self.refresh_toolbar();
+    }
+
+    fn canvas_pointer(&mut self, input: PointerInput) {
         if self.text_edit.is_some() && self.draft_pointer(input) {
             return;
         }
@@ -342,6 +394,10 @@ impl Session {
         self.owner_epoch = epoch;
         if epoch.is_none() {
             self.cancel();
+        } else {
+            // A new epoch must never complete a toolbar press from an older
+            // one.
+            self.cancel_toolbar();
         }
     }
 
@@ -352,6 +408,58 @@ impl Session {
         self.text_edit = None;
         self.clear_pastes();
         self.last_click = None;
+        self.cancel_toolbar();
+    }
+
+    /// Cancel toolbar interactions (presses, drags, open pickers) while
+    /// keeping the committed toolbar position. Used when ownership changes
+    /// and when the backend is lost.
+    pub(crate) fn cancel_toolbar(&mut self) {
+        let Some(mut toolbar) = self.toolbar.take() else {
+            return;
+        };
+        let damage = toolbar.cancel(&self.toolbar_values());
+        self.toolbar = Some(toolbar);
+        if let Some(damage) = damage {
+            self.mark(damage);
+        }
+        self.refresh_toolbar();
+    }
+
+    /// Rebuild the visible toolbar layout and mark any change to its painted
+    /// bounds as damage.
+    fn refresh_toolbar(&mut self) {
+        let Some(mut toolbar) = self.toolbar.take() else {
+            return;
+        };
+        let damage = toolbar.sync(&self.toolbar_values());
+        self.toolbar = Some(toolbar);
+        if let Some(damage) = damage {
+            self.mark(damage);
+        }
+    }
+
+    /// Adopt display geometry, creating the toolbar on first use. Existing
+    /// canvas-only sessions without geometry are untouched by tests that
+    /// never call this.
+    pub(crate) fn update_display(&mut self, geometry: DisplayGeometry) {
+        match self.toolbar.take() {
+            Some(mut toolbar) => {
+                let damage = toolbar.set_geometry(geometry, &self.toolbar_values());
+                self.toolbar = Some(toolbar);
+                if let Some(damage) = damage {
+                    self.mark(damage);
+                }
+            }
+            None => {
+                self.toolbar = Some(Toolbar::new(geometry));
+                self.refresh_toolbar();
+            }
+        }
+    }
+
+    pub(crate) fn toolbar_layout(&self) -> Option<&ToolbarLayout> {
+        self.toolbar.as_ref().and_then(|toolbar| toolbar.layout())
     }
 
     fn cancel_transient(&mut self) {
@@ -367,6 +475,30 @@ impl Session {
         if self.owner_epoch != Some(epoch) || !self.editing_requested {
             return;
         }
+        if input.keysym == KEY_ESCAPE {
+            let (consumed, damage) = {
+                let Some(mut toolbar) = self.toolbar.take() else {
+                    self.canvas_key(input);
+                    self.refresh_toolbar();
+                    return;
+                };
+                let reply = toolbar.escape(&self.toolbar_values());
+                self.toolbar = Some(toolbar);
+                reply
+            };
+            if let Some(damage) = damage {
+                self.mark(damage);
+            }
+            if consumed {
+                self.refresh_toolbar();
+                return;
+            }
+        }
+        self.canvas_key(input);
+        self.refresh_toolbar();
+    }
+
+    fn canvas_key(&mut self, input: KeyInput) {
         if self.text_edit.is_some() {
             self.draft_key(input);
             return;
@@ -1140,6 +1272,9 @@ fn lower_letter(keysym: u32) -> Option<char> {
 }
 
 #[cfg(test)]
+mod toolbar_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1228,6 +1363,24 @@ mod tests {
             .unwrap()
             .clone();
         session.text_system.bounds(&object)
+    }
+
+    #[test]
+    fn toolbar_values_borrow_catalogs_and_follow_commands() {
+        let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+        let values = session.toolbar_values();
+        assert_eq!(values.colors, session.colors.as_slice());
+        assert_eq!(values.colors.as_ptr(), session.colors.as_ptr());
+        assert_eq!(values.widths.as_ptr(), session.widths.as_ptr());
+        assert_eq!(values.text_sizes.as_ptr(), session.text_sizes.as_ptr());
+        assert!(!values.can_undo);
+        assert!(!values.can_redo);
+        assert!(!values.has_selection);
+        assert!(!values.has_content);
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Text))
+            .unwrap();
+        assert_eq!(session.toolbar_values().tool, AnnotationTool::Text);
     }
 
     #[test]

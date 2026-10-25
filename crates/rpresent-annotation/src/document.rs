@@ -174,6 +174,14 @@ impl Document {
         true
     }
 
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
     fn apply(&mut self, remove: &[(usize, Object)], insert: &[(usize, Object)]) {
         let removed: BTreeSet<ObjectId> = remove.iter().map(|(_, object)| object.id).collect();
         self.objects.retain(|object| !removed.contains(&object.id));
@@ -355,5 +363,38 @@ mod tests {
         let mut document = Document::new(4);
         assert!(!document.clear());
         assert!(!document.undo());
+    }
+
+    #[test]
+    fn history_availability_tracks_undo_redo_and_new_changes() {
+        let mut document = Document::new(2);
+        assert!(!document.can_undo());
+        assert!(!document.can_redo());
+        document.insert(
+            Point { x: 10, y: 20 },
+            [255, 0, 0],
+            ObjectData::Line {
+                end: Point { x: 30, y: 0 },
+                width_px: 4,
+            },
+        );
+        assert!(document.can_undo());
+        assert!(!document.can_redo());
+        assert!(document.undo());
+        assert!(!document.can_undo());
+        assert!(document.can_redo());
+        assert!(document.redo());
+        assert!(document.can_undo());
+        assert!(!document.can_redo());
+        assert!(document.undo());
+        document.insert(
+            Point::default(),
+            [0, 255, 0],
+            ObjectData::Line {
+                end: Point { x: 1, y: 1 },
+                width_px: 2,
+            },
+        );
+        assert!(!document.can_redo());
     }
 }

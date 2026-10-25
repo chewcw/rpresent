@@ -15,6 +15,7 @@ use crate::error::OverlayError;
 use crate::geometry::Rect;
 use crate::render::Renderer;
 use crate::runtime::{AnnotationBackend, BackendEvent};
+use crate::toolbar::DisplayGeometry;
 use crate::x11_clipboard::{
     ClipboardAction, ClipboardTarget, PasteQueue, PasteRequest, PasteResult, PropertyKind,
     PropertyRead,
@@ -173,6 +174,7 @@ impl X11AnnotationBackend {
                 &ChangeWindowAttributesAux::new().event_mask(EventMask::STRUCTURE_NOTIFY),
             )
             .map_err(lost)?;
+        select_randr_notifications(&connection, root);
         let gc = connection.generate_id().map_err(lost)?;
         connection
             .create_gc(gc, window, &CreateGCAux::new())
@@ -325,6 +327,33 @@ impl AnnotationBackend for X11AnnotationBackend {
         (self.width, self.height)
     }
 
+    fn geometry(&self) -> Result<DisplayGeometry, OverlayError> {
+        let pointer = self
+            .connection
+            .query_pointer(self.root)
+            .map_err(lost)?
+            .reply()
+            .map_err(lost)?;
+        let root = Rect {
+            x: 0,
+            y: 0,
+            width: self.width,
+            height: self.height,
+        };
+        let mut monitors = query_monitors(&self.connection, self.root);
+        if monitors.is_empty() {
+            monitors.push(root);
+        }
+        Ok(DisplayGeometry {
+            root,
+            monitors,
+            pointer: crate::Point {
+                x: i32::from(pointer.root_x),
+                y: i32::from(pointer.root_y),
+            },
+        })
+    }
+
     fn present(&mut self, visible: bool) -> Result<(), OverlayError> {
         if visible {
             self.connection.map_window(self.window).map_err(lost)?;
@@ -445,7 +474,7 @@ impl AnnotationBackend for X11AnnotationBackend {
                     if width != self.width || height != self.height {
                         self.width = width;
                         self.height = height;
-                        return Ok(Some(BackendEvent::Resized { width, height }));
+                        return Ok(Some(BackendEvent::GeometryChanged(self.geometry()?)));
                     }
                 }
                 x11rb::protocol::Event::ConfigureNotify(configure)
@@ -467,8 +496,14 @@ impl AnnotationBackend for X11AnnotationBackend {
                         self.connection.flush().map_err(lost)?;
                         self.width = width;
                         self.height = height;
-                        return Ok(Some(BackendEvent::Resized { width, height }));
+                        return Ok(Some(BackendEvent::GeometryChanged(self.geometry()?)));
                     }
+                }
+                // RandR topology changes matter even when the root size is
+                // unchanged; the toolbar must re-place against new monitors.
+                x11rb::protocol::Event::RandrNotify(_)
+                | x11rb::protocol::Event::RandrScreenChangeNotify(_) => {
+                    return Ok(Some(BackendEvent::GeometryChanged(self.geometry()?)));
                 }
                 _ => {}
             }
@@ -547,6 +582,94 @@ impl Drop for X11AnnotationBackend {
     }
 }
 
+/// Monitor rectangles for the root window via RandR, following the zoom
+/// adapter's compatibility pattern. Missing RandR is not an error: callers
+/// fall back to the root rectangle.
+fn query_monitors(connection: &RustConnection, root: u32) -> Vec<Rect> {
+    use randr::ConnectionExt as _;
+    use x11rb::protocol::randr;
+
+    let has_randr = connection
+        .extension_information(randr::X11_EXTENSION_NAME)
+        .ok()
+        .flatten()
+        .is_some();
+    if !has_randr {
+        return Vec::new();
+    }
+    if let Ok(cookie) = connection.randr_get_monitors(root, true)
+        && let Ok(reply) = cookie.reply()
+    {
+        let monitors = reply
+            .monitors
+            .into_iter()
+            .filter(|monitor| monitor.width > 0 && monitor.height > 0)
+            .map(|monitor| Rect {
+                x: i32::from(monitor.x),
+                y: i32::from(monitor.y),
+                width: u32::from(monitor.width),
+                height: u32::from(monitor.height),
+            })
+            .collect::<Vec<_>>();
+        if !monitors.is_empty() {
+            return monitors;
+        }
+    }
+    let Ok(resources_cookie) = connection.randr_get_screen_resources_current(root) else {
+        return Vec::new();
+    };
+    let Ok(resources) = resources_cookie.reply() else {
+        return Vec::new();
+    };
+    resources
+        .crtcs
+        .into_iter()
+        .filter_map(|crtc| {
+            connection
+                .randr_get_crtc_info(crtc, resources.config_timestamp)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+        })
+        .filter(|info| info.width > 0 && info.height > 0)
+        .map(|info| Rect {
+            x: i32::from(info.x),
+            y: i32::from(info.y),
+            width: u32::from(info.width),
+            height: u32::from(info.height),
+        })
+        .collect()
+}
+
+/// Subscribe to RandR topology changes when the extension is available.
+/// Missing RandR silently skips subscription; it is never a startup error.
+fn select_randr_notifications(connection: &RustConnection, root: u32) {
+    use randr::{ConnectionExt as _, NotifyMask};
+    use x11rb::protocol::randr;
+
+    let has_randr = connection
+        .extension_information(randr::X11_EXTENSION_NAME)
+        .ok()
+        .flatten()
+        .is_some();
+    if !has_randr {
+        return;
+    }
+    let mask = NotifyMask::SCREEN_CHANGE
+        | NotifyMask::CRTC_CHANGE
+        | NotifyMask::OUTPUT_CHANGE
+        | NotifyMask::RESOURCE_CHANGE;
+    match connection.randr_select_input(root, mask) {
+        Ok(cookie) => {
+            if let Err(error) = cookie.check() {
+                tracing::debug!(?error, "could not subscribe to RandR monitor changes");
+            }
+        }
+        Err(error) => {
+            tracing::debug!(?error, "could not subscribe to RandR monitor changes");
+        }
+    }
+}
+
 fn find_argb_visual(screen: &xproto::Screen) -> Option<&Visualtype> {
     screen.allowed_depths.iter().find_map(|depth| {
         if depth.depth != 32 {
@@ -607,6 +730,9 @@ pub(crate) fn rgba_to_argb(source: &[u8], destination: &mut [u8]) {
 fn lost(error: impl std::fmt::Display) -> OverlayError {
     OverlayError::ConnectionLost(error.to_string())
 }
+
+#[cfg(test)]
+mod toolbar_tests;
 
 #[cfg(test)]
 mod tests {
