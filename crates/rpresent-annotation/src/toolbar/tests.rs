@@ -208,9 +208,11 @@ fn pointer_in_a_gap_uses_the_nearest_monitor_and_ties_use_reported_order() {
 
 #[test]
 fn width_picker_pages_cover_every_configured_value_in_order() {
-    let mut config = AnnotationConfig::default();
-    config.stroke_widths_px = (1..=200).collect();
-    config.stroke_width_px = 1;
+    let config = AnnotationConfig {
+        stroke_widths_px: (1..=200).collect(),
+        stroke_width_px: 1,
+        ..Default::default()
+    };
     let mut session = Session::new(&config).unwrap();
     session.command(AnnotationCommand::On).unwrap();
 

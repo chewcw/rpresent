@@ -460,11 +460,11 @@ pub(super) fn build_layout(
                 .iter()
                 .find(|control| control.target == Target::Picker(kind))
                 .map(|control| control.bounds);
-            anchor.and_then(|anchor| {
+            anchor.map(|anchor| {
                 let entries = picker_specs(values, kind);
                 let (rect, picker_controls, _) = picker_plan(anchor, bar, monitor, &entries, page);
                 controls.extend(picker_controls);
-                Some(rect)
+                rect
             })
         }
         _ => None,

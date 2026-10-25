@@ -207,9 +207,11 @@ fn moving_the_toolbar_repaints_the_artwork_underneath() {
 
 #[test]
 fn every_toolbar_transition_keeps_partial_frames_identical_to_full_frames() {
-    let mut config = AnnotationConfig::default();
-    config.text_sizes_px = (16..=46).collect();
-    config.text_size_px = 24;
+    let config = AnnotationConfig {
+        text_sizes_px: (16..=46).collect(),
+        text_size_px: 24,
+        ..Default::default()
+    };
     let mut session = scene_with(&config, 1280, 720);
     let mut partial = Renderer::new(1280, 720).unwrap();
     let whole = partial.full_bounds();
@@ -341,9 +343,11 @@ fn every_toolbar_transition_keeps_partial_frames_identical_to_full_frames() {
 
 #[test]
 fn paging_the_picker_keeps_partial_frames_identical() {
-    let mut config = AnnotationConfig::default();
-    config.stroke_widths_px = (1..=200).collect();
-    config.stroke_width_px = 1;
+    let config = AnnotationConfig {
+        stroke_widths_px: (1..=200).collect(),
+        stroke_width_px: 1,
+        ..Default::default()
+    };
     let mut session = scene_with(&config, 640, 480);
     let mut partial = Renderer::new(640, 480).unwrap();
     let whole = partial.full_bounds();

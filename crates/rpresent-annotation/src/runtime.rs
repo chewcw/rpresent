@@ -294,7 +294,7 @@ impl AnnotationRuntime {
                 BackendEvent::Exposed => self.force_full = true,
                 BackendEvent::GeometryChanged(geometry) => {
                     let root = geometry.root;
-                    let resize = self.renderer.as_ref().map_or(true, |renderer| {
+                    let resize = self.renderer.as_ref().is_none_or(|renderer| {
                         renderer.width() != root.width || renderer.height() != root.height
                     });
                     if resize {

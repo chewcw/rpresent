@@ -121,12 +121,12 @@ impl ToolbarLayout {
     /// Returns `None` for blank pixels inside the toolbar and for points
     /// outside it; callers distinguish those with the bar and picker rects.
     pub(crate) fn hit(&self, point: Point) -> Option<&ToolbarControl> {
-        if let Some(picker) = self.picker {
-            if picker.contains(point) {
-                return self.controls.iter().find(|control| {
-                    picker_target(control.target) && control.bounds.contains(point)
-                });
-            }
+        if let Some(picker) = self.picker
+            && picker.contains(point)
+        {
+            return self.controls.iter().find(|control| {
+                picker_target(control.target) && control.bounds.contains(point)
+            });
         }
         if self.bar.contains(point) {
             return self
@@ -203,11 +203,11 @@ impl Toolbar {
     /// displayed layout or state changed. Hidden toolbars keep their
     /// position and report no layout.
     pub(crate) fn sync(&mut self, values: &ToolbarValues<'_>) -> Option<Rect> {
-        if let Some(kind) = self.picker {
-            if !kind.applies_to(values.tool) {
-                self.picker = None;
-                self.page = 0;
-            }
+        if let Some(kind) = self.picker
+            && !kind.applies_to(values.tool)
+        {
+            self.picker = None;
+            self.page = 0;
         }
         let next = if values.editing {
             Some(self.compute(values))
