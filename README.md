@@ -46,6 +46,37 @@ Format the code:
 cargo fmt
 ```
 
+## Install
+
+Open the repository's GitHub Releases page and download both
+`rpresent-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` and `SHA256SUMS`.
+
+Verify the archive, extract it, and install the binary on `PATH`:
+
+```bash
+sha256sum -c SHA256SUMS
+tar -xzf rpresent-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz
+sudo install -m 755 rpresent-vX.Y.Z-x86_64-unknown-linux-gnu/rpresent /usr/local/bin/rpresent
+```
+
+On Debian and Ubuntu, install the runtime libraries the binary links against:
+
+```bash
+sudo apt-get install libx11-6 libgl1
+```
+
+The archive also ships the example `config.toml`. Copy it into the config
+directory before the first run:
+
+```bash
+mkdir -p ~/.config/rpresent
+cp rpresent-vX.Y.Z-x86_64-unknown-linux-gnu/config.toml ~/.config/rpresent/config.toml
+```
+
+Releases support Linux/X11 on x86_64 only, and they do not support Wayland.
+Within an X11 session, transparent compositing still requires a running
+compositor, as described under Requirements.
+
 ## Run
 
 Show the CLI help:
