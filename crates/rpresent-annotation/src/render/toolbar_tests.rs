@@ -12,7 +12,8 @@ fn geometry(width: u32, height: u32) -> DisplayGeometry {
     }
 }
 
-fn base_scene(config: &AnnotationConfig, width: u32, height: u32) -> Session {
+/// A session with no display geometry: canvas-only until `update_display`.
+fn base_scene(config: &AnnotationConfig) -> Session {
     let mut session = Session::new(config).unwrap();
     session.text_system = crate::TextSystem::with_font(include_bytes!(
         "../../tests/fixtures/DejaVuSans.ttf"
@@ -108,7 +109,7 @@ fn empty_editing_scene_paints_toolbar_without_document_objects() {
 fn moving_the_toolbar_repaints_the_artwork_underneath() {
     // Committed line across the future toolbar area, created before any
     // geometry exists.
-    let mut session = base_scene(&AnnotationConfig::default(), 1280, 720);
+    let mut session = base_scene(&AnnotationConfig::default());
     session.command(AnnotationCommand::Tool(AnnotationTool::Line)).unwrap();
     drag(
         &mut session,

@@ -9,6 +9,7 @@ use crate::error::OverlayError;
 use crate::geometry::Rect;
 use crate::render::Renderer;
 use crate::session::{KeyInput, PointerInput, Session};
+use crate::toolbar::DisplayGeometry;
 use crate::x11_clipboard::{PasteRequest, PasteResult};
 
 pub type AnnotationEventSink = Arc<dyn Fn(AnnotationEvent) + Send + Sync>;
@@ -61,7 +62,7 @@ pub enum AnnotationEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BackendEvent {
     Exposed,
-    Resized { width: u32, height: u32 },
+    GeometryChanged(DisplayGeometry),
     Paste(PasteResult),
 }
 
@@ -70,6 +71,9 @@ pub(crate) enum BackendEvent {
 pub(crate) trait AnnotationBackend {
     fn window_id(&self) -> u32;
     fn size(&self) -> (u32, u32);
+    /// Root bounds, monitor rectangles, and a fresh pointer sample used for
+    /// toolbar placement.
+    fn geometry(&self) -> Result<DisplayGeometry, OverlayError>;
     fn present(&mut self, visible: bool) -> Result<(), OverlayError>;
     fn upload(&mut self, renderer: &Renderer, damage: Rect) -> Result<(), OverlayError>;
     fn connection_fd(&self) -> Option<RawFd>;
@@ -127,6 +131,12 @@ impl AnnotationRuntime {
         }
         match request {
             AnnotationRequest::Command(command) => {
+                if matches!(command, AnnotationCommand::On | AnnotationCommand::Toggle)
+                    && self.backend.is_some()
+                    && let Err(error) = self.refresh_geometry()
+                {
+                    self.backend_failed(error);
+                }
                 if matches!(command, AnnotationCommand::On) && self.backend.is_none() {
                     self.recreate_backend();
                     self.publish_status();
@@ -181,6 +191,8 @@ impl AnnotationRuntime {
             return;
         };
         let damage = if self.force_full {
+            // A full frame supersedes any pending damage.
+            self.session.take_damage();
             Some(renderer.full_bounds())
         } else {
             self.session.take_damage()
@@ -208,10 +220,24 @@ impl AnnotationRuntime {
         }
     }
 
-    pub(crate) fn next_deadline(&self) -> Option<Instant> {
+    pub(crate)    fn next_deadline(&self) -> Option<Instant> {
         self.backend
             .as_ref()
             .and_then(|backend| backend.next_deadline())
+    }
+
+    /// Sample root bounds, monitor rectangles, and a fresh pointer position
+    /// from the backend into the session. Callers route errors through
+    /// `backend_failed`; readiness is never published for a failed refresh.
+    pub(crate) fn refresh_geometry(&mut self) -> Result<(), OverlayError> {
+        let Some(backend) = self.backend.as_ref() else {
+            return Err(OverlayError::Recoverable(
+                "annotation backend unavailable".to_owned(),
+            ));
+        };
+        let geometry = backend.geometry()?;
+        self.session.update_display(geometry);
+        Ok(())
     }
 
     pub(crate) fn is_exited(&self) -> bool {
@@ -266,16 +292,27 @@ impl AnnotationRuntime {
             };
             match event {
                 BackendEvent::Exposed => self.force_full = true,
-                BackendEvent::Resized { width, height } => match Renderer::new(width, height) {
-                    Ok(renderer) => {
-                        self.renderer = Some(renderer);
-                        self.force_full = true;
+                BackendEvent::GeometryChanged(geometry) => {
+                    let root = geometry.root;
+                    let resize = self.renderer.as_ref().map_or(true, |renderer| {
+                        renderer.width() != root.width || renderer.height() != root.height
+                    });
+                    if resize {
+                        match Renderer::new(root.width, root.height) {
+                            Ok(renderer) => {
+                                self.renderer = Some(renderer);
+                                self.force_full = true;
+                            }
+                            Err(error) => {
+                                self.backend_failed(error);
+                                return;
+                            }
+                        }
                     }
-                    Err(error) => {
-                        self.backend_failed(error);
-                        return;
-                    }
-                },
+                    // Pointer-only refreshes keep position and picker state;
+                    // bounds changes cancel them inside `update_display`.
+                    self.session.update_display(geometry);
+                }
                 BackendEvent::Paste(result) => self.session.accept_paste(result),
             }
         }
@@ -316,16 +353,24 @@ impl AnnotationRuntime {
         self.paste_session = None;
         let error = match (self.factory)() {
             Ok(backend) => {
-                let (width, height) = backend.size();
-                match Renderer::new(width, height) {
-                    Ok(renderer) => {
-                        self.generation += 1;
-                        self.backend = Some(backend);
-                        self.renderer = Some(renderer);
-                        self.force_full = true;
-                        return;
-                    }
+                // Geometry is sampled before readiness is published so the
+                // first placement uses the current pointer position.
+                match backend.geometry() {
                     Err(error) => error,
+                    Ok(geometry) => {
+                        let (width, height) = backend.size();
+                        match Renderer::new(width, height) {
+                            Ok(renderer) => {
+                                self.generation += 1;
+                                self.backend = Some(backend);
+                                self.renderer = Some(renderer);
+                                self.force_full = true;
+                                self.session.update_display(geometry);
+                                return;
+                            }
+                            Err(error) => error,
+                        }
+                    }
                 }
             }
             Err(error) => error,
@@ -340,6 +385,9 @@ impl AnnotationRuntime {
     }
 
     fn backend_failed(&mut self, error: OverlayError) {
+        // Toolbar presses, drags, and pickers must not survive backend loss;
+        // the committed position stays in the session.
+        self.session.cancel_toolbar();
         let generation = self.generation;
         let recoverable = error.is_recoverable();
         self.backend = None;
@@ -458,7 +506,6 @@ mod tests {
 
     use crate::document::Point;
 
-    #[derive(Default)]
     struct Log {
         created: usize,
         presents: Vec<bool>,
@@ -467,12 +514,37 @@ mod tests {
         pastes: Vec<PasteRequest>,
         cancelled_pastes: Vec<u64>,
         auto_paste: bool,
+        events: VecDeque<BackendEvent>,
+        geometry: DisplayGeometry,
+    }
+
+    impl Default for Log {
+        fn default() -> Self {
+            Self {
+                created: 0,
+                presents: Vec::new(),
+                uploads: Vec::new(),
+                fail_upload: false,
+                pastes: Vec::new(),
+                cancelled_pastes: Vec::new(),
+                auto_paste: false,
+                events: VecDeque::new(),
+                geometry: DisplayGeometry {
+                    root: Rect {
+                        x: 0,
+                        y: 0,
+                        width: 1280,
+                        height: 720,
+                    },
+                    monitors: Vec::new(),
+                    pointer: Point { x: 640, y: 360 },
+                },
+            }
+        }
     }
 
     struct FakeBackend {
         log: Arc<Mutex<Log>>,
-        size: (u32, u32),
-        events: VecDeque<BackendEvent>,
         fail_upload: bool,
     }
 
@@ -482,7 +554,12 @@ mod tests {
         }
 
         fn size(&self) -> (u32, u32) {
-            self.size
+            let root = self.log.lock().unwrap().geometry.root;
+            (root.width, root.height)
+        }
+
+        fn geometry(&self) -> Result<DisplayGeometry, OverlayError> {
+            Ok(self.log.lock().unwrap().geometry.clone())
         }
 
         fn present(&mut self, visible: bool) -> Result<(), OverlayError> {
@@ -503,7 +580,7 @@ mod tests {
         }
 
         fn poll_event(&mut self, _now: Instant) -> Result<Option<BackendEvent>, OverlayError> {
-            Ok(self.events.pop_front())
+            Ok(self.log.lock().unwrap().events.pop_front())
         }
 
         fn next_deadline(&self) -> Option<Instant> {
@@ -516,10 +593,12 @@ mod tests {
             let auto = log.auto_paste;
             drop(log);
             if auto {
-                self.events.push_back(BackendEvent::Paste(PasteResult {
-                    request,
-                    text: Ok("pasted".to_owned()),
-                }));
+                self.log.lock().unwrap().events.push_back(BackendEvent::Paste(
+                    PasteResult {
+                        request,
+                        text: Ok("pasted".to_owned()),
+                    },
+                ));
             }
             Ok(())
         }
@@ -554,8 +633,6 @@ mod tests {
             drop(guard);
             Ok(Box::new(FakeBackend {
                 log: Arc::clone(&factory_log),
-                size: (100, 100),
-                events: VecDeque::new(),
                 fail_upload,
             }) as Box<dyn AnnotationBackend>)
         });
@@ -596,6 +673,62 @@ mod tests {
             },
             now(),
         );
+        runtime.flush(now());
+    }
+
+    fn pointer(runtime: &mut AnnotationRuntime, epoch: u64, root: Point, millis: u64) {
+        runtime.process(
+            AnnotationRequest::Pointer {
+                epoch,
+                input: PointerInput::Down {
+                    root,
+                    time: std::time::Duration::from_millis(millis),
+                },
+            },
+            now(),
+        );
+        runtime.process(
+            AnnotationRequest::Pointer {
+                epoch,
+                input: PointerInput::Up {
+                    root,
+                    time: std::time::Duration::from_millis(millis + 10),
+                },
+            },
+            now(),
+        );
+    }
+
+    fn pointer_event(
+        runtime: &mut AnnotationRuntime,
+        epoch: u64,
+        input: PointerInput,
+    ) {
+        runtime.process(AnnotationRequest::Pointer { epoch, input }, now());
+    }
+
+    fn toolbar_center(runtime: &AnnotationRuntime, target: crate::toolbar::Target) -> Point {
+        let layout = runtime.session.toolbar_layout().unwrap();
+        let bounds = layout
+            .controls
+            .iter()
+            .find(|control| control.target == target)
+            .unwrap_or_else(|| panic!("missing control {target:?}"))
+            .bounds;
+        Point {
+            x: bounds.x + bounds.width as i32 / 2,
+            y: bounds.y + bounds.height as i32 / 2,
+        }
+    }
+
+    /// Present the overlay for editing with ownership on `epoch`.
+    fn show_editing(runtime: &mut AnnotationRuntime) {
+        runtime.process(AnnotationRequest::Command(AnnotationCommand::On), now());
+        runtime.process(
+            AnnotationRequest::Present { operation: 1, visible: true },
+            now(),
+        );
+        runtime.process(AnnotationRequest::Ownership { epoch: Some(1) }, now());
         runtime.flush(now());
     }
 
@@ -823,6 +956,29 @@ mod tests {
     }
 
     #[test]
+    fn toolbar_is_visible_for_empty_editing_but_not_viewing() {
+        let (mut runtime, log, events) = setup(false);
+        runtime.process(AnnotationRequest::Command(AnnotationCommand::On), now());
+        runtime.process(
+            AnnotationRequest::Present { operation: 10, visible: true },
+            now(),
+        );
+        runtime.process(AnnotationRequest::Ownership { epoch: Some(1) }, now());
+        runtime.flush(now());
+        assert!(runtime.session.toolbar_layout().is_some());
+        assert!(runtime.session.document().objects().is_empty());
+        assert!(events.lock().unwrap().iter().any(|event| matches!(
+            event, AnnotationEvent::Status(status)
+                if status.editing_requested && !status.has_content
+        )));
+        let uploads = log.lock().unwrap().uploads.len();
+        runtime.flush(now());
+        assert_eq!(log.lock().unwrap().uploads.len(), uploads);
+        runtime.process(AnnotationRequest::Command(AnnotationCommand::Off), now());
+        assert!(runtime.session.toolbar_layout().is_none());
+    }
+
+    #[test]
     fn text_editing_status_tracks_the_draft() {
         let (mut runtime, _, events) = setup(false);
         let config = AnnotationConfig::default();
@@ -856,5 +1012,333 @@ mod tests {
             })
             .unwrap();
         assert!(status.text_editing);
+    }
+
+    #[test]
+    fn ownership_loss_cancels_a_pending_toolbar_press() {
+        let (mut runtime, _, _) = setup(false);
+        show_editing(&mut runtime);
+        let bar_before = runtime.session.toolbar_layout().unwrap().bar;
+        let handle = toolbar_center(&runtime, crate::toolbar::Target::Handle);
+        pointer_event(
+            &mut runtime,
+            1,
+            PointerInput::Down {
+                root: handle,
+                time: std::time::Duration::ZERO,
+            },
+        );
+        runtime.process(AnnotationRequest::Ownership { epoch: None }, now());
+        let far = Point { x: 100, y: 400 };
+        pointer_event(
+            &mut runtime,
+            1,
+            PointerInput::Move {
+                root: far,
+                time: std::time::Duration::from_millis(20),
+            },
+        );
+        pointer_event(
+            &mut runtime,
+            1,
+            PointerInput::Up {
+                root: far,
+                time: std::time::Duration::from_millis(30),
+            },
+        );
+        assert_eq!(runtime.session.toolbar_layout().unwrap().bar, bar_before);
+        assert_eq!(
+            runtime.session.tool(),
+            rpresent_config::AnnotationTool::Pen
+        );
+        assert!(runtime.session.document().objects().is_empty());
+    }
+
+    #[test]
+    fn capture_hides_toolbar_and_the_latest_preference_controls_restore() {
+        let (mut runtime, log, _) = setup(false);
+        show_editing(&mut runtime);
+        assert!(runtime.session.toolbar_layout().is_some());
+
+        // Hidden for capture; the editing preference changes while hidden.
+        runtime.process(
+            AnnotationRequest::Present { operation: 2, visible: false },
+            now(),
+        );
+        runtime.process(AnnotationRequest::Command(AnnotationCommand::Off), now());
+        let uploads = log.lock().unwrap().uploads.len();
+        for _ in 0..3 {
+            runtime.flush(now());
+        }
+        assert_eq!(
+            log.lock().unwrap().uploads.len(),
+            uploads,
+            "no upload while hidden"
+        );
+        assert!(runtime.session.toolbar_layout().is_none());
+
+        runtime.process(
+            AnnotationRequest::Present { operation: 3, visible: true },
+            now(),
+        );
+        runtime.flush(now());
+        assert!(
+            runtime.session.toolbar_layout().is_none(),
+            "the latest preference (Off) controls visibility after restore"
+        );
+
+        runtime.process(AnnotationRequest::Command(AnnotationCommand::On), now());
+        runtime.flush(now());
+        assert!(runtime.session.toolbar_layout().is_some());
+    }
+
+    #[test]
+    fn upload_failure_keeps_committed_content_and_drops_toolbar_state() {
+        let (mut runtime, log, events) = setup(true);
+        // Enter editing without flushing: the very first upload is the one
+        // that must fail with the picker open and a press latched.
+        runtime.process(AnnotationRequest::Command(AnnotationCommand::On), now());
+        runtime.process(
+            AnnotationRequest::Present { operation: 1, visible: true },
+            now(),
+        );
+        runtime.process(AnnotationRequest::Ownership { epoch: Some(1) }, now());
+
+        // Committed artwork outside the toolbar.
+        pointer(&mut runtime, 1, Point { x: 10, y: 10 }, 0);
+        assert_eq!(runtime.session.document().objects().len(), 1);
+
+        // An open picker with a value press latched at the moment of failure.
+        let at = toolbar_center(
+            &runtime,
+            crate::toolbar::Target::Picker(crate::toolbar::PickerKind::Color),
+        );
+        pointer(&mut runtime, 1, at, 100);
+        assert!(runtime.session.toolbar_layout().unwrap().picker.is_some());
+        let color_before = runtime.session.color();
+        let value = toolbar_center(&runtime, crate::toolbar::Target::Color(color_before));
+        pointer_event(
+            &mut runtime,
+            1,
+            PointerInput::Down {
+                root: value,
+                time: std::time::Duration::from_millis(150),
+            },
+        );
+
+        // The upload fails: native resources drop, toolbar state cancels.
+        runtime.flush(now());
+        assert!(all_events(&events).iter().any(|event| matches!(
+            event,
+            AnnotationEvent::Failed { recoverable: true, .. }
+        )));
+        assert!(runtime.session.toolbar_layout().unwrap().picker.is_none());
+        assert!(runtime.session.gesture.is_none());
+        assert_eq!(runtime.session.document().objects().len(), 1);
+
+        // The coordinator revokes ownership after the failure.
+        runtime.process(AnnotationRequest::Ownership { epoch: None }, now());
+
+        log.lock().unwrap().fail_upload = false;
+        runtime.process(AnnotationRequest::Command(AnnotationCommand::On), now());
+        let status = all_events(&events)
+            .iter()
+            .rev()
+            .cloned()
+            .find_map(|event| match event {
+                AnnotationEvent::Status(status) => Some(status),
+                _ => None,
+            })
+            .unwrap();
+        assert!(status.ready);
+        assert_eq!(status.generation, 2);
+        assert_eq!(runtime.session.document().objects().len(), 1);
+        assert!(runtime.session.toolbar_layout().is_some());
+        assert!(runtime.session.toolbar_layout().unwrap().picker.is_none());
+
+        pointer_event(
+            &mut runtime,
+            1,
+            PointerInput::Up {
+                root: value,
+                time: std::time::Duration::from_millis(210),
+            },
+        );
+        assert_eq!(
+            runtime.session.color(),
+            color_before,
+            "a latched press must not complete after recovery"
+        );
+        assert_eq!(runtime.session.toolbar_layout().unwrap().picker, None);
+    }
+
+    #[test]
+    fn removing_the_toolbar_monitor_moves_the_bar_into_a_remaining_monitor() {
+        let (mut runtime, log, _) = setup(false);
+        {
+            let mut guard = log.lock().unwrap();
+            guard.geometry.monitors = vec![
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 640,
+                    height: 480,
+                },
+                Rect {
+                    x: 640,
+                    y: 0,
+                    width: 640,
+                    height: 480,
+                },
+            ];
+            guard.geometry.pointer = Point { x: 320, y: 200 };
+        }
+        runtime.process(AnnotationRequest::Command(AnnotationCommand::On), now());
+        let bar = runtime.session.toolbar_layout().unwrap().bar;
+        assert!(
+            bar.x >= 0 && bar.right() <= 640 && bar.y >= 0 && bar.bottom() <= 480,
+            "bar starts on the first monitor: {bar:?}"
+        );
+
+        {
+            let mut guard = log.lock().unwrap();
+            guard.geometry.monitors = vec![Rect {
+                x: 640,
+                y: 0,
+                width: 640,
+                height: 480,
+            }];
+            guard.geometry.pointer = Point { x: 960, y: 200 };
+            let geometry = guard.geometry.clone();
+            guard
+                .events
+                .push_back(BackendEvent::GeometryChanged(geometry));
+        }
+        runtime.flush(now());
+        let bar = runtime.session.toolbar_layout().unwrap().bar;
+        assert!(
+            bar.x >= 640 && bar.right() <= 1280 && bar.y >= 0 && bar.bottom() <= 480,
+            "the entire bar must move into the remaining monitor: {bar:?}"
+        );
+    }
+
+    #[test]
+    fn monitor_change_without_root_resize_uploads_no_full_frame() {
+        let (mut runtime, log, _) = setup(false);
+        {
+            let mut guard = log.lock().unwrap();
+            guard.geometry.monitors = vec![
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 640,
+                    height: 480,
+                },
+                Rect {
+                    x: 640,
+                    y: 0,
+                    width: 640,
+                    height: 480,
+                },
+            ];
+            guard.geometry.pointer = Point { x: 320, y: 200 };
+        }
+        show_editing(&mut runtime);
+        log.lock().unwrap().uploads.clear();
+
+        // Shrink the first monitor; the root dimensions stay identical.
+        {
+            let mut guard = log.lock().unwrap();
+            guard.geometry.monitors = vec![
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 400,
+                    height: 480,
+                },
+                Rect {
+                    x: 640,
+                    y: 0,
+                    width: 640,
+                    height: 480,
+                },
+            ];
+            let geometry = guard.geometry.clone();
+            guard
+                .events
+                .push_back(BackendEvent::GeometryChanged(geometry));
+        }
+        runtime.flush(now());
+
+        let uploads = log.lock().unwrap().uploads.clone();
+        assert!(
+            !uploads.is_empty(),
+            "the toolbar must repaint against the new monitor bounds"
+        );
+        for upload in &uploads {
+            assert!(
+                !(upload.x == 0 && upload.y == 0 && upload.width == 1280 && upload.height == 720),
+                "monitor changes must not reallocate the renderer for a full frame: {upload:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pointer_only_geometry_refresh_preserves_position_and_picker() {
+        let (mut runtime, log, _) = setup(false);
+        show_editing(&mut runtime);
+
+        // Complete a toolbar move.
+        let handle = toolbar_center(&runtime, crate::toolbar::Target::Handle);
+        pointer_event(
+            &mut runtime,
+            1,
+            PointerInput::Down {
+                root: handle,
+                time: std::time::Duration::ZERO,
+            },
+        );
+        let moved = Point { x: 400, y: 300 };
+        pointer_event(
+            &mut runtime,
+            1,
+            PointerInput::Move {
+                root: moved,
+                time: std::time::Duration::from_millis(10),
+            },
+        );
+        pointer_event(
+            &mut runtime,
+            1,
+            PointerInput::Up {
+                root: moved,
+                time: std::time::Duration::from_millis(20),
+            },
+        );
+        let bar_after_move = runtime.session.toolbar_layout().unwrap().bar;
+
+        // Open a picker.
+        let at = toolbar_center(
+            &runtime,
+            crate::toolbar::Target::Picker(crate::toolbar::PickerKind::Color),
+        );
+        pointer(&mut runtime, 1, at, 100);
+        assert!(runtime.session.toolbar_layout().unwrap().picker.is_some());
+
+        // Refresh only the pointer sample: bounds are unchanged.
+        {
+            let mut guard = log.lock().unwrap();
+            guard.geometry.pointer = Point { x: 100, y: 600 };
+        }
+        runtime.refresh_geometry().unwrap();
+        let layout = runtime.session.toolbar_layout().unwrap();
+        assert_eq!(
+            layout.bar, bar_after_move,
+            "a pointer-only refresh must keep the remembered position"
+        );
+        assert!(
+            layout.picker.is_some(),
+            "a pointer-only refresh must keep the open picker"
+        );
     }
 }

@@ -411,7 +411,10 @@ impl Session {
         self.cancel_toolbar();
     }
 
-    fn cancel_toolbar(&mut self) {
+    /// Cancel toolbar interactions (presses, drags, open pickers) while
+    /// keeping the committed toolbar position. Used when ownership changes
+    /// and when the backend is lost.
+    pub(crate) fn cancel_toolbar(&mut self) {
         let Some(mut toolbar) = self.toolbar.take() else {
             return;
         };
@@ -1269,9 +1272,9 @@ fn lower_letter(keysym: u32) -> Option<char> {
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod toolbar_tests;
 
+#[cfg(test)]
 mod tests {
     use super::*;
 
