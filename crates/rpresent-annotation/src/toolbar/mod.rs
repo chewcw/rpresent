@@ -124,9 +124,10 @@ impl ToolbarLayout {
         if let Some(picker) = self.picker
             && picker.contains(point)
         {
-            return self.controls.iter().find(|control| {
-                picker_target(control.target) && control.bounds.contains(point)
-            });
+            return self
+                .controls
+                .iter()
+                .find(|control| picker_target(control.target) && control.bounds.contains(point));
         }
         if self.bar.contains(point) {
             return self
