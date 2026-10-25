@@ -796,6 +796,120 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_document_history_repaints_before_leaving_editing() {
+        let (mut runtime, log, _) = setup(false);
+        show_editing(&mut runtime);
+        draw_dot(&mut runtime);
+        let renderer = runtime.renderer.as_ref().unwrap();
+        let alpha = ((10 * renderer.width() + 10) * 4 + 3) as usize;
+        assert!(renderer.pixels()[alpha] > 0);
+
+        for (letter, shift, visible) in [
+            ('z', false, false),
+            ('y', false, true),
+            ('z', false, false),
+            ('Z', true, true),
+        ] {
+            log.lock().unwrap().uploads.clear();
+            runtime.process(
+                AnnotationRequest::Key {
+                    epoch: 1,
+                    input: KeyInput {
+                        keysym: letter as u32,
+                        text: None,
+                        modifiers: crate::Modifiers {
+                            ctrl: true,
+                            shift,
+                            ..crate::Modifiers::default()
+                        },
+                    },
+                },
+                now(),
+            );
+            runtime.flush(now());
+
+            assert_eq!(
+                runtime.session.document().objects().len(),
+                usize::from(visible)
+            );
+            assert_eq!(
+                runtime.renderer.as_ref().unwrap().pixels()[alpha] > 0,
+                visible
+            );
+            assert!(
+                log.lock()
+                    .unwrap()
+                    .uploads
+                    .iter()
+                    .any(|rect| { rect.contains(Point { x: 10, y: 10 }) })
+            );
+            assert!(runtime.session.status().editing_requested);
+        }
+    }
+
+    #[test]
+    fn keyboard_draft_history_repaints_before_leaving_editing() {
+        let (mut runtime, log, _) = setup(false);
+        show_editing(&mut runtime);
+        runtime.process(
+            AnnotationRequest::Command(AnnotationCommand::Tool(
+                rpresent_config::AnnotationTool::Text,
+            )),
+            now(),
+        );
+        pointer(&mut runtime, 1, Point { x: 10, y: 10 }, 0);
+
+        for (letter, ctrl, shift, expected) in [
+            ('a', false, false, "a"),
+            ('b', false, false, "ab"),
+            ('z', true, false, "a"),
+            ('y', true, false, "ab"),
+            ('z', true, false, "a"),
+            ('Z', true, true, "ab"),
+        ] {
+            log.lock().unwrap().uploads.clear();
+            runtime.process(
+                AnnotationRequest::Key {
+                    epoch: 1,
+                    input: KeyInput {
+                        keysym: letter as u32,
+                        text: Some(letter),
+                        modifiers: crate::Modifiers {
+                            ctrl,
+                            shift,
+                            ..crate::Modifiers::default()
+                        },
+                    },
+                },
+                now(),
+            );
+            runtime.flush(now());
+
+            assert_eq!(
+                runtime
+                    .session
+                    .text_edit
+                    .as_ref()
+                    .unwrap()
+                    .draft
+                    .plain_text(),
+                expected
+            );
+            let renderer = runtime.renderer.as_ref().unwrap();
+            let mut reference = Renderer::new(renderer.width(), renderer.height()).unwrap();
+            reference
+                .redraw(&mut runtime.session, reference.full_bounds())
+                .unwrap();
+            assert!(
+                renderer.pixels() == reference.pixels(),
+                "stale draft after {letter}"
+            );
+            assert!(!log.lock().unwrap().uploads.is_empty());
+            assert!(runtime.session.status().editing_requested);
+        }
+    }
+
+    #[test]
     fn cancel_acknowledges_the_operation() {
         let (mut runtime, _, events) = setup(false);
         runtime.process(AnnotationRequest::Cancel { operation: 9 }, now());

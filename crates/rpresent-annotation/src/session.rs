@@ -533,21 +533,14 @@ impl Session {
         if !input.modifiers.ctrl {
             return;
         }
-        match letter {
-            'z' if input.modifiers.shift => {
-                self.cancel_transient();
-                self.document.redo();
-            }
-            'z' => {
-                self.cancel_transient();
-                self.document.undo();
-            }
-            'y' => {
-                self.cancel_transient();
-                self.document.redo();
-            }
-            _ => {}
-        }
+        let command = match letter {
+            'z' if input.modifiers.shift => AnnotationCommand::Redo,
+            'z' => AnnotationCommand::Undo,
+            'y' => AnnotationCommand::Redo,
+            _ => return,
+        };
+        self.apply_command(command)
+            .expect("undo and redo commands cannot fail");
     }
 
     fn tool_key(&mut self, input: KeyInput) {
@@ -609,6 +602,7 @@ impl Session {
         let ctrl = input.modifiers.ctrl;
         let shift = input.modifiers.shift;
         if ctrl {
+            self.mark_transient();
             match lower_letter(input.keysym) {
                 Some('z') if shift => {
                     if let Some(edit) = self.text_edit.as_mut() {
@@ -641,6 +635,7 @@ impl Session {
                 }
                 _ => {}
             }
+            self.mark_transient();
             return;
         }
         match input.keysym {
