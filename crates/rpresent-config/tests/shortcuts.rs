@@ -147,3 +147,122 @@ fn repeated_wheel_modifiers_are_idempotent() {
     );
     assert_eq!(parse_wheel_modifiers(" ctrl ").unwrap(), Mods::CTRL);
 }
+
+#[test]
+fn uppercase_and_lowercase_dispatch_distinct_actions() {
+    use rpresent_config::shortcuts::{ShortcutAction, ShortcutDispatcher};
+    let bindings = ShortcutConfig::default().validate().unwrap();
+    let mut dispatcher = ShortcutDispatcher::new(&bindings.annotation);
+    assert_eq!(
+        dispatcher.dispatch("Ctrl+z".parse().unwrap()),
+        Some(ShortcutAction::AnnotationUndo)
+    );
+    assert_eq!(
+        dispatcher.dispatch("Ctrl+Z".parse().unwrap()),
+        Some(ShortcutAction::AnnotationRedo)
+    );
+    assert_eq!(dispatcher.dispatch("Alt+z".parse().unwrap()), None);
+}
+
+mod fake_backend {
+    use rpresent_config::shortcuts::{
+        BackendError, Binding, Mods, ShortcutBackend, ShortcutEventSink,
+    };
+
+    #[derive(Default)]
+    pub struct FakeBackend {
+        pub registered: Vec<Binding>,
+        pub wheel: Mods,
+        pub sink: Option<ShortcutEventSink>,
+        pub fail: bool,
+    }
+
+    impl ShortcutBackend for FakeBackend {
+        fn register(
+            &mut self,
+            global: &[Binding],
+            wheel: Mods,
+            events: ShortcutEventSink,
+        ) -> Result<(), BackendError> {
+            if self.fail {
+                return Err(BackendError {
+                    message: "registration conflict".into(),
+                });
+            }
+            self.registered = global.to_vec();
+            self.wheel = wheel;
+            self.sink = Some(events);
+            Ok(())
+        }
+
+        fn resolve_wheel(&mut self, _token: u64, _replay: bool) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn unregister(&mut self) -> Result<(), BackendError> {
+            self.registered.clear();
+            self.sink = None;
+            Ok(())
+        }
+    }
+}
+
+#[test]
+fn fake_backend_contract_registers_fails_and_cleans_up() {
+    use rpresent_config::shortcuts::{
+        EditorInput, Key, KeyboardEvent, ShortcutBackend, ShortcutEvent, ShortcutEventSink,
+    };
+    use std::sync::Arc;
+
+    let bindings = ShortcutConfig::default().validate().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let sink: ShortcutEventSink = Arc::new(move |event| {
+        sender.send(event).expect("receiver stays alive");
+    });
+
+    let mut fake = fake_backend::FakeBackend::default();
+    {
+        let backend: &mut dyn ShortcutBackend = &mut fake;
+        backend
+            .register(&bindings.global, bindings.wheel, Arc::clone(&sink))
+            .unwrap();
+    }
+    assert_eq!(fake.registered, bindings.global);
+    assert_eq!(fake.wheel, Mods::CTRL);
+    assert!(fake.sink.is_some());
+
+    let event = ShortcutEvent::Keyboard(KeyboardEvent {
+        epoch: Some(7),
+        shortcut: Some("Ctrl+Z".parse().unwrap()),
+        editor: EditorInput {
+            key: Key::Char('Z'),
+            text: Some('Z'),
+            modifiers: Mods::CTRL | Mods::SHIFT,
+        },
+    });
+    (fake.sink.as_ref().unwrap())(event.clone());
+    assert_eq!(receiver.recv().unwrap(), event);
+
+    {
+        let backend: &mut dyn ShortcutBackend = &mut fake;
+        backend.resolve_wheel(7, true).unwrap();
+        backend.unregister().unwrap();
+    }
+    assert!(fake.registered.is_empty());
+    assert!(fake.sink.is_none());
+    {
+        let backend: &mut dyn ShortcutBackend = &mut fake;
+        backend.unregister().unwrap();
+    }
+    assert!(fake.registered.is_empty());
+
+    fake.fail = true;
+    let error = {
+        let backend: &mut dyn ShortcutBackend = &mut fake;
+        backend
+            .register(&bindings.global, bindings.wheel, sink)
+            .unwrap_err()
+    };
+    assert_eq!(error.message, "registration conflict");
+    assert!(fake.registered.is_empty());
+}

@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 
 pub use keybinds::{Key, KeyInput, Mods};
 
+mod backend;
+pub use backend::{
+    BackendError, EditorInput, KeyboardEvent, ShortcutBackend, ShortcutEvent, ShortcutEventSink,
+    WheelEvent,
+};
+
 /// Raw shortcut tables as they appear in the configuration file.
 ///
 /// An absent table keeps the scope defaults. An explicit table replaces the
@@ -149,6 +155,26 @@ impl ShortcutAction {
             Self::SpotlightToggle | Self::AnnotationToggle | Self::ZoomToggle => Scope::Global,
             _ => Scope::Annotation,
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct ShortcutDispatcher(keybinds::Keybinds<ShortcutAction>);
+
+impl ShortcutDispatcher {
+    pub fn new(bindings: &[Binding]) -> Self {
+        Self(keybinds::Keybinds::new(
+            bindings
+                .iter()
+                .map(|binding| keybinds::Keybind::new(binding.input, binding.action))
+                .collect(),
+        ))
+    }
+
+    /// Dispatch a normalized input. The package owns matching semantics, so
+    /// uppercase and lowercase character bindings stay distinct.
+    pub fn dispatch(&mut self, input: KeyInput) -> Option<ShortcutAction> {
+        self.0.dispatch(input).copied()
     }
 }
 
