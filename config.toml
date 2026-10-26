@@ -41,8 +41,10 @@ scroll_speed = 0.25
 drag_friction = 6.0
 scale_friction = 5.0
 
-[shortcuts]
-spotlight_mode = "Ctrl+1"
-annotation_mode = "Ctrl+2"
-zoom_mode = "Ctrl+3"
-wheel_modifier = "Ctrl"
+[shortcuts.wheel]
+modifiers = "Ctrl"
+
+[shortcuts.global]
+"spotlight.toggle" = "Ctrl+!"
+"annotation.toggle" = "Ctrl+@"
+"zoom.toggle" = "Ctrl+#"
