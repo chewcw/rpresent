@@ -84,13 +84,14 @@ fn click(session: &mut Session, at: crate::Point, millis: u64) {
     );
 }
 
-fn press(session: &mut Session, keysym: u32) {
+fn press(session: &mut Session, key: rpresent_config::shortcuts::Key) {
     session.key(
         1,
         crate::KeyInput {
-            keysym,
+            key,
             text: None,
             modifiers: crate::Modifiers::default(),
+            shortcut: None,
         },
     );
 }
@@ -256,7 +257,7 @@ fn every_toolbar_transition_keeps_partial_frames_identical_to_full_frames() {
     let at = control_center(&session, Target::Picker(PickerKind::Width));
     click(&mut session, at, 200);
     parity(&mut session, &mut partial, &mut full, "picker replaced");
-    press(&mut session, 0xff1b);
+    press(&mut session, rpresent_config::shortcuts::Key::Esc);
     parity(&mut session, &mut partial, &mut full, "picker closed");
 
     // Selection change.
@@ -313,9 +314,10 @@ fn every_toolbar_transition_keeps_partial_frames_identical_to_full_frames() {
     session.key(
         1,
         crate::KeyInput {
-            keysym: 'a' as u32,
+            key: rpresent_config::shortcuts::Key::Char('a'),
             text: Some('a'),
             modifiers: crate::Modifiers::default(),
+            shortcut: None,
         },
     );
     parity(&mut session, &mut partial, &mut full, "draft typed");
@@ -323,14 +325,14 @@ fn every_toolbar_transition_keeps_partial_frames_identical_to_full_frames() {
     click(&mut session, at, 700);
     assert!(session.toolbar_layout().unwrap().picker.is_some());
     parity(&mut session, &mut partial, &mut full, "picker over draft");
-    press(&mut session, 0xff1b);
+    press(&mut session, rpresent_config::shortcuts::Key::Esc);
     parity(
         &mut session,
         &mut partial,
         &mut full,
         "picker closed over draft",
     );
-    press(&mut session, 0xff0d);
+    press(&mut session, rpresent_config::shortcuts::Key::Enter);
     parity(&mut session, &mut partial, &mut full, "draft committed");
 
     // Exit and reopen: the toolbar disappears and returns.
@@ -370,7 +372,7 @@ fn paging_the_picker_keeps_partial_frames_identical() {
         click(&mut session, at, 100);
         parity(&mut session, &mut partial, &mut full, label);
     }
-    press(&mut session, 0xff1b);
+    press(&mut session, rpresent_config::shortcuts::Key::Esc);
     parity(&mut session, &mut partial, &mut full, "paged picker closed");
 }
 

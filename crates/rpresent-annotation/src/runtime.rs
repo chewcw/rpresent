@@ -618,10 +618,10 @@ mod tests {
         Arc<Mutex<Log>>,
         Arc<Mutex<Vec<AnnotationEvent>>>,
     ) {
-        let config = Arc::new(ConfigService::new(
-            PathBuf::from("test.toml"),
-            Config::default(),
-        ));
+        let config = Arc::new(
+            ConfigService::new(PathBuf::from("test.toml"), Config::default())
+                .expect("valid test configuration"),
+        );
         let log = Arc::new(Mutex::new(Log {
             fail_upload,
             ..Log::default()
@@ -815,13 +815,14 @@ mod tests {
                 AnnotationRequest::Key {
                     epoch: 1,
                     input: KeyInput {
-                        keysym: letter as u32,
+                        key: rpresent_config::shortcuts::Key::Char(letter),
                         text: None,
                         modifiers: crate::Modifiers {
                             ctrl: true,
                             shift,
                             ..crate::Modifiers::default()
                         },
+                        shortcut: None,
                     },
                 },
                 now(),
@@ -872,13 +873,14 @@ mod tests {
                 AnnotationRequest::Key {
                     epoch: 1,
                     input: KeyInput {
-                        keysym: letter as u32,
+                        key: rpresent_config::shortcuts::Key::Char(letter),
                         text: Some(letter),
                         modifiers: crate::Modifiers {
                             ctrl,
                             shift,
                             ..crate::Modifiers::default()
                         },
+                        shortcut: None,
                     },
                 },
                 now(),
@@ -1032,12 +1034,13 @@ mod tests {
             AnnotationRequest::Key {
                 epoch: 2,
                 input: KeyInput {
-                    keysym: 'v' as u32,
+                    key: rpresent_config::shortcuts::Key::Char('v'),
                     text: Some('v'),
                     modifiers: crate::Modifiers {
                         ctrl: true,
                         ..crate::Modifiers::default()
                     },
+                    shortcut: None,
                 },
             },
             now(),
@@ -1059,9 +1062,10 @@ mod tests {
             AnnotationRequest::Key {
                 epoch: 2,
                 input: KeyInput {
-                    keysym: 0xff1b,
+                    key: rpresent_config::shortcuts::Key::Esc,
                     text: None,
                     modifiers: crate::Modifiers::default(),
+                    shortcut: None,
                 },
             },
             now(),

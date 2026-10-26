@@ -9,8 +9,10 @@ fn global_function_key_registers_and_unregisters() {
     let (connection, screen) = x11rb::connect(None).unwrap();
     let root = connection.setup().roots[screen].root;
     let connection = Arc::new(connection);
-    let mut settings = ShortcutConfig::default();
-    settings.global = std::collections::BTreeMap::from([("zoom.toggle".into(), "Ctrl+F8".into())]);
+    let settings = ShortcutConfig {
+        global: std::collections::BTreeMap::from([("zoom.toggle".into(), "Ctrl+F8".into())]),
+        ..ShortcutConfig::default()
+    };
     let bindings = settings.validate().unwrap();
     let mut keys = NativeKeys::new().unwrap();
     let grab = keys.grab_candidates("Ctrl+F8".parse().unwrap()).unwrap()[0];
@@ -40,11 +42,13 @@ fn partial_registration_failure_releases_prior_grabs() {
     let (connection, screen) = x11rb::connect(None).unwrap();
     let root = connection.setup().roots[screen].root;
     let connection = Arc::new(connection);
-    let mut settings = ShortcutConfig::default();
-    settings.global = std::collections::BTreeMap::from([
-        ("spotlight.toggle".into(), "Ctrl+F8".into()),
-        ("zoom.toggle".into(), "Alt+F9".into()),
-    ]);
+    let settings = ShortcutConfig {
+        global: std::collections::BTreeMap::from([
+            ("spotlight.toggle".into(), "Ctrl+F8".into()),
+            ("zoom.toggle".into(), "Alt+F9".into()),
+        ]),
+        ..ShortcutConfig::default()
+    };
     let bindings = settings.validate().unwrap();
     let mut keys = NativeKeys::new().unwrap();
     let ctrl_f8 = keys.grab_candidates("Ctrl+F8".parse().unwrap()).unwrap()[0];

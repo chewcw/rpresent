@@ -637,9 +637,10 @@ mod parity_tests {
             session.key(
                 1,
                 crate::KeyInput {
-                    keysym: 0xff0d,
+                    key: rpresent_config::shortcuts::Key::Enter,
                     text: None,
                     modifiers: crate::Modifiers::default(),
+                    shortcut: None,
                 },
             );
 
@@ -783,13 +784,14 @@ mod parity_tests {
         );
     }
 
-    fn press(session: &mut Session, keysym: u32, text: Option<char>) {
+    fn press(session: &mut Session, key: rpresent_config::shortcuts::Key, text: Option<char>) {
         session.key(
             1,
             crate::KeyInput {
-                keysym,
+                key,
                 text,
                 modifiers: crate::Modifiers::default(),
+                shortcut: None,
             },
         );
     }
@@ -831,10 +833,14 @@ mod parity_tests {
             "draft opened",
         );
         for character in "Hi".chars() {
-            press(&mut session, character as u32, Some(character));
+            press(
+                &mut session,
+                rpresent_config::shortcuts::Key::Char(character),
+                Some(character),
+            );
             assert_parity(&mut session, &mut partial, &mut reference, whole, "typing");
         }
-        press(&mut session, 0xff0d, None);
+        press(&mut session, rpresent_config::shortcuts::Key::Enter, None);
         assert_parity(&mut session, &mut partial, &mut reference, whole, "commit");
 
         session
@@ -897,7 +903,7 @@ mod parity_tests {
             whole,
             "reopened",
         );
-        press(&mut session, 0xff1b, None);
+        press(&mut session, rpresent_config::shortcuts::Key::Esc, None);
         assert_parity(
             &mut session,
             &mut partial,

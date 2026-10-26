@@ -27,11 +27,13 @@ fn parses_module_sections_and_applies_defaults() {
         drag_friction = 6.0
         scale_friction = 5.0
 
-        [shortcuts]
-        spotlight_mode = "Ctrl+1"
-        annotation_mode = "Ctrl+2"
-        zoom_mode = "Ctrl+3"
-        wheel_modifier = "Ctrl"
+        [shortcuts.global]
+        "spotlight.toggle" = "Ctrl+1"
+        "annotation.toggle" = "Ctrl+2"
+        "zoom.toggle" = "Ctrl+3"
+
+        [shortcuts.wheel]
+        modifiers = "Ctrl"
         "#,
     )
     .unwrap();
@@ -64,10 +66,23 @@ fn parses_module_sections_and_applies_defaults() {
     assert_eq!(config.zoom.max_scale, 6.0);
     assert_eq!(config.zoom.drag_friction, 6.0);
     assert_eq!(config.zoom.scale_friction, 5.0);
-    assert_eq!(config.shortcuts.spotlight_mode, "Ctrl+1");
-    assert_eq!(config.shortcuts.annotation_mode, "Ctrl+2");
-    assert_eq!(config.shortcuts.zoom_mode, "Ctrl+3");
-    assert_eq!(config.shortcuts.wheel_modifier, "Ctrl");
+    assert_eq!(
+        config
+            .shortcuts
+            .global
+            .get("spotlight.toggle")
+            .map(String::as_str),
+        Some("Ctrl+1")
+    );
+    assert_eq!(
+        config
+            .shortcuts
+            .global
+            .get("zoom.toggle")
+            .map(String::as_str),
+        Some("Ctrl+3")
+    );
+    assert_eq!(config.shortcuts.wheel.modifiers, "Ctrl");
 }
 
 #[test]
@@ -189,6 +204,48 @@ fn missing_config_path_returns_the_built_in_defaults() {
 }
 
 #[test]
+fn custom_global_table_replaces_defaults_and_keeps_the_default_wheel() {
+    let config = load_from_str(
+        "[shortcuts.global]\n\"zoom.toggle\" = \"Ctrl+F8\"\n[shortcuts.annotation]\n",
+    )
+    .unwrap();
+
+    assert_eq!(config.shortcuts.global.len(), 1);
+    assert_eq!(
+        config
+            .shortcuts
+            .global
+            .get("zoom.toggle")
+            .map(String::as_str),
+        Some("Ctrl+F8")
+    );
+    assert!(config.shortcuts.annotation.is_empty());
+    assert_eq!(config.shortcuts.wheel.modifiers, "Ctrl");
+}
+
+#[test]
+fn legacy_shortcut_fields_are_rejected() {
+    for entry in [
+        "spotlight_mode = \"Ctrl+1\"",
+        "annotation_mode = \"Ctrl+2\"",
+        "zoom_mode = \"Ctrl+3\"",
+        "wheel_modifier = \"Ctrl\"",
+    ] {
+        let error = load_from_str(&format!("[shortcuts]\n{entry}\n")).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown field"),
+            "{entry}: {error}"
+        );
+    }
+}
+
+#[test]
+fn invalid_shortcut_bindings_fail_loading() {
+    let error = load_from_str("[shortcuts.global]\n\"zoom.toggle\" = \"Ctrl+\"\n").unwrap_err();
+    assert!(matches!(error, ConfigError::InvalidShortcuts { .. }));
+}
+
+#[test]
 fn default_config_file_is_written_with_all_sections() {
     let tempdir = tempdir().unwrap();
     let path = tempdir.path().join("config.toml");
@@ -201,10 +258,11 @@ fn default_config_file_is_written_with_all_sections() {
     assert!(contents.contains("[spotlight]"));
     assert!(contents.contains("[annotation]"));
     assert!(contents.contains("[zoom]"));
-    assert!(contents.contains("[shortcuts]"));
+    assert!(contents.contains("[shortcuts.global]"));
     assert!(contents.contains("socket_name = \"rpresent.sock\""));
-    assert!(contents.contains("spotlight_mode = \"Ctrl+1\""));
-    assert!(contents.contains("wheel_modifier = \"Ctrl\""));
+    assert!(contents.contains("\"zoom.toggle\" = \"Ctrl+3\""));
+    assert!(contents.contains("[shortcuts.wheel]"));
+    assert!(contents.contains("modifiers = \"Ctrl\""));
     assert!(contents.contains("radius_px = 240"));
     assert!(contents.contains("shade_opacity = 0.6"));
     assert!(!contents.contains("dim_alpha"));

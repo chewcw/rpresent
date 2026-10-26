@@ -3,8 +3,12 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
-use rpresent_annotation::{AnnotationEvent, AnnotationHandle, AnnotationRequest, AnnotationStatus};
+use rpresent_annotation::{
+    AnnotationEvent, AnnotationHandle, AnnotationRequest, AnnotationStatus,
+    KeyInput as AnnotationKeyInput, Modifiers,
+};
 use rpresent_config::ConfigService;
+use rpresent_config::shortcuts::{Key, Mods, ShortcutEvent, WheelEvent};
 use rpresent_spotlight::{
     SpotlightController, SpotlightEvent, SpotlightRuntimeMessage, SpotlightState,
 };
@@ -35,7 +39,7 @@ pub struct Coordinator {
     layers: LayerSnapshot,
     zoom_monitor: Option<rpresent_zoom::MonitorRect>,
     pending: HashMap<u64, Effect>,
-    pending_wheels: VecDeque<(String, f32, (i16, i16))>,
+    pending_wheels: VecDeque<(Mods, f32, (i32, i32))>,
     zoom_ready: bool,
     spotlight_ready: bool,
     spotlight_started: bool,
@@ -60,7 +64,7 @@ impl Coordinator {
 
     fn new(config: Arc<ConfigService>, outputs: CoordinatorOutputs) -> Self {
         let mut coordinator = Self {
-            input: InputCoordinator::new(InputBindings::from(config.shortcuts())),
+            input: InputCoordinator::new(InputBindings::from(config.bindings())),
             spotlight: SpotlightController::new(false),
             config,
             outputs,
@@ -624,39 +628,54 @@ impl Coordinator {
                 }
                 Ok(())
             }
-            NativeEvent::Wheel {
-                epoch,
-                time,
-                modifier,
-                delta,
-                root,
-            } => self.handle_native_wheel(epoch, time, &modifier, delta, root),
-            NativeEvent::Key(shortcut) => {
-                if let Some(command) = self.input.handle_key(&shortcut) {
-                    self.handle_command(command)?;
-                }
-                Ok(())
-            }
-            NativeEvent::AnnotationKey { epoch, input } => {
-                let Some(owner) = self.input.confirmed_owner(epoch) else {
-                    return Ok(());
-                };
-                if owner == PointerOwner::Annotation
-                    && self.input.owns_epoch(PointerOwner::Annotation, epoch)
-                {
-                    self.outputs
-                        .annotation
-                        .send(AnnotationRequest::Key { epoch, input })
-                        .map_err(|error| error.to_string())
-                } else if input.keysym == 0xff1b && self.input.owns_epoch(owner, epoch) {
-                    self.handle_command(AppCommand::Zoom(rpresent_zoom::ZoomCommand::Off))
-                } else {
+            NativeEvent::Shortcut(event) => match event {
+                ShortcutEvent::Wheel(wheel) => self.handle_native_wheel(wheel),
+                ShortcutEvent::Keyboard(keyboard) => {
+                    if let Some(epoch) = keyboard.epoch
+                        && self.input.confirmed_owner(epoch).is_none()
+                    {
+                        return Ok(());
+                    }
+                    if let Some(shortcut) = keyboard.shortcut
+                        && let Some(command) = self.input.handle_key(shortcut)
+                    {
+                        self.handle_command(command)?;
+                        return Ok(());
+                    }
+                    let epoch = keyboard.epoch.unwrap_or(0);
+                    if keyboard.epoch.is_some()
+                        && self.input.owns_epoch(PointerOwner::Annotation, epoch)
+                    {
+                        let annotation_input = AnnotationKeyInput {
+                            key: keyboard.editor.key,
+                            text: keyboard.editor.text,
+                            modifiers: Modifiers {
+                                shift: keyboard.editor.modifiers.contains(Mods::SHIFT),
+                                ctrl: keyboard.editor.modifiers.contains(Mods::CTRL),
+                                alt: keyboard.editor.modifiers.contains(Mods::ALT),
+                                super_key: keyboard.editor.modifiers.contains(Mods::SUPER),
+                            },
+                            shortcut: keyboard.shortcut,
+                        };
+                        self.outputs
+                            .annotation
+                            .send(AnnotationRequest::Key {
+                                epoch,
+                                input: annotation_input,
+                            })
+                            .map_err(|error| error.to_string())?;
+                    } else if keyboard.editor.key == Key::Esc
+                        && (keyboard.epoch.is_none()
+                            || self
+                                .input
+                                .confirmed_owner(epoch)
+                                .is_some_and(|owner| self.input.owns_epoch(owner, epoch)))
+                    {
+                        self.handle_command(AppCommand::Zoom(rpresent_zoom::ZoomCommand::Off))?;
+                    }
                     Ok(())
                 }
-            }
-            NativeEvent::Escape => {
-                self.handle_command(AppCommand::Zoom(rpresent_zoom::ZoomCommand::Off))
-            }
+            },
             NativeEvent::Lost {
                 epoch,
                 window,
@@ -670,20 +689,13 @@ impl Coordinator {
         }
     }
 
-    fn handle_native_wheel(
-        &mut self,
-        epoch: Option<u64>,
-        time: u32,
-        modifier: &str,
-        delta: f32,
-        root: (i16, i16),
-    ) -> Result<(), String> {
+    fn handle_native_wheel(&mut self, wheel: WheelEvent) -> Result<(), String> {
         let target = self.input.preferred_owner();
-        if let Some(epoch) = epoch {
+        if let Some(epoch) = wheel.epoch {
             if !self.input.owns_epoch(target, epoch) {
                 return Ok(());
             }
-            return self.handle_wheel(modifier, delta, root);
+            return self.handle_wheel(wheel.modifiers, wheel.delta, wheel.root.0, wheel.root.1);
         }
 
         let replay = target == PointerOwner::Desktop
@@ -691,14 +703,18 @@ impl Coordinator {
             && !self.annotation_editing;
         self.outputs
             .native
-            .send(NativeRequest::ResolveWheel { time, replay })
+            .send(NativeRequest::ResolveWheel {
+                token: wheel.token,
+                replay,
+            })
             .map_err(|error| error.to_string())?;
         if replay || self.annotation_editing {
             return Ok(());
         }
         if self.lifecycle.is_suppressed() && self.layers.zoom.requested {
-            return self.handle_wheel(modifier, delta, root);
+            return self.handle_wheel(wheel.modifiers, wheel.delta, wheel.root.0, wheel.root.1);
         }
+
         Ok(())
     }
 
@@ -762,8 +778,8 @@ impl Coordinator {
         Ok(())
     }
 
-    fn handle_wheel(&mut self, modifier: &str, delta: f32, root: (i16, i16)) -> Result<(), String> {
-        if !self.input.matches_wheel_modifier(modifier) {
+    fn handle_wheel(&mut self, modifiers: Mods, delta: f32, x: i32, y: i32) -> Result<(), String> {
+        if !self.input.matches_wheel_modifier(modifiers) {
             return Ok(());
         }
         let target = self.input.preferred_owner();
@@ -771,14 +787,13 @@ impl Coordinator {
             return Ok(());
         }
         if self.lifecycle.is_suppressed() && self.layers.zoom.requested {
-            self.pending_wheels
-                .push_back((modifier.to_owned(), delta, root));
+            self.pending_wheels.push_back((modifiers, delta, (x, y)));
             return Ok(());
         }
         if target == PointerOwner::Desktop || self.input.confirmed_target() != target {
             return Ok(());
         }
-        if let Some(action) = self.input.handle_wheel(modifier, delta, root.0, root.1) {
+        if let Some(action) = self.input.handle_wheel(modifiers, delta, x, y) {
             self.dispatch_input(action)?;
         }
         Ok(())
@@ -809,7 +824,7 @@ impl Coordinator {
                 .zoom
                 .send(ZoomRuntimeRequest::Scroll {
                     delta: f64::from(delta),
-                    root: (i32::from(cursor_x), i32::from(cursor_y)),
+                    root: (cursor_x, cursor_y),
                 })
                 .map_err(|error| error.to_string()),
         }
@@ -828,8 +843,8 @@ impl Coordinator {
             return Ok(());
         }
         let queued = std::mem::take(&mut self.pending_wheels);
-        for (modifier, delta, root) in queued {
-            self.handle_wheel(&modifier, delta, root)?;
+        for (modifiers, delta, (x, y)) in queued {
+            self.handle_wheel(modifiers, delta, x, y)?;
         }
         Ok(())
     }
@@ -1105,10 +1120,8 @@ mod tests {
         crate::native_input::NativeInbox,
         rpresent_annotation::AnnotationInbox,
     ) {
-        let config = Arc::new(ConfigService::new(
-            PathBuf::from("test.toml"),
-            Config::default(),
-        ));
+        let config =
+            Arc::new(ConfigService::new(PathBuf::from("test.toml"), Config::default()).unwrap());
         let (spotlight, spotlight_events) = mpsc::channel();
         let (zoom, zoom_events) = zoom_channel().unwrap();
         let (native, native_events) = native_channel().unwrap();
@@ -1301,8 +1314,8 @@ mod tests {
                         self.owners.push((operation, window));
                         operation
                     }
-                    NativeRequest::ResolveWheel { time, replay } => {
-                        self.resolutions.push((time, replay));
+                    NativeRequest::ResolveWheel { token, replay } => {
+                        self.resolutions.push((token as u32, replay));
                         return true;
                     }
                 };
@@ -1743,13 +1756,15 @@ mod tests {
     #[test]
     fn idle_wheel_is_replayed_and_stale_overlay_wheel_is_ignored() {
         let mut rig = Rig::new();
-        rig.event(AppEvent::Native(NativeEvent::Wheel {
-            epoch: None,
-            time: 123,
-            modifier: "Ctrl".to_owned(),
-            delta: 1.0,
-            root: (10, 20),
-        }));
+        rig.event(AppEvent::Native(NativeEvent::Shortcut(
+            ShortcutEvent::Wheel(WheelEvent {
+                epoch: None,
+                token: 123,
+                modifiers: Mods::CTRL,
+                delta: 1.0,
+                root: (10, 20),
+            }),
+        )));
         rig.settle();
         assert_eq!(rig.resolutions, vec![(123, true)]);
         assert!(rig.resizes.is_empty());
@@ -1758,13 +1773,15 @@ mod tests {
         let stale = rig.epoch();
         rig.command(AppCommand::Spotlight(SpotlightCommand::On));
         rig.zoom_inputs.clear();
-        rig.event(AppEvent::Native(NativeEvent::Wheel {
-            epoch: Some(stale),
-            time: 124,
-            modifier: "Ctrl".to_owned(),
-            delta: 1.0,
-            root: (10, 20),
-        }));
+        rig.event(AppEvent::Native(NativeEvent::Shortcut(
+            ShortcutEvent::Wheel(WheelEvent {
+                epoch: Some(stale),
+                token: 124,
+                modifiers: Mods::CTRL,
+                delta: 1.0,
+                root: (10, 20),
+            }),
+        )));
         rig.settle();
         assert!(rig.resizes.is_empty());
         assert!(rig.zoom_inputs.is_empty());
@@ -1776,13 +1793,15 @@ mod tests {
         rig.command(AppCommand::Zoom(ZoomCommand::On));
         rig.command(AppCommand::Spotlight(SpotlightCommand::On));
         rig.zoom_inputs.clear();
-        rig.event(AppEvent::Native(NativeEvent::Wheel {
-            epoch: Some(rig.epoch()),
-            time: 125,
-            modifier: "Control".to_owned(),
-            delta: -1.0,
-            root: (-100, 200),
-        }));
+        rig.event(AppEvent::Native(NativeEvent::Shortcut(
+            ShortcutEvent::Wheel(WheelEvent {
+                epoch: Some(rig.epoch()),
+                token: 125,
+                modifiers: Mods::CTRL,
+                delta: -1.0,
+                root: (-100, 200),
+            }),
+        )));
         rig.settle();
         assert_eq!(rig.resizes, vec![-rig.app.config.spotlight().wheel_speed]);
         assert!(rig.zoom_inputs.is_empty());
@@ -1801,19 +1820,60 @@ mod tests {
             destroyed: true,
             reason: "obsolete".to_owned(),
         }));
-        rig.event(AppEvent::Native(NativeEvent::AnnotationKey {
-            epoch: stale,
-            input: rpresent_annotation::KeyInput {
-                keysym: 0xff1b,
-                text: None,
-                modifiers: rpresent_annotation::Modifiers::default(),
-            },
-        }));
+        rig.event(AppEvent::Native(NativeEvent::Shortcut(
+            ShortcutEvent::Keyboard(rpresent_config::shortcuts::KeyboardEvent {
+                epoch: Some(stale),
+                shortcut: Some("Escape".parse().unwrap()),
+                editor: rpresent_config::shortcuts::EditorInput {
+                    key: Key::Esc,
+                    text: None,
+                    modifiers: Mods::NONE,
+                },
+            }),
+        )));
         assert_eq!(
             rig.app.input.confirmed_owner(current),
             Some(PointerOwner::Spotlight)
         );
         assert!(rig.app.lifecycle.is_zoom_active());
+    }
+
+    #[test]
+    fn configured_global_key_does_not_reach_annotation() {
+        use rpresent_config::shortcuts::{EditorInput, Key, KeyboardEvent, Mods, ShortcutEvent};
+        let mut rig = Rig::new();
+        rig.event(AppEvent::AnnotationRuntime(AnnotationEvent::Status(
+            AnnotationStatus {
+                generation: 1,
+                window: Some(3),
+                ready: true,
+                editing_requested: true,
+                has_content: true,
+                text_editing: false,
+            },
+        )));
+        rig.settle();
+        assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Annotation);
+        let epoch = rig.epoch();
+        rig.annotation_inputs.clear();
+        rig.event(AppEvent::Native(NativeEvent::Shortcut(
+            ShortcutEvent::Keyboard(KeyboardEvent {
+                epoch: Some(epoch),
+                shortcut: Some("Ctrl+3".parse().unwrap()),
+                editor: EditorInput {
+                    key: Key::Char('3'),
+                    text: Some('3'),
+                    modifiers: Mods::CTRL,
+                },
+            }),
+        )));
+        rig.settle();
+        assert!(rig.app.layers.zoom.requested);
+        assert!(
+            !rig.annotation_inputs
+                .iter()
+                .any(|request| { matches!(request, AnnotationRequest::Key { .. }) })
+        );
     }
 
     #[test]
@@ -1853,13 +1913,15 @@ mod tests {
         rig.settle();
         assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Annotation);
         rig.zoom_inputs.clear();
-        rig.event(AppEvent::Native(NativeEvent::Wheel {
-            epoch: Some(rig.epoch()),
-            time: 201,
-            modifier: "Ctrl".to_owned(),
-            delta: 1.0,
-            root: (100, 200),
-        }));
+        rig.event(AppEvent::Native(NativeEvent::Shortcut(
+            ShortcutEvent::Wheel(WheelEvent {
+                epoch: Some(rig.epoch()),
+                token: 201,
+                modifiers: Mods::CTRL,
+                delta: 1.0,
+                root: (100, 200),
+            }),
+        )));
         rig.settle();
         assert!(rig.resizes.is_empty());
         assert!(rig.zoom_inputs.is_empty());
@@ -1882,13 +1944,15 @@ mod tests {
     fn buffered_wheel_uses_spotlight_priority_after_capture_restoration() {
         let mut rig = Rig::new();
         rig.event(AppEvent::Command(AppCommand::Zoom(ZoomCommand::On)));
-        rig.event(AppEvent::Native(NativeEvent::Wheel {
-            epoch: None,
-            time: 202,
-            modifier: "Ctrl".to_owned(),
-            delta: 1.0,
-            root: (100, 200),
-        }));
+        rig.event(AppEvent::Native(NativeEvent::Shortcut(
+            ShortcutEvent::Wheel(WheelEvent {
+                epoch: None,
+                token: 202,
+                modifiers: Mods::CTRL,
+                delta: 1.0,
+                root: (100, 200),
+            }),
+        )));
         assert_eq!(rig.app.pending_wheels.len(), 1);
         rig.event(AppEvent::Command(AppCommand::Spotlight(
             SpotlightCommand::On,
@@ -1917,13 +1981,15 @@ mod tests {
                 text_editing: false,
             },
         )));
-        rig.event(AppEvent::Native(NativeEvent::Wheel {
-            epoch: None,
-            time: 203,
-            modifier: "Ctrl".to_owned(),
-            delta: 1.0,
-            root: (100, 200),
-        }));
+        rig.event(AppEvent::Native(NativeEvent::Shortcut(
+            ShortcutEvent::Wheel(WheelEvent {
+                epoch: None,
+                token: 203,
+                modifiers: Mods::CTRL,
+                delta: 1.0,
+                root: (100, 200),
+            }),
+        )));
         assert!(rig.app.pending_wheels.is_empty());
         rig.settle();
         assert!(rig.resizes.is_empty());
@@ -1938,13 +2004,15 @@ mod tests {
     fn cancelling_capture_clears_buffered_wheel() {
         let mut rig = Rig::new();
         rig.event(AppEvent::Command(AppCommand::Zoom(ZoomCommand::On)));
-        rig.event(AppEvent::Native(NativeEvent::Wheel {
-            epoch: None,
-            time: 204,
-            modifier: "Ctrl".to_owned(),
-            delta: 1.0,
-            root: (100, 200),
-        }));
+        rig.event(AppEvent::Native(NativeEvent::Shortcut(
+            ShortcutEvent::Wheel(WheelEvent {
+                epoch: None,
+                token: 204,
+                modifiers: Mods::CTRL,
+                delta: 1.0,
+                root: (100, 200),
+            }),
+        )));
         assert_eq!(rig.app.pending_wheels.len(), 1);
         rig.event(AppEvent::Command(AppCommand::Zoom(ZoomCommand::Off)));
         assert!(rig.app.pending_wheels.is_empty());
@@ -1968,13 +2036,15 @@ mod tests {
         let ZoomRuntimeRequest::Prepare { operation, .. } = rig.zoom.try_recv().unwrap() else {
             panic!("expected capture preparation");
         };
-        rig.event(AppEvent::Native(NativeEvent::Wheel {
-            epoch: None,
-            time: 205,
-            modifier: "Ctrl".to_owned(),
-            delta: 1.0,
-            root: (100, 200),
-        }));
+        rig.event(AppEvent::Native(NativeEvent::Shortcut(
+            ShortcutEvent::Wheel(WheelEvent {
+                epoch: None,
+                token: 205,
+                modifiers: Mods::CTRL,
+                delta: 1.0,
+                root: (100, 200),
+            }),
+        )));
         assert_eq!(rig.app.pending_wheels.len(), 1);
         rig.event(AppEvent::ZoomRuntime(ZoomEvent::Failed {
             operation,
@@ -1993,13 +2063,15 @@ mod tests {
         rig.command(AppCommand::Zoom(ZoomCommand::Off));
         let epoch = rig.epoch();
         assert!(rig.app.input.owns_epoch(PointerOwner::Spotlight, epoch));
-        rig.event(AppEvent::Native(NativeEvent::Wheel {
-            epoch: Some(epoch),
-            time: 206,
-            modifier: "Ctrl".to_owned(),
-            delta: 1.0,
-            root: (100, 200),
-        }));
+        rig.event(AppEvent::Native(NativeEvent::Shortcut(
+            ShortcutEvent::Wheel(WheelEvent {
+                epoch: Some(epoch),
+                token: 206,
+                modifiers: Mods::CTRL,
+                delta: 1.0,
+                root: (100, 200),
+            }),
+        )));
         rig.settle();
         assert_eq!(rig.resizes.len(), 1);
     }
@@ -2243,7 +2315,10 @@ mod tests {
         let (mut app, _spot, _zoom, _native, annotation) = coordinator();
         let mut config = Config::default();
         config.annotation.enabled_on_start = true;
-        app.config = Arc::new(ConfigService::new(PathBuf::from("test.toml"), config));
+        app.config = Arc::new(
+            ConfigService::new(PathBuf::from("test.toml"), config)
+                .expect("valid test configuration"),
+        );
         app.zoom_ready = true;
         app.native_ready = true;
         app.annotation_started = true;

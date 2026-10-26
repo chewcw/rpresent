@@ -1,4 +1,4 @@
-use rpresent_annotation::KeyInput;
+use rpresent_config::shortcuts::ShortcutEvent;
 
 use crate::input::RawPointer;
 
@@ -14,7 +14,7 @@ pub enum NativeRequest {
         restore_focus: bool,
     },
     ResolveWheel {
-        time: u32,
+        token: u64,
         replay: bool,
     },
 }
@@ -30,19 +30,7 @@ pub enum NativeEvent {
         epoch: u64,
         input: RawPointer,
     },
-    Wheel {
-        epoch: Option<u64>,
-        time: u32,
-        modifier: String,
-        delta: f32,
-        root: (i16, i16),
-    },
-    Key(String),
-    AnnotationKey {
-        epoch: u64,
-        input: KeyInput,
-    },
-    Escape,
+    Shortcut(ShortcutEvent),
     Lost {
         epoch: u64,
         window: u32,

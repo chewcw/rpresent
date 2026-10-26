@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     AnnotationConfig, AppConfig, Config, ConfigError, ShortcutConfig, SpotlightConfig, ZoomConfig,
-    load_or_default_from_path,
+    load_or_default_from_path, shortcuts::ValidatedShortcuts,
 };
 
 /// Owns the loaded config and the path it came from.
@@ -10,21 +10,25 @@ use crate::{
 pub struct ConfigService {
     path: PathBuf,
     config: Config,
+    bindings: ValidatedShortcuts,
 }
 
 impl ConfigService {
     /// Load the config from `path`. A missing file gives the default config.
     pub fn load_or_default(path: impl Into<PathBuf>) -> Result<Self, ConfigError> {
         let path = path.into();
-        Ok(Self {
-            config: load_or_default_from_path(&path)?,
-            path,
-        })
+        let config = load_or_default_from_path(&path)?;
+        Self::new(path, config)
     }
 
     /// Build a service from a config value that is already in memory.
-    pub fn new(path: PathBuf, config: Config) -> Self {
-        Self { path, config }
+    pub fn new(path: PathBuf, config: Config) -> Result<Self, ConfigError> {
+        let bindings = config.shortcuts.validate()?;
+        Ok(Self {
+            path,
+            config,
+            bindings,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -49,5 +53,9 @@ impl ConfigService {
 
     pub fn shortcuts(&self) -> &ShortcutConfig {
         &self.config.shortcuts
+    }
+
+    pub fn bindings(&self) -> &ValidatedShortcuts {
+        &self.bindings
     }
 }

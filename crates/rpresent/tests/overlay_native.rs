@@ -21,10 +21,9 @@ use x11rb::protocol::xproto::{
 };
 
 fn config() -> Arc<ConfigService> {
-    Arc::new(ConfigService::new(
-        PathBuf::from("overlay-native-test.toml"),
-        Config::default(),
-    ))
+    Arc::new(
+        ConfigService::new(PathBuf::from("overlay-native-test.toml"), Config::default()).unwrap(),
+    )
 }
 
 fn wait_for<T: std::fmt::Debug>(

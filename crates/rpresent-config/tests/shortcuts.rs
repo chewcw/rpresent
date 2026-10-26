@@ -21,6 +21,7 @@ fn wheel_uses_package_modifier_names() {
         parse_wheel_modifiers("Super+Shift").unwrap(),
         Mods::SUPER | Mods::SHIFT
     );
+    assert_eq!(parse_wheel_modifiers("Control").unwrap(), Mods::CTRL);
     assert!(parse_wheel_modifiers("Meta+Shift").is_err());
     assert!(parse_wheel_modifiers("Super+").is_err());
     assert!(parse_wheel_modifiers("").is_err());

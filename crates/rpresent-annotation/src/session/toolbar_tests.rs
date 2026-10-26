@@ -67,9 +67,10 @@ fn escape(session: &mut Session, epoch: u64) {
     session.key(
         epoch,
         KeyInput {
-            keysym: KEY_ESCAPE,
+            key: Key::Esc,
             text: None,
             modifiers: Modifiers::default(),
+            shortcut: None,
         },
     );
 }
@@ -114,9 +115,10 @@ fn type_char(session: &mut Session, character: char) {
     session.key(
         1,
         KeyInput {
-            keysym: character as u32,
+            key: Key::Char(character),
             text: Some(character),
             modifiers: Modifiers::default(),
+            shortcut: None,
         },
     );
 }
@@ -582,12 +584,13 @@ fn keyboard_ctrl_z_edits_the_draft_not_document_history() {
     session.key(
         1,
         KeyInput {
-            keysym: 'z' as u32,
+            key: Key::Char('z'),
             text: None,
             modifiers: Modifiers {
                 ctrl: true,
                 ..Modifiers::default()
             },
+            shortcut: None,
         },
     );
     assert!(

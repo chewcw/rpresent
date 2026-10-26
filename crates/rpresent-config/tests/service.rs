@@ -35,10 +35,11 @@ fn new_builds_a_service_from_an_in_memory_config() {
         ..Config::default()
     };
 
-    let config_service = ConfigService::new(PathBuf::from("test.toml"), config);
+    let config_service = ConfigService::new(PathBuf::from("test.toml"), config).unwrap();
 
     assert_eq!(config_service.path(), Path::new("test.toml"));
     assert_eq!(config_service.spotlight().radius_px, 70);
+    assert_eq!(config_service.bindings().global.len(), 3);
 }
 
 #[test]

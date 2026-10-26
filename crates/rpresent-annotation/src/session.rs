@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use cosmic_text::{Action, Motion};
+use rpresent_config::shortcuts::{Key, KeyInput as ShortcutInput};
 use rpresent_config::{AnnotationConfig, AnnotationTool, ConfigError};
 
 use crate::catalog::{Preset, Rgb, cycle_index, parse_rgb};
@@ -26,18 +27,6 @@ pub(crate) const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 pub(crate) const DRAG_THRESHOLD_PX: i32 = 4;
 pub(crate) const DEFAULT_TEXT_FAMILY: &str = "sans-serif";
 pub(crate) const TEXT_BOX_PADDING_PX: i32 = 4;
-
-const KEY_ENTER: u32 = 0xff0d;
-const KEY_KP_ENTER: u32 = 0xff8d;
-const KEY_ESCAPE: u32 = 0xff1b;
-const KEY_BACKSPACE: u32 = 0xff08;
-const KEY_DELETE: u32 = 0xffff;
-const KEY_LEFT: u32 = 0xff51;
-const KEY_UP: u32 = 0xff52;
-const KEY_RIGHT: u32 = 0xff53;
-const KEY_DOWN: u32 = 0xff54;
-const KEY_HOME: u32 = 0xff50;
-const KEY_END: u32 = 0xff57;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerInput {
@@ -74,9 +63,10 @@ pub struct Modifiers {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyInput {
-    pub keysym: u32,
+    pub key: Key,
     pub text: Option<char>,
     pub modifiers: Modifiers,
+    pub shortcut: Option<ShortcutInput>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -475,7 +465,7 @@ impl Session {
         if self.owner_epoch != Some(epoch) || !self.editing_requested {
             return;
         }
-        if input.keysym == KEY_ESCAPE {
+        if input.key == Key::Esc {
             let (consumed, damage) = {
                 let Some(mut toolbar) = self.toolbar.take() else {
                     self.canvas_key(input);
@@ -503,7 +493,7 @@ impl Session {
             self.draft_key(input);
             return;
         }
-        if input.keysym == KEY_ESCAPE {
+        if input.key == Key::Esc {
             self.mark_transient();
             self.mark_selection();
             self.escape();
@@ -527,7 +517,7 @@ impl Session {
     }
 
     fn document_shortcut(&mut self, input: KeyInput) {
-        let Some(letter) = lower_letter(input.keysym) else {
+        let Some(letter) = lower_letter(input.key) else {
             return;
         };
         if !input.modifiers.ctrl {
@@ -544,20 +534,12 @@ impl Session {
     }
 
     fn tool_key(&mut self, input: KeyInput) {
-        let Some(letter) = lower_letter(input.keysym) else {
-            match input.keysym {
-                0x5b => {
-                    self.cycle_width(false);
-                }
-                0x5d => {
-                    self.cycle_width(true);
-                }
-                0x2d => {
-                    self.cycle_text_size(false);
-                }
-                0x3d => {
-                    self.cycle_text_size(true);
-                }
+        let Some(letter) = lower_letter(input.key) else {
+            match input.key {
+                Key::Char('[') => self.cycle_width(false),
+                Key::Char(']') => self.cycle_width(true),
+                Key::Char('-') => self.cycle_text_size(false),
+                Key::Char('=') => self.cycle_text_size(true),
                 _ => {}
             }
             return;
@@ -603,7 +585,7 @@ impl Session {
         let shift = input.modifiers.shift;
         if ctrl {
             self.mark_transient();
-            match lower_letter(input.keysym) {
+            match lower_letter(input.key) {
                 Some('z') if shift => {
                     if let Some(edit) = self.text_edit.as_mut() {
                         edit.draft.redo();
@@ -638,23 +620,23 @@ impl Session {
             self.mark_transient();
             return;
         }
-        match input.keysym {
-            KEY_ENTER | KEY_KP_ENTER => {
+        match input.key {
+            Key::Enter => {
                 if shift {
                     self.draft_insert("\n");
                 } else {
                     self.commit_text();
                 }
             }
-            KEY_ESCAPE => self.cancel_text(),
-            KEY_BACKSPACE => self.draft_action(Action::Backspace),
-            KEY_DELETE => self.draft_action(Action::Delete),
-            KEY_LEFT => self.draft_motion(Motion::Left, shift),
-            KEY_RIGHT => self.draft_motion(Motion::Right, shift),
-            KEY_UP => self.draft_motion(Motion::Up, shift),
-            KEY_DOWN => self.draft_motion(Motion::Down, shift),
-            KEY_HOME => self.draft_motion(Motion::Home, shift),
-            KEY_END => self.draft_motion(Motion::End, shift),
+            Key::Esc => self.cancel_text(),
+            Key::Backspace => self.draft_action(Action::Backspace),
+            Key::Delete => self.draft_action(Action::Delete),
+            Key::Left => self.draft_motion(Motion::Left, shift),
+            Key::Right => self.draft_motion(Motion::Right, shift),
+            Key::Up => self.draft_motion(Motion::Up, shift),
+            Key::Down => self.draft_motion(Motion::Down, shift),
+            Key::Home => self.draft_motion(Motion::Home, shift),
+            Key::End => self.draft_motion(Motion::End, shift),
             _ => {
                 if let Some(character) = input.text {
                     self.draft_insert(&character.to_string());
@@ -1258,10 +1240,11 @@ fn resolve_preset<T: Copy + PartialEq>(
     Ok((values[next_index], next_index))
 }
 
-fn lower_letter(keysym: u32) -> Option<char> {
-    match keysym {
-        0x41..=0x5a => char::from_u32(keysym + 0x20),
-        0x61..=0x7a => char::from_u32(keysym),
+fn lower_letter(key: Key) -> Option<char> {
+    match key {
+        Key::Char(character) if character.is_ascii_alphabetic() => {
+            Some(character.to_ascii_lowercase())
+        }
         _ => None,
     }
 }
@@ -1323,13 +1306,14 @@ mod tests {
         );
     }
 
-    fn key(session: &mut Session, keysym: u32, text: Option<char>, modifiers: Modifiers) {
+    fn key(session: &mut Session, kind: Key, text: Option<char>, modifiers: Modifiers) {
         session.key(
             1,
             KeyInput {
-                keysym,
+                key: kind,
                 text,
                 modifiers,
+                shortcut: None,
             },
         );
     }
@@ -1338,7 +1322,7 @@ mod tests {
         for character in text.chars() {
             key(
                 session,
-                character as u32,
+                Key::Char(character),
                 Some(character),
                 Modifiers::default(),
             );
@@ -1346,7 +1330,7 @@ mod tests {
     }
 
     fn press_enter(session: &mut Session) {
-        key(session, KEY_ENTER, None, Modifiers::default());
+        key(session, Key::Enter, None, Modifiers::default());
     }
 
     fn text_bounds(session: &mut Session, id: ObjectId) -> Rect {
@@ -1454,7 +1438,7 @@ mod tests {
                 time: Duration::from_millis(120),
             },
         );
-        key(&mut session, KEY_ESCAPE, None, Modifiers::default());
+        key(&mut session, Key::Esc, None, Modifiers::default());
         assert_eq!(session.document().objects()[0].id, id);
         assert_eq!(session.document().objects()[0].origin, origin);
     }
@@ -1570,7 +1554,7 @@ mod tests {
     fn ctrl_v(session: &mut Session) {
         key(
             session,
-            'v' as u32,
+            Key::Char('v'),
             Some('v'),
             Modifiers {
                 ctrl: true,
@@ -1587,7 +1571,7 @@ mod tests {
             .unwrap();
         click(&mut session, Point { x: 20, y: 20 }, Duration::ZERO);
         type_text(&mut session, "Hi");
-        key(&mut session, KEY_LEFT, None, Modifiers::default());
+        key(&mut session, Key::Left, None, Modifiers::default());
         ctrl_v(&mut session);
         let requests = session.take_paste_requests();
         assert_eq!(requests.len(), 1);
@@ -1639,7 +1623,7 @@ mod tests {
         ctrl_v(&mut session);
         let requests = session.take_paste_requests();
         let old = requests[0];
-        key(&mut session, KEY_ESCAPE, None, Modifiers::default());
+        key(&mut session, Key::Esc, None, Modifiers::default());
         assert!(session.draft_id().is_none());
         session.accept_paste(PasteResult {
             request: old,
@@ -1702,14 +1686,14 @@ mod tests {
         assert!(session.status().text_editing);
         key(
             &mut session,
-            0x61,
+            Key::Char('a'),
             Some('a'),
             Modifiers {
                 ctrl: true,
                 ..Modifiers::default()
             },
         );
-        key(&mut session, KEY_BACKSPACE, None, Modifiers::default());
+        key(&mut session, Key::Backspace, None, Modifiers::default());
         press_enter(&mut session);
         assert!(session.document().objects().is_empty());
         session.command(AnnotationCommand::Undo).unwrap();
@@ -1749,7 +1733,7 @@ mod tests {
             .unwrap();
         click(&mut session, Point { x: 10, y: 10 }, Duration::ZERO);
         type_text(&mut session, "draft");
-        key(&mut session, KEY_ESCAPE, None, Modifiers::default());
+        key(&mut session, Key::Esc, None, Modifiers::default());
         assert!(!session.status().text_editing);
         assert!(session.status().editing_requested);
         assert!(session.document().objects().is_empty());
@@ -1899,7 +1883,7 @@ mod tests {
         type_text(&mut session, "one");
         key(
             &mut session,
-            KEY_ENTER,
+            Key::Enter,
             None,
             Modifiers {
                 shift: true,

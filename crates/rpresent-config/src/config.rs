@@ -4,6 +4,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+pub use crate::shortcuts::ShortcutConfig;
+use crate::shortcuts::ShortcutError;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -219,6 +222,8 @@ pub enum ConfigError {
         field: &'static str,
         reason: &'static str,
     },
+    #[error(transparent)]
+    InvalidShortcuts(#[from] ShortcutError),
 }
 
 impl Default for AppConfig {
@@ -287,19 +292,6 @@ pub struct ZoomConfig {
     pub scale_friction: f32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ShortcutConfig {
-    #[serde(default = "default_spotlight_mode_shortcut")]
-    pub spotlight_mode: String,
-    #[serde(default = "default_annotation_mode_shortcut")]
-    pub annotation_mode: String,
-    #[serde(default = "default_zoom_mode_shortcut")]
-    pub zoom_mode: String,
-    #[serde(default = "default_wheel_modifier")]
-    pub wheel_modifier: String,
-}
-
 impl Default for ZoomConfig {
     fn default() -> Self {
         Self {
@@ -359,21 +351,11 @@ impl ZoomConfig {
     }
 }
 
-impl Default for ShortcutConfig {
-    fn default() -> Self {
-        Self {
-            spotlight_mode: default_spotlight_mode_shortcut(),
-            annotation_mode: default_annotation_mode_shortcut(),
-            zoom_mode: default_zoom_mode_shortcut(),
-            wheel_modifier: default_wheel_modifier(),
-        }
-    }
-}
-
 pub fn load_from_str(text: &str) -> Result<Config, ConfigError> {
     let config: Config = toml::from_str(text).map_err(|source| ConfigError::Parse { source })?;
     config.zoom.validate()?;
     config.annotation.validate()?;
+    config.shortcuts.validate()?;
     Ok(config)
 }
 
@@ -548,22 +530,6 @@ fn default_drag_friction() -> f32 {
 
 fn default_scale_friction() -> f32 {
     5.0
-}
-
-fn default_spotlight_mode_shortcut() -> String {
-    "Ctrl+1".to_owned()
-}
-
-fn default_annotation_mode_shortcut() -> String {
-    "Ctrl+2".to_owned()
-}
-
-fn default_zoom_mode_shortcut() -> String {
-    "Ctrl+3".to_owned()
-}
-
-fn default_wheel_modifier() -> String {
-    "Ctrl".to_owned()
 }
 
 fn default_stroke_width_px() -> u32 {

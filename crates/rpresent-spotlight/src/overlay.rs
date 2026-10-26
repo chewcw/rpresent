@@ -399,13 +399,16 @@ mod tests {
     fn config_service(
         config: rpresent_config::SpotlightConfig,
     ) -> std::sync::Arc<rpresent_config::ConfigService> {
-        std::sync::Arc::new(rpresent_config::ConfigService::new(
-            std::path::PathBuf::from("test.toml"),
-            rpresent_config::Config {
-                spotlight: config,
-                ..Default::default()
-            },
-        ))
+        std::sync::Arc::new(
+            rpresent_config::ConfigService::new(
+                std::path::PathBuf::from("test.toml"),
+                rpresent_config::Config {
+                    spotlight: config,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        )
     }
 
     #[derive(Debug, Default)]
