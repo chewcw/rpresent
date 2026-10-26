@@ -3,7 +3,7 @@ use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, S
 
 use crate::document::{Object, ObjectData, Point};
 use crate::error::OverlayError;
-use crate::geometry::{Rect, rect_outline};
+use crate::geometry::{Rect, arrow_outline, rect_outline};
 use crate::session::{Gesture, Session, TEXT_BOX_PADDING_PX, TextEdit};
 use crate::text::TextSystem;
 
@@ -215,6 +215,15 @@ impl Renderer {
                 object.color,
                 clip,
             ),
+            ObjectData::Arrow { end, width_px } => draw_arrow(
+                &mut self.pixmap,
+                &self.mask,
+                object.origin,
+                *end,
+                *width_px,
+                object.color,
+                clip,
+            ),
             ObjectData::Text { .. } => {
                 let [red, green, blue] = object.color;
                 let color = TextColor::rgb(red, green, blue);
@@ -252,8 +261,26 @@ pub(crate) fn object_paint_bounds(text_system: &mut TextSystem, object: &Object)
         ObjectData::Rect { end, width_px } => {
             stroke_bounds(object.origin, &rect_outline(*end), *width_px)
         }
+        ObjectData::Arrow { end, width_px } => {
+            stroke_bounds(object.origin, &arrow_outline(*end, *width_px), *width_px)
+        }
         ObjectData::Text { .. } => text_system.bounds(object).padded(2),
     }
+}
+
+fn draw_arrow(
+    pixmap: &mut Pixmap,
+    mask: &Mask,
+    origin: Point,
+    end: Point,
+    width_px: u32,
+    color: [u8; 3],
+    clip: &Rect,
+) {
+    let [tail, tip, barb_a, barb_b] = arrow_outline(end, width_px);
+    draw_polyline(pixmap, mask, origin, &[tail, tip], width_px, color, clip);
+    draw_polyline(pixmap, mask, origin, &[tip, barb_a], width_px, color, clip);
+    draw_polyline(pixmap, mask, origin, &[tip, barb_b], width_px, color, clip);
 }
 
 pub(crate) fn stroke_bounds(origin: Point, points: &[Point], width_px: u32) -> Rect {
@@ -564,6 +591,31 @@ mod tests {
         );
         assert_eq!(frame.pixel(10, 10).unwrap().alpha(), 0);
         assert_eq!(frame.pixel(0, 0).unwrap().alpha(), 255);
+    }
+
+    #[test]
+    fn arrow_paints_the_shaft_and_both_barbs() {
+        let mut renderer = Renderer::new(100, 100).unwrap();
+        let whole = renderer.full_bounds();
+        renderer.reset_mask(whole);
+        let mut text_system = crate::text::TextSystem::new();
+        let end = Point { x: 60, y: 0 };
+        let width_px = 6;
+        let object = Object {
+            id: 0,
+            origin: Point { x: 20, y: 50 },
+            color: [255, 0, 0],
+            data: ObjectData::Arrow { end, width_px },
+        };
+        renderer.draw_object(&mut text_system, &object, &whole);
+        let alpha = |point: Point| {
+            renderer.pixels()[((point.y as usize) * 100 + point.x as usize) * 4 + 3]
+        };
+        assert!(alpha(Point { x: 50, y: 50 }) > 0, "shaft");
+        let [_, _, barb_a, barb_b] = crate::geometry::arrow_outline(end, width_px);
+        assert!(alpha(object.point(barb_a)) > 0, "first barb");
+        assert!(alpha(object.point(barb_b)) > 0, "second barb");
+        assert_eq!(alpha(Point { x: 30, y: 40 }), 0, "open V");
     }
 }
 

@@ -11,8 +11,8 @@ use crate::catalog::{Preset, Rgb, cycle_index, parse_rgb};
 use crate::command::AnnotationCommand;
 use crate::document::{Document, Object, ObjectData, ObjectId, Point};
 use crate::geometry::{
-    Rect, point_rect_distance, point_segment_distance, rect_outline, segment_rect_distance,
-    segment_segment_distance,
+    Rect, arrow_outline, point_rect_distance, point_segment_distance, rect_outline,
+    segment_rect_distance, segment_segment_distance,
 };
 use crate::text::{TextDraft, TextSystem};
 use crate::toolbar::{DisplayGeometry, Toolbar, ToolbarLayout};
@@ -1222,6 +1222,16 @@ fn object_hit(text_system: &mut TextSystem, object: &Object, point: Point) -> bo
                     <= tolerance
             })
         }
+        ObjectData::Arrow { end, width_px } => {
+            let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
+            let [tail, tip, barb_a, barb_b] = arrow_outline(*end, *width_px);
+            [(tail, tip), (tip, barb_a), (tip, barb_b)]
+                .into_iter()
+                .any(|(start, end)| {
+                    point_segment_distance(point, object.point(start), object.point(end))
+                        <= tolerance
+                })
+        }
         ObjectData::Text { .. } => text_system.bounds(object).contains(point),
     }
 }
@@ -1257,6 +1267,23 @@ fn object_touched(text_system: &mut TextSystem, object: &Object, start: Point, e
                 segment_segment_distance(object.point(pair[0]), object.point(pair[1]), start, end)
                     <= tolerance
             })
+        }
+        ObjectData::Arrow {
+            end: arrow_end,
+            width_px,
+        } => {
+            let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
+            let [tail, tip, barb_a, barb_b] = arrow_outline(*arrow_end, *width_px);
+            [(tail, tip), (tip, barb_a), (tip, barb_b)]
+                .into_iter()
+                .any(|(segment_start, segment_end)| {
+                    segment_segment_distance(
+                        object.point(segment_start),
+                        object.point(segment_end),
+                        start,
+                        end,
+                    ) <= tolerance
+                })
         }
         ObjectData::Text { .. } => {
             let bounds = text_system.bounds(object);

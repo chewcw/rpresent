@@ -25,6 +25,10 @@ pub enum ObjectData {
         end: Point,
         width_px: u32,
     },
+    Arrow {
+        end: Point,
+        width_px: u32,
+    },
     Text {
         text: String,
         family: String,
@@ -206,6 +210,10 @@ mod tests {
 
     fn rect(end: Point) -> ObjectData {
         ObjectData::Rect { end, width_px: 6 }
+    }
+
+    fn arrow(end: Point) -> ObjectData {
+        ObjectData::Arrow { end, width_px: 6 }
     }
 
     #[test]
@@ -445,5 +453,59 @@ mod tests {
                 height: 30,
             }
         );
+    }
+
+    #[test]
+    fn arrow_round_trips_through_undo_and_redo() {
+        let mut document = Document::new(4);
+        let origin = Point { x: 10, y: 20 };
+        let end = Point { x: 60, y: -10 };
+        let id = document.insert(origin, [1, 2, 3], arrow(end));
+        assert!(document.undo());
+        assert!(document.objects().is_empty());
+        assert!(document.redo());
+        assert_eq!(
+            document.objects(),
+            &[Object {
+                id,
+                origin,
+                color: [1, 2, 3],
+                data: arrow(end),
+            }]
+        );
+    }
+
+    #[test]
+    fn arrow_bounds_cover_the_shaft_and_head() {
+        let end = Point { x: -80, y: 20 };
+        let object = Object {
+            id: 0,
+            origin: Point { x: 10, y: 20 },
+            color: [0, 0, 0],
+            data: ObjectData::Arrow {
+                end,
+                width_px: 10,
+            },
+        };
+        let mut text_system = crate::text::TextSystem::new();
+        let outline = crate::geometry::arrow_outline(end, 10);
+        let bounds = crate::render::object_paint_bounds(&mut text_system, &object);
+        let min_x = outline
+            .iter()
+            .map(|local| object.point(*local).x)
+            .min()
+            .unwrap();
+        assert!(bounds.x < min_x, "stroke padding");
+        for local in outline {
+            let absolute = object.point(local);
+            assert!(
+                bounds.x <= absolute.x && absolute.x <= bounds.right(),
+                "{absolute:?} outside {bounds:?}"
+            );
+            assert!(
+                bounds.y <= absolute.y && absolute.y <= bounds.bottom(),
+                "{absolute:?} outside {bounds:?}"
+            );
+        }
     }
 }
