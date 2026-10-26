@@ -156,7 +156,7 @@ fn tool_press_released_on_the_canvas_never_activates() {
             time: Duration::from_millis(10),
         },
     );
-    assert_eq!(session.tool(), AnnotationTool::Pen);
+    assert_eq!(session.tool(), AnnotationTool::Arrow);
     assert!(session.document().objects().is_empty());
 }
 
@@ -398,7 +398,7 @@ fn ownership_loss_cancels_a_pending_toolbar_press() {
             time: Duration::from_millis(10),
         },
     );
-    assert_eq!(session.tool(), AnnotationTool::Pen);
+    assert_eq!(session.tool(), AnnotationTool::Arrow);
     assert!(session.document().objects().is_empty());
 }
 
@@ -431,7 +431,7 @@ fn input_from_an_obsolete_epoch_changes_nothing() {
     assert_eq!(session.toolbar_layout().unwrap().bar, before);
     assert!(session.toolbar_layout().unwrap().picker.is_none());
     assert!(session.document().objects().is_empty());
-    assert_eq!(session.tool(), AnnotationTool::Pen);
+    assert_eq!(session.tool(), AnnotationTool::Arrow);
 }
 
 #[test]
@@ -563,7 +563,7 @@ fn dragging_the_handle_with_a_picker_open_issues_no_command() {
     );
     assert_eq!(
         session.tool(),
-        AnnotationTool::Pen,
+        AnnotationTool::Arrow,
         "dragging must not run a command"
     );
     assert!(session.document().objects().is_empty());

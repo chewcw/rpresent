@@ -181,11 +181,11 @@ fn apply_patch(base: &mut SpotlightFrame, patch: &SpotlightFrame, origin: (i16, 
 
 #[test]
 fn circle_exterior_alpha_equals_shade_opacity() {
-    let config = base_config(); // show_spot_shade=true, shade_opacity=0.6
+    let config = base_config(); // show_spot_shade=true
     let frame = build_projecteur_frame((W, H), CURSOR, &config, RADIUS);
     // Pixel (0, 0): ~283 px from cursor — well outside radius (120)
     let alpha = frame.bgra_at(0, 0)[3];
-    let expected = (0.6_f32 * 255.0).round() as u8; // 153
+    let expected = (config.shade_opacity * 255.0).round() as u8;
     assert_eq!(
         alpha, expected,
         "exterior pixel alpha should equal shade_opacity×255 = {expected}, got {alpha}"
@@ -209,6 +209,8 @@ fn circle_interior_is_transparent() {
 fn circle_border_ring_has_border_color() {
     let mut config = base_config();
     config.show_spot_shade = false; // simplify: shade off, ring still drawn
+    config.border_size_pct = 10;
+    config.border_color = "#ffffff".to_owned();
     // Pixel 114 px above cursor: between inner_r(108) and outer_r(120) → solidly in ring
     assert!(
         dist(200, 36) > 108.0 && dist(200, 36) < 120.0,
@@ -216,7 +218,7 @@ fn circle_border_ring_has_border_color() {
     );
     let frame = build_projecteur_frame((W, H), CURSOR, &config, RADIUS);
     let bgra = frame.bgra_at(200, 36);
-    let expected_alpha = (0.8_f32 * 255.0).round() as u8; // 204
+    let expected_alpha = (config.border_opacity * 255.0).round() as u8;
     assert_eq!(
         bgra[3], expected_alpha,
         "border ring alpha should equal border_opacity×255 = {expected_alpha}, got {}",
@@ -276,7 +278,7 @@ fn square_exterior_has_shade_and_interior_is_transparent() {
     let frame = build_projecteur_frame((W, H), CURSOR, &config, RADIUS);
 
     let exterior = frame.bgra_at(0, 0)[3];
-    let expected = (0.6_f32 * 255.0).round() as u8;
+    let expected = (config.shade_opacity * 255.0).round() as u8;
     assert_eq!(
         exterior, expected,
         "square: exterior alpha should be shade_opacity×255"
@@ -303,7 +305,7 @@ fn star_exterior_has_shade() {
     config.show_center_dot = false;
     let frame = build_projecteur_frame((W, H), CURSOR, &config, RADIUS);
     let alpha = frame.bgra_at(0, 0)[3];
-    let expected = (0.6_f32 * 255.0).round() as u8;
+    let expected = (config.shade_opacity * 255.0).round() as u8;
     assert_eq!(
         alpha, expected,
         "star: exterior alpha should be shade_opacity×255"
@@ -320,7 +322,7 @@ fn ngon_exterior_has_shade() {
     config.show_center_dot = false;
     let frame = build_projecteur_frame((W, H), CURSOR, &config, RADIUS);
     let alpha = frame.bgra_at(0, 0)[3];
-    let expected = (0.6_f32 * 255.0).round() as u8;
+    let expected = (config.shade_opacity * 255.0).round() as u8;
     assert_eq!(
         alpha, expected,
         "ngon: exterior alpha should be shade_opacity×255"
@@ -367,7 +369,7 @@ fn damage_rect_frame_matches_the_same_region_of_the_full_frame() {
 fn damage_rect_outside_the_spotlight_is_filled_with_shade() {
     let config = base_config();
     let patch = build_projecteur_frame_rect((0, 0, 50, 50), CURSOR, &config, RADIUS);
-    let expected = (0.6_f32 * 255.0).round() as u8;
+    let expected = (config.shade_opacity * 255.0).round() as u8;
 
     for y in 0..50u16 {
         for x in 0..50u16 {

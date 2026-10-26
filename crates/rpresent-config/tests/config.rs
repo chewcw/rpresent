@@ -4,7 +4,7 @@ use std::path::Path;
 use tempfile::tempdir;
 
 use rpresent_config::{
-    AnnotationTool, Config, ConfigError, SpotShape, default_config_path, load_from_str,
+    AnnotationTool, Config, ConfigError, default_config_path, load_from_str,
     load_or_default_from_path, write_default_config,
 };
 
@@ -16,6 +16,7 @@ fn parses_module_sections_and_applies_defaults() {
         socket_name = "present.sock"
 
         [spotlight]
+        enabled_on_start = true
         radius_px = 260
         wheel_speed = 8.0
 
@@ -38,34 +39,61 @@ fn parses_module_sections_and_applies_defaults() {
     )
     .unwrap();
 
+    let default = Config::default();
+
     assert_eq!(config.app.socket_name, "present.sock");
-    assert!(config.spotlight.enabled_on_start);
-    assert_eq!(config.spotlight.radius_px, 260);
-    assert_eq!(config.spotlight.softness_px, 80);
-    assert!((config.spotlight.wheel_speed - 8.0).abs() < f32::EPSILON);
-    // Projecteur-style defaults applied when not specified in TOML
-    assert!(config.spotlight.show_spot_shade);
-    assert_eq!(config.spotlight.shape, SpotShape::Circle);
-    assert!(config.spotlight.show_center_dot);
-    assert_eq!(config.spotlight.dot_size_px, 8);
-    assert_eq!(config.spotlight.dot_color, "#ffffff");
-    assert!((config.spotlight.dot_opacity - 0.8).abs() < f32::EPSILON);
-    assert_eq!(config.spotlight.shade_color, "#000000");
-    assert!((config.spotlight.shade_opacity - 0.6).abs() < f32::EPSILON);
-    assert!(config.spotlight.show_border);
-    assert_eq!(config.spotlight.border_color, "#ffffff");
-    assert_eq!(config.spotlight.border_size_pct, 10);
-    assert!((config.spotlight.border_opacity - 0.8).abs() < f32::EPSILON);
-    assert!(!config.annotation.enabled_on_start);
-    assert_eq!(config.annotation.default_tool, AnnotationTool::Line);
-    assert_eq!(config.annotation.stroke_width_px, 6);
-    assert_eq!(config.annotation.history_depth, 64);
-    assert!(!config.zoom.enabled_on_start);
-    assert_eq!(config.zoom.initial_scale, 2.5);
-    assert_eq!(config.zoom.min_scale, 1.0);
-    assert_eq!(config.zoom.max_scale, 6.0);
-    assert_eq!(config.zoom.drag_friction, 6.0);
-    assert_eq!(config.zoom.scale_friction, 5.0);
+    assert!(config.spotlight.enabled_on_start); // explicit in fixture
+    assert_eq!(config.spotlight.radius_px, 260); // explicit in fixture
+    assert_eq!(config.spotlight.softness_px, default.spotlight.softness_px);
+    assert!((config.spotlight.wheel_speed - 8.0).abs() < f32::EPSILON); // explicit in fixture
+    // Unspecified fields fall back to the defaults
+    assert_eq!(
+        config.spotlight.show_spot_shade,
+        default.spotlight.show_spot_shade
+    );
+    assert_eq!(config.spotlight.shape, default.spotlight.shape);
+    assert_eq!(
+        config.spotlight.show_center_dot,
+        default.spotlight.show_center_dot
+    );
+    assert_eq!(config.spotlight.dot_size_px, default.spotlight.dot_size_px);
+    assert_eq!(config.spotlight.dot_color, default.spotlight.dot_color);
+    assert!((config.spotlight.dot_opacity - default.spotlight.dot_opacity).abs() < f32::EPSILON);
+    assert_eq!(config.spotlight.shade_color, default.spotlight.shade_color);
+    assert!(
+        (config.spotlight.shade_opacity - default.spotlight.shade_opacity).abs() < f32::EPSILON
+    );
+    assert_eq!(config.spotlight.show_border, default.spotlight.show_border);
+    assert_eq!(
+        config.spotlight.border_color,
+        default.spotlight.border_color
+    );
+    assert_eq!(
+        config.spotlight.border_size_pct,
+        default.spotlight.border_size_pct
+    );
+    assert!(
+        (config.spotlight.border_opacity - default.spotlight.border_opacity).abs() < f32::EPSILON
+    );
+    assert_eq!(
+        config.annotation.enabled_on_start,
+        default.annotation.enabled_on_start
+    );
+    assert_eq!(config.annotation.default_tool, AnnotationTool::Line); // explicit in fixture
+    assert_eq!(
+        config.annotation.stroke_width_px,
+        default.annotation.stroke_width_px
+    );
+    assert_eq!(
+        config.annotation.history_depth,
+        default.annotation.history_depth
+    );
+    assert_eq!(config.zoom.enabled_on_start, default.zoom.enabled_on_start);
+    assert_eq!(config.zoom.initial_scale, 2.5); // explicit in fixture
+    assert_eq!(config.zoom.min_scale, default.zoom.min_scale);
+    assert_eq!(config.zoom.max_scale, default.zoom.max_scale);
+    assert_eq!(config.zoom.drag_friction, 6.0); // explicit in fixture
+    assert_eq!(config.zoom.scale_friction, 5.0); // explicit in fixture
     assert_eq!(
         config
             .shortcuts
@@ -148,8 +176,12 @@ fn removed_spotlight_keys_are_rejected() {
 #[test]
 fn default_spotlight_config_uses_only_canonical_keys() {
     let text = rpresent_config::default_config_toml();
-    assert!(text.contains("radius_px = 240"));
-    assert!(text.contains("shade_opacity = 0.6"));
+    let default = Config::default();
+    assert!(text.contains(&format!("radius_px = {}", default.spotlight.radius_px)));
+    assert!(text.contains(&format!(
+        "shade_opacity = {}",
+        default.spotlight.shade_opacity
+    )));
     assert!(!text.contains("dim_alpha"));
     assert!(!text.contains("spot_size_pct"));
     assert_eq!(load_from_str(&text).unwrap(), Config::default());
@@ -253,23 +285,43 @@ fn default_config_file_is_written_with_all_sections() {
     let written_path = write_default_config(&path).unwrap();
     assert_eq!(written_path, path);
 
+    let default = Config::default();
     let contents = fs::read_to_string(path).unwrap();
     assert!(contents.contains("[app]"));
     assert!(contents.contains("[spotlight]"));
     assert!(contents.contains("[annotation]"));
     assert!(contents.contains("[zoom]"));
     assert!(contents.contains("[shortcuts.global]"));
-    assert!(contents.contains("socket_name = \"rpresent.sock\""));
-    assert!(contents.contains("\"zoom.toggle\" = \"Ctrl+3\""));
+    assert!(contents.contains(&format!("socket_name = \"{}\"", default.app.socket_name)));
+    assert!(contents.contains(&format!(
+        "\"zoom.toggle\" = \"{}\"",
+        default
+            .shortcuts
+            .global
+            .get("zoom.toggle")
+            .expect("zoom.toggle binding must exist")
+    )));
     assert!(contents.contains("[shortcuts.wheel]"));
-    assert!(contents.contains("modifiers = \"Ctrl\""));
-    assert!(contents.contains("radius_px = 240"));
-    assert!(contents.contains("shade_opacity = 0.6"));
+    assert!(contents.contains(&format!(
+        "modifiers = \"{}\"",
+        default.shortcuts.wheel.modifiers
+    )));
+    assert!(contents.contains(&format!("radius_px = {}", default.spotlight.radius_px)));
+    assert!(contents.contains(&format!(
+        "shade_opacity = {}",
+        default.spotlight.shade_opacity
+    )));
     assert!(!contents.contains("dim_alpha"));
     assert!(!contents.contains("spot_size_pct"));
-    assert!(contents.contains("shade_color = \"#000000\""));
-    assert!(contents.contains("border_size_pct = 10"));
-    assert!(contents.contains("wheel_speed = 12.0"));
+    assert!(contents.contains(&format!(
+        "shade_color = \"{}\"",
+        default.spotlight.shade_color
+    )));
+    assert!(contents.contains(&format!(
+        "border_size_pct = {}",
+        default.spotlight.border_size_pct
+    )));
+    assert!(contents.contains(&format!("wheel_speed = {}", default.spotlight.wheel_speed)));
 }
 
 #[test]

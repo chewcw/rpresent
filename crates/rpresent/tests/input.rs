@@ -5,7 +5,7 @@ use rpresent::input::{
     ActiveMode, InputAction, InputBindings, InputCoordinator, InputRouter, InputStatus,
     PointerOwner, RawPointer,
 };
-use rpresent_config::shortcuts::{KeyInput, Mods, ShortcutConfig};
+use rpresent_config::shortcuts::{Mods, ShortcutAction, ShortcutConfig};
 
 #[test]
 fn shortcut_bindings_follow_the_config() {
@@ -34,20 +34,39 @@ fn mode_shortcuts_toggle_and_update_the_active_mode() {
     let input_bindings = InputBindings::from(&bindings);
     let mut router = InputRouter::new(input_bindings, ActiveMode::Spotlight);
 
+    let spotlight_toggle = bindings
+        .global
+        .iter()
+        .find(|b| b.action == ShortcutAction::SpotlightToggle)
+        .unwrap()
+        .input;
+    let annotation_toggle = bindings
+        .global
+        .iter()
+        .find(|b| b.action == ShortcutAction::AnnotationToggle)
+        .unwrap()
+        .input;
+    let zoom_toggle = bindings
+        .global
+        .iter()
+        .find(|b| b.action == ShortcutAction::ZoomToggle)
+        .unwrap()
+        .input;
+
     assert_eq!(
-        router.handle_key("Ctrl+1".parse::<KeyInput>().unwrap()),
+        router.handle_key(spotlight_toggle),
         Some(AppCommand::Spotlight(SpotlightCommand::Toggle))
     );
     assert_eq!(router.active_mode(), ActiveMode::Spotlight);
 
     assert_eq!(
-        router.handle_key("Ctrl+2".parse::<KeyInput>().unwrap()),
+        router.handle_key(annotation_toggle),
         Some(AppCommand::Annotation(AnnotationCommand::Toggle))
     );
     assert_eq!(router.active_mode(), ActiveMode::Annotation);
 
     assert_eq!(
-        router.handle_key("Ctrl+3".parse::<KeyInput>().unwrap()),
+        router.handle_key(zoom_toggle),
         Some(AppCommand::Zoom(ZoomCommand::Toggle))
     );
     assert_eq!(router.active_mode(), ActiveMode::Annotation);
@@ -75,11 +94,14 @@ fn spotlight_wheel_is_blocked_outside_spotlight_mode_even_with_ctrl() {
     let input_bindings = InputBindings::from(&bindings);
     let mut router = InputRouter::new(input_bindings, ActiveMode::Spotlight);
 
-    assert!(
-        router
-            .handle_key("Ctrl+2".parse::<KeyInput>().unwrap())
-            .is_some()
-    );
+    let annotation_toggle = bindings
+        .global
+        .iter()
+        .find(|b| b.action == ShortcutAction::AnnotationToggle)
+        .unwrap()
+        .input;
+
+    assert!(router.handle_key(annotation_toggle).is_some());
     assert_eq!(
         router.handle_wheel_for_owner(Mods::CTRL, 1.0, 0, 0, PointerOwner::Spotlight),
         Some(InputAction::SpotlightWheel { delta: 1.0 })
@@ -271,13 +293,17 @@ fn prepared_zoom_does_not_accept_a_gesture_before_it_commits() {
 
 #[test]
 fn annotation_mode_keeps_the_wheel_inactive_while_zoom_is_inactive() {
+    let bindings = ShortcutConfig::default().validate().unwrap();
     let mut input = coordinator(InputStatus::default());
 
-    assert!(
-        input
-            .handle_key("Ctrl+2".parse::<KeyInput>().unwrap())
-            .is_some()
-    );
+    let annotation_toggle = bindings
+        .global
+        .iter()
+        .find(|b| b.action == ShortcutAction::AnnotationToggle)
+        .unwrap()
+        .input;
+
+    assert!(input.handle_key(annotation_toggle).is_some());
     assert_eq!(input.handle_wheel(Mods::CTRL, 1.0, 0, 0), None);
 }
 

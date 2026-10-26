@@ -48,7 +48,7 @@ fn absent_tables_use_scope_defaults() {
             .iter()
             .find(|binding| binding.action.name() == "spotlight.toggle")
             .map(|binding| binding.expression.as_str()),
-        Some("Ctrl+1")
+        Some("Ctrl+Alt+1")
     );
     assert_eq!(
         bindings

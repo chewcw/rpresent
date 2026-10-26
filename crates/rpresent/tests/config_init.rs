@@ -33,8 +33,11 @@ fn config_init_writes_default_config_file() {
     assert!(contents.contains("socket_name = \"rpresent.sock\""));
 
     let config = load_from_str(&contents).unwrap();
-    assert_eq!(config.spotlight.radius_px, 240);
-    assert!((config.spotlight.shade_opacity - 0.6).abs() < f32::EPSILON);
+    let default = rpresent_config::Config::default();
+    assert_eq!(config.spotlight.radius_px, default.spotlight.radius_px);
+    assert!(
+        (config.spotlight.shade_opacity - default.spotlight.shade_opacity).abs() < f32::EPSILON
+    );
     assert!(!contents.contains("dim_alpha"));
     assert!(!contents.contains("spot_size_pct"));
 }

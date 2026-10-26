@@ -1470,6 +1470,13 @@ mod tests {
         session
     }
 
+    fn binding_for(bindings: &[Binding], action: ShortcutAction) -> &Binding {
+        bindings
+            .iter()
+            .find(|binding| binding.action == action)
+            .unwrap_or_else(|| panic!("no binding for {}", action.name()))
+    }
+
     fn type_text(session: &mut Session, text: &str) {
         for character in text.chars() {
             key(
@@ -1522,6 +1529,9 @@ mod tests {
     fn off_keeps_committed_objects_and_rejects_stale_input() {
         let mut session = Session::new(&config(), &crate::session::default_bindings()).unwrap();
         session.command(AnnotationCommand::On).unwrap();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Pen))
+            .unwrap();
         session.ownership(Some(7));
         let root = Point { x: 10, y: 20 };
         session.pointer(
@@ -1554,6 +1564,9 @@ mod tests {
     #[test]
     fn pen_click_creates_a_dot() {
         let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Pen))
+            .unwrap();
         assert_eq!(session.tool(), AnnotationTool::Pen);
         click(&mut session, Point { x: 5, y: 6 }, Duration::ZERO);
         let objects = session.document().objects();
@@ -2065,25 +2078,12 @@ mod tests {
         };
         let bindings = settings.validate().unwrap();
         let mut session = ready_session_with_bindings(&bindings.annotation);
-        key(
-            &mut session,
-            Key::Char('l'),
-            Some('l'),
-            Modifiers::default(),
-        );
-        assert_eq!(session.tool(), AnnotationTool::Pen);
-        session.key(
-            1,
-            KeyInput {
-                key: Key::F8,
-                text: None,
-                modifiers: Modifiers {
-                    ctrl: true,
-                    ..Modifiers::default()
-                },
-                shortcut: Some("Ctrl+F8".parse().unwrap()),
-            },
-        );
+        let defaults = default_bindings();
+        let fixed_letter = binding_for(&defaults, ShortcutAction::ToolLine);
+        press(&mut session, &fixed_letter.expression);
+        assert_eq!(session.tool(), AnnotationTool::Arrow);
+        let configured = binding_for(&bindings.annotation, ShortcutAction::ToolLine);
+        press(&mut session, &configured.expression);
         assert_eq!(session.tool(), AnnotationTool::Line);
     }
 
@@ -2216,7 +2216,7 @@ mod tests {
         let mut session = ready_session_with_bindings(&[]);
         press(&mut session, "l");
         press(&mut session, "]");
-        assert_eq!(session.tool(), AnnotationTool::Pen);
+        assert_eq!(session.tool(), AnnotationTool::Arrow);
         assert_eq!(session.width_px(), config().stroke_width_px);
 
         session

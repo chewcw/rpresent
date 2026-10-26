@@ -330,7 +330,7 @@ fn tool_changes_swap_applicable_presets_and_highlight() {
     let mut toolbar = Toolbar::new(geometry());
     toolbar.sync(&session.toolbar_values());
 
-    // Default tool is Pen: color and width apply, Pen is highlighted.
+    // Default tool is Arrow: color and width apply, Arrow is highlighted.
     assert_eq!(
         picker_targets(toolbar.layout().unwrap()),
         vec![
@@ -340,7 +340,7 @@ fn tool_changes_swap_applicable_presets_and_highlight() {
     );
     assert_eq!(
         selected_tool(toolbar.layout().unwrap()),
-        vec![AnnotationTool::Pen]
+        vec![AnnotationTool::Arrow]
     );
 
     session

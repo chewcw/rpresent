@@ -1840,7 +1840,9 @@ mod tests {
 
     #[test]
     fn configured_global_key_does_not_reach_annotation() {
-        use rpresent_config::shortcuts::{EditorInput, Key, KeyboardEvent, Mods, ShortcutEvent};
+        use rpresent_config::shortcuts::{
+            EditorInput, Key, KeyboardEvent, ShortcutAction, ShortcutEvent,
+        };
         let mut rig = Rig::new();
         rig.event(AppEvent::AnnotationRuntime(AnnotationEvent::Status(
             AnnotationStatus {
@@ -1856,15 +1858,30 @@ mod tests {
         assert_eq!(rig.app.input.confirmed_target(), PointerOwner::Annotation);
         let epoch = rig.epoch();
         rig.annotation_inputs.clear();
+        // Resolve the configured global zoom-toggle binding instead of hardcoding
+        // a key expression, so the test follows the default whatever it is.
+        let binding = rig
+            .app
+            .config
+            .bindings()
+            .global
+            .iter()
+            .find(|b| b.action == ShortcutAction::ZoomToggle)
+            .expect("zoom.toggle global binding must be configured");
+        let input = binding.input;
+        let editor = EditorInput {
+            key: input.key(),
+            text: match input.key() {
+                Key::Char(c) => Some(c),
+                _ => None,
+            },
+            modifiers: input.mods(),
+        };
         rig.event(AppEvent::Native(NativeEvent::Shortcut(
             ShortcutEvent::Keyboard(KeyboardEvent {
                 epoch: Some(epoch),
-                shortcut: Some("Ctrl+3".parse().unwrap()),
-                editor: EditorInput {
-                    key: Key::Char('3'),
-                    text: Some('3'),
-                    modifiers: Mods::CTRL,
-                },
+                shortcut: Some(input),
+                editor,
             }),
         )));
         rig.settle();

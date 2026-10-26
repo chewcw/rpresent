@@ -654,6 +654,12 @@ mod tests {
     }
 
     fn draw_dot(runtime: &mut AnnotationRuntime) {
+        runtime.process(
+            AnnotationRequest::Command(AnnotationCommand::Tool(
+                rpresent_config::AnnotationTool::Pen,
+            )),
+            now(),
+        );
         runtime.process(AnnotationRequest::Ownership { epoch: Some(1) }, now());
         runtime.process(
             AnnotationRequest::Pointer {
@@ -1174,7 +1180,11 @@ mod tests {
             },
         );
         assert_eq!(runtime.session.toolbar_layout().unwrap().bar, bar_before);
-        assert_eq!(runtime.session.tool(), rpresent_config::AnnotationTool::Pen);
+        // Config::default() uses Arrow as the default annotation tool.
+        assert_eq!(
+            runtime.session.tool(),
+            rpresent_config::AnnotationTool::Arrow
+        );
         assert!(runtime.session.document().objects().is_empty());
     }
 
@@ -1236,6 +1246,12 @@ mod tests {
             now(),
         );
         runtime.process(AnnotationRequest::Ownership { epoch: Some(1) }, now());
+        runtime.process(
+            AnnotationRequest::Command(AnnotationCommand::Tool(
+                rpresent_config::AnnotationTool::Pen,
+            )),
+            now(),
+        );
 
         // Committed artwork outside the toolbar.
         pointer(&mut runtime, 1, Point { x: 10, y: 10 }, 0);
