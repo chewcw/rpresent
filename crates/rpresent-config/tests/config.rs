@@ -292,3 +292,9 @@ fn default_config_path_is_under_xdg_config_dir() {
     let path = default_config_path().unwrap();
     assert!(path.ends_with(Path::new("rpresent/config.toml")));
 }
+
+#[test]
+fn arrow_is_a_valid_default_tool() {
+    let config = load_from_str("[annotation]\ndefault_tool = \"arrow\"\n").unwrap();
+    assert_eq!(config.annotation.default_tool, AnnotationTool::Arrow);
+}

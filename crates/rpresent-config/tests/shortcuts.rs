@@ -32,7 +32,7 @@ fn absent_tables_use_scope_defaults() {
     let settings: ShortcutConfig = toml::from_str("").unwrap();
     let bindings = settings.validate().unwrap();
     assert_eq!(bindings.global.len(), 3);
-    assert_eq!(bindings.annotation.len(), 15);
+    assert_eq!(bindings.annotation.len(), 16);
     assert_eq!(bindings.wheel, Mods::CTRL);
     assert_eq!(bindings.global[0].action.name(), "annotation.toggle");
     assert_eq!(bindings.global[1].action.name(), "spotlight.toggle");
@@ -52,6 +52,14 @@ fn absent_tables_use_scope_defaults() {
             .find(|binding| binding.action.name() == "annotation.tool.rect")
             .map(|binding| binding.expression.as_str()),
         Some("r")
+    );
+    assert_eq!(
+        bindings
+            .annotation
+            .iter()
+            .find(|binding| binding.action.name() == "annotation.tool.arrow")
+            .map(|binding| binding.expression.as_str()),
+        Some("a")
     );
 }
 

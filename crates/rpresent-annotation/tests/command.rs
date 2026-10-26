@@ -36,6 +36,7 @@ fn parses_all_supported_commands() {
         ("annotation=tool=select", AnnotationTool::Select),
         ("annotation=tool=pen", AnnotationTool::Pen),
         ("annotation=tool=line", AnnotationTool::Line),
+        ("annotation=tool=arrow", AnnotationTool::Arrow),
         ("annotation=tool=rect", AnnotationTool::Rect),
         ("annotation=tool=eraser", AnnotationTool::Eraser),
         ("annotation=tool=text", AnnotationTool::Text),
@@ -108,6 +109,10 @@ fn displays_the_original_command_strings() {
         (
             AnnotationCommand::Tool(AnnotationTool::Line),
             "annotation=tool=line",
+        ),
+        (
+            AnnotationCommand::Tool(AnnotationTool::Arrow),
+            "annotation=tool=arrow",
         ),
         (
             AnnotationCommand::Tool(AnnotationTool::Rect),

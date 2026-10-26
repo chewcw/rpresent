@@ -360,6 +360,23 @@ fn tool_changes_swap_applicable_presets_and_highlight() {
     );
 
     session
+        .command(AnnotationCommand::Tool(AnnotationTool::Arrow))
+        .unwrap();
+    assert!(toolbar.sync(&session.toolbar_values()).is_some());
+    assert_eq!(
+        picker_targets(toolbar.layout().unwrap()),
+        vec![
+            Target::Picker(PickerKind::Color),
+            Target::Picker(PickerKind::Width)
+        ]
+    );
+    assert_eq!(
+        selected_tool(toolbar.layout().unwrap()),
+        vec![AnnotationTool::Arrow]
+    );
+    assert_controls_fit(toolbar.layout().unwrap());
+
+    session
         .command(AnnotationCommand::Tool(AnnotationTool::Rect))
         .unwrap();
     assert!(toolbar.sync(&session.toolbar_values()).is_some());
@@ -412,7 +429,18 @@ fn toolbar_starts_on_pointer_monitor_without_creating_content() {
             _ => None,
         })
         .collect();
-    assert_eq!(tools, crate::TOOLS);
+    assert_eq!(
+        tools,
+        vec![
+            AnnotationTool::Select,
+            AnnotationTool::Pen,
+            AnnotationTool::Line,
+            AnnotationTool::Arrow,
+            AnnotationTool::Rect,
+            AnnotationTool::Eraser,
+            AnnotationTool::Text,
+        ]
+    );
     assert!(session.document().objects().is_empty());
     assert!(toolbar.sync(&session.toolbar_values()).is_none());
 }

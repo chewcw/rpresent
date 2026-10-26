@@ -2,10 +2,11 @@ use rpresent_config::AnnotationTool;
 
 use crate::command::AnnotationCommandParseError;
 
-pub const TOOLS: [AnnotationTool; 6] = [
+pub const TOOLS: [AnnotationTool; 7] = [
     AnnotationTool::Select,
     AnnotationTool::Pen,
     AnnotationTool::Line,
+    AnnotationTool::Arrow,
     AnnotationTool::Rect,
     AnnotationTool::Eraser,
     AnnotationTool::Text,

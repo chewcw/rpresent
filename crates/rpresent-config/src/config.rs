@@ -36,6 +36,7 @@ pub enum AnnotationTool {
     #[default]
     Pen,
     Line,
+    Arrow,
     Rect,
     Eraser,
     Text,
