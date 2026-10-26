@@ -132,6 +132,7 @@ modifiers = "Ctrl"
 "annotation.undo" = "Ctrl+z"
 "annotation.redo" = "Ctrl+Z"
 "annotation.delete" = "Delete"
+"annotation.clear" = "x"
 "annotation.tool.select" = "v"
 "annotation.tool.pen" = "p"
 "annotation.tool.line" = "l"
@@ -147,7 +148,7 @@ modifiers = "Ctrl"
 "annotation.text-size.next" = "="
 ```
 
-`annotation.clear` has no default binding; add it to the annotation table to enable it. The defaults shown above are also what an omitted scope uses.
+The defaults shown above are also what an omitted scope uses.
 
 - An omitted scope uses defaults. An explicit scope replaces its entire map. An empty scope disables its configurable bindings.
 - Character keys are case sensitive. `Super+Z` means the uppercase character, which is Shift plus `z` on the keyboard, and `Ctrl+z` differs from `Ctrl+Z`. Use `Ctrl+Z`, not `Ctrl+Shift+z`, for the default redo binding.
@@ -205,7 +206,7 @@ While annotation editing owns input, spotlight stays at its last rendered positi
 - The Arrow tool draws a straight shaft with an open V-shaped head at the drag end. The head scales with the stroke width. Only the shaft and head are selectable and erasable. The open area between the barbs is not a hit.
 - The Rect tool draws an outlined rectangle. Only its edges are selectable and erasable. Its interior is not.
 - `c` cycles colors forward and `C` backward. `[` and `]` cycle stroke widths, and `-` and `=` cycle text sizes.
-- `Ctrl+z` undoes, `Ctrl+Z` redoes, and `Delete` removes the selected object. `Ctrl+Y` is not a default redo binding.
+- `Ctrl+z` undoes, `Ctrl+Z` redoes, `Delete` removes the selected object, and `x` clears every annotation. `Ctrl+Y` is not a default redo binding.
 - Press Enter to commit text, Shift+Enter to insert a newline, and Escape to cancel the draft.
 - `Ctrl+V` pastes clipboard text into the current text draft.
 - The eraser deletes whole objects, and drag with the Select tool moves one object.

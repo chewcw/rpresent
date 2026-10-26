@@ -64,6 +64,7 @@ scale_friction = 5.0
 "zoom.toggle" = "Ctrl+3"
 
 [shortcuts.annotation]
+"annotation.clear" = "x"
 "annotation.color.next" = "c"
 "annotation.color.prev" = "C"
 "annotation.delete" = "Delete"
