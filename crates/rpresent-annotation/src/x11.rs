@@ -880,8 +880,11 @@ mod tests {
     fn annotation_native_map_upload_unmap() {
         let mut backend = X11AnnotationBackend::new().expect("X11 backend requires a compositor");
         let mut renderer = Renderer::new(64, 64).unwrap();
-        let mut session =
-            crate::Session::new(&rpresent_config::AnnotationConfig::default()).unwrap();
+        let mut session = crate::Session::new(
+            &rpresent_config::AnnotationConfig::default(),
+            &crate::session::default_bindings(),
+        )
+        .unwrap();
         session.command(crate::AnnotationCommand::On).unwrap();
         session.ownership(Some(1));
         session.pointer(

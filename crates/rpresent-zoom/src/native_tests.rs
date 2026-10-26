@@ -49,10 +49,7 @@ fn drain_for(rx: &mpsc::Receiver<ZoomEvent>, window: Duration) -> Vec<ZoomEvent>
 }
 
 fn config() -> Arc<ConfigService> {
-    Arc::new(ConfigService::new(
-        PathBuf::from("native-test.toml"),
-        Config::default(),
-    ))
+    Arc::new(ConfigService::new(PathBuf::from("native-test.toml"), Config::default()).unwrap())
 }
 
 #[test]

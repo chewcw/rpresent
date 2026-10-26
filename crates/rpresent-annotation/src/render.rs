@@ -558,7 +558,11 @@ mod parity_tests {
         use std::time::Instant;
 
         for (width, height) in [(1920, 1080), (3840, 2160)] {
-            let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+            let mut session = Session::new(
+                &AnnotationConfig::default(),
+                &crate::session::default_bindings(),
+            )
+            .unwrap();
             session.command(AnnotationCommand::On).unwrap();
             session.ownership(Some(1));
 
@@ -637,9 +641,10 @@ mod parity_tests {
             session.key(
                 1,
                 crate::KeyInput {
-                    keysym: 0xff0d,
+                    key: rpresent_config::shortcuts::Key::Enter,
                     text: None,
                     modifiers: crate::Modifiers::default(),
+                    shortcut: None,
                 },
             );
 
@@ -686,7 +691,11 @@ mod parity_tests {
 
     #[test]
     fn partial_redraw_matches_full_scene() {
-        let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+        let mut session = Session::new(
+            &AnnotationConfig::default(),
+            &crate::session::default_bindings(),
+        )
+        .unwrap();
         session.command(AnnotationCommand::On).unwrap();
         session
             .command(AnnotationCommand::Tool(AnnotationTool::Line))
@@ -783,13 +792,14 @@ mod parity_tests {
         );
     }
 
-    fn press(session: &mut Session, keysym: u32, text: Option<char>) {
+    fn press(session: &mut Session, key: rpresent_config::shortcuts::Key, text: Option<char>) {
         session.key(
             1,
             crate::KeyInput {
-                keysym,
+                key,
                 text,
                 modifiers: crate::Modifiers::default(),
+                shortcut: None,
             },
         );
     }
@@ -810,7 +820,11 @@ mod parity_tests {
 
     #[test]
     fn extended_partial_redraws_match_full_scene() {
-        let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+        let mut session = Session::new(
+            &AnnotationConfig::default(),
+            &crate::session::default_bindings(),
+        )
+        .unwrap();
         session.command(AnnotationCommand::On).unwrap();
         session.ownership(Some(1));
         let mut partial = Renderer::new(100, 100).unwrap();
@@ -831,10 +845,14 @@ mod parity_tests {
             "draft opened",
         );
         for character in "Hi".chars() {
-            press(&mut session, character as u32, Some(character));
+            press(
+                &mut session,
+                rpresent_config::shortcuts::Key::Char(character),
+                Some(character),
+            );
             assert_parity(&mut session, &mut partial, &mut reference, whole, "typing");
         }
-        press(&mut session, 0xff0d, None);
+        press(&mut session, rpresent_config::shortcuts::Key::Enter, None);
         assert_parity(&mut session, &mut partial, &mut reference, whole, "commit");
 
         session
@@ -897,7 +915,7 @@ mod parity_tests {
             whole,
             "reopened",
         );
-        press(&mut session, 0xff1b, None);
+        press(&mut session, rpresent_config::shortcuts::Key::Esc, None);
         assert_parity(
             &mut session,
             &mut partial,
@@ -924,7 +942,11 @@ mod parity_tests {
 
     #[test]
     fn unchanged_state_produces_no_damage() {
-        let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+        let mut session = Session::new(
+            &AnnotationConfig::default(),
+            &crate::session::default_bindings(),
+        )
+        .unwrap();
         session.command(AnnotationCommand::On).unwrap();
         session.ownership(Some(1));
         let mut renderer = Renderer::new(100, 100).unwrap();

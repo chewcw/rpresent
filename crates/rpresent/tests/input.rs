@@ -5,44 +5,49 @@ use rpresent::input::{
     ActiveMode, InputAction, InputBindings, InputCoordinator, InputRouter, InputStatus,
     PointerOwner, RawPointer,
 };
-use rpresent_config::ShortcutConfig;
+use rpresent_config::shortcuts::{KeyInput, Mods, ShortcutConfig};
 
 #[test]
 fn shortcut_bindings_follow_the_config() {
     let config = ShortcutConfig {
-        spotlight_mode: "Alt+1".to_owned(),
-        annotation_mode: "Alt+2".to_owned(),
-        zoom_mode: "Alt+3".to_owned(),
-        wheel_modifier: "Alt".to_owned(),
+        global: std::collections::BTreeMap::from([
+            ("spotlight.toggle".into(), "Alt+1".into()),
+            ("annotation.toggle".into(), "Alt+2".into()),
+            ("zoom.toggle".into(), "Alt+3".into()),
+        ]),
+        annotation: std::collections::BTreeMap::new(),
+        wheel: rpresent_config::shortcuts::WheelConfig {
+            modifiers: "Alt".into(),
+        },
     };
 
-    let bindings = InputBindings::from(&config);
+    let bindings = config.validate().unwrap();
+    let input_bindings = InputBindings::from(&bindings);
 
-    assert_eq!(bindings.spotlight_mode, "Alt+1");
-    assert_eq!(bindings.annotation_mode, "Alt+2");
-    assert_eq!(bindings.zoom_mode, "Alt+3");
-    assert_eq!(bindings.wheel_modifier, "Alt");
+    assert_eq!(input_bindings.global.len(), 3);
+    assert_eq!(input_bindings.wheel_modifier, Mods::ALT);
 }
 
 #[test]
 fn mode_shortcuts_toggle_and_update_the_active_mode() {
-    let bindings = InputBindings::from(&ShortcutConfig::default());
-    let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);
+    let bindings = ShortcutConfig::default().validate().unwrap();
+    let input_bindings = InputBindings::from(&bindings);
+    let mut router = InputRouter::new(input_bindings, ActiveMode::Spotlight);
 
     assert_eq!(
-        router.handle_key("Ctrl+1"),
+        router.handle_key("Ctrl+1".parse::<KeyInput>().unwrap()),
         Some(AppCommand::Spotlight(SpotlightCommand::Toggle))
     );
     assert_eq!(router.active_mode(), ActiveMode::Spotlight);
 
     assert_eq!(
-        router.handle_key("Ctrl+2"),
+        router.handle_key("Ctrl+2".parse::<KeyInput>().unwrap()),
         Some(AppCommand::Annotation(AnnotationCommand::Toggle))
     );
     assert_eq!(router.active_mode(), ActiveMode::Annotation);
 
     assert_eq!(
-        router.handle_key("Ctrl+3"),
+        router.handle_key("Ctrl+3".parse::<KeyInput>().unwrap()),
         Some(AppCommand::Zoom(ZoomCommand::Toggle))
     );
     assert_eq!(router.active_mode(), ActiveMode::Annotation);
@@ -50,103 +55,85 @@ fn mode_shortcuts_toggle_and_update_the_active_mode() {
 
 #[test]
 fn spotlight_wheel_requires_the_configured_modifier() {
-    let bindings = InputBindings::from(&ShortcutConfig::default());
-    let router = InputRouter::new(bindings, ActiveMode::Spotlight);
+    let bindings = ShortcutConfig::default().validate().unwrap();
+    let input_bindings = InputBindings::from(&bindings);
+    let router = InputRouter::new(input_bindings, ActiveMode::Spotlight);
 
     assert_eq!(
-        router.handle_wheel_for_owner("Ctrl", 1.0, 0, 0, PointerOwner::Spotlight),
+        router.handle_wheel_for_owner(Mods::CTRL, 1.0, 0, 0, PointerOwner::Spotlight),
         Some(InputAction::SpotlightWheel { delta: 1.0 })
     );
     assert_eq!(
-        router.handle_wheel_for_owner("Shift", 1.0, 0, 0, PointerOwner::Spotlight),
+        router.handle_wheel_for_owner(Mods::SHIFT, 1.0, 0, 0, PointerOwner::Spotlight),
         None
     );
 }
 
 #[test]
-fn spotlight_wheel_accepts_ctrl_aliases() {
-    let bindings = InputBindings::from(&ShortcutConfig::default());
-    let router = InputRouter::new(bindings, ActiveMode::Spotlight);
-
-    assert_eq!(
-        router.handle_wheel_for_owner("Control", 1.0, 0, 0, PointerOwner::Spotlight),
-        Some(InputAction::SpotlightWheel { delta: 1.0 })
-    );
-}
-
-#[test]
 fn spotlight_wheel_is_blocked_outside_spotlight_mode_even_with_ctrl() {
-    let bindings = InputBindings::from(&ShortcutConfig::default());
-    let mut router = InputRouter::new(bindings, ActiveMode::Spotlight);
+    let bindings = ShortcutConfig::default().validate().unwrap();
+    let input_bindings = InputBindings::from(&bindings);
+    let mut router = InputRouter::new(input_bindings, ActiveMode::Spotlight);
 
-    assert!(router.handle_key("Ctrl+2").is_some());
-    assert_eq!(
-        router.handle_wheel_for_owner("Control", 1.0, 0, 0, PointerOwner::Spotlight),
-        Some(InputAction::SpotlightWheel { delta: 1.0 })
+    assert!(
+        router
+            .handle_key("Ctrl+2".parse::<KeyInput>().unwrap())
+            .is_some()
     );
-}
-
-#[test]
-fn spotlight_wheel_accepts_control_as_configured_modifier() {
-    let config = ShortcutConfig {
-        spotlight_mode: "Ctrl+1".to_owned(),
-        annotation_mode: "Ctrl+2".to_owned(),
-        zoom_mode: "Ctrl+3".to_owned(),
-        wheel_modifier: "Control".to_owned(), // configured as "Control", not "Ctrl"
-    };
-    let bindings = InputBindings::from(&config);
-    let router = InputRouter::new(bindings, ActiveMode::Spotlight);
-
     assert_eq!(
-        router.handle_wheel_for_owner("Ctrl", 1.0, 0, 0, PointerOwner::Spotlight),
+        router.handle_wheel_for_owner(Mods::CTRL, 1.0, 0, 0, PointerOwner::Spotlight),
         Some(InputAction::SpotlightWheel { delta: 1.0 })
     );
 }
 
 #[test]
 fn zoom_wheel_emits_zoom_wheel_action_in_zoom_mode() {
-    let bindings = InputBindings::from(&ShortcutConfig::default());
-    let router = InputRouter::new(bindings, ActiveMode::Spotlight);
+    let bindings = ShortcutConfig::default().validate().unwrap();
+    let input_bindings = InputBindings::from(&bindings);
+    let router = InputRouter::new(input_bindings, ActiveMode::Spotlight);
 
     assert_eq!(
-        router.handle_wheel_for_owner("Ctrl", -1.0, 100, 200, PointerOwner::Zoom),
+        router.handle_wheel_for_owner(Mods::CTRL, -1.0, 100, 200, PointerOwner::Zoom),
         Some(InputAction::ZoomWheel {
             delta: -1.0,
             cursor_x: 100,
-            cursor_y: 200
+            cursor_y: 200,
         })
     );
 }
 
 #[test]
 fn zoom_wheel_without_modifier_emits_nothing() {
-    let bindings = InputBindings::from(&ShortcutConfig::default());
-    let router = InputRouter::new(bindings, ActiveMode::Spotlight);
+    let bindings = ShortcutConfig::default().validate().unwrap();
+    let input_bindings = InputBindings::from(&bindings);
+    let router = InputRouter::new(input_bindings, ActiveMode::Spotlight);
 
     assert_eq!(
-        router.handle_wheel_for_owner("Shift", 1.0, 0, 0, PointerOwner::Zoom),
+        router.handle_wheel_for_owner(Mods::SHIFT, 1.0, 0, 0, PointerOwner::Zoom),
         None
     );
 }
 
 #[test]
 fn spotlight_mode_still_emits_spotlight_wheel_not_zoom_wheel() {
-    let bindings = InputBindings::from(&ShortcutConfig::default());
-    let router = InputRouter::new(bindings, ActiveMode::Spotlight);
+    let bindings = ShortcutConfig::default().validate().unwrap();
+    let input_bindings = InputBindings::from(&bindings);
+    let router = InputRouter::new(input_bindings, ActiveMode::Spotlight);
 
     assert_eq!(
-        router.handle_wheel_for_owner("Ctrl", 1.0, 50, 60, PointerOwner::Spotlight),
+        router.handle_wheel_for_owner(Mods::CTRL, 1.0, 50, 60, PointerOwner::Spotlight),
         Some(InputAction::SpotlightWheel { delta: 1.0 })
     );
 }
 
 #[test]
 fn annotation_mode_emits_nothing_on_wheel() {
-    let bindings = InputBindings::from(&ShortcutConfig::default());
-    let router = InputRouter::new(bindings, ActiveMode::Spotlight);
+    let bindings = ShortcutConfig::default().validate().unwrap();
+    let input_bindings = InputBindings::from(&bindings);
+    let router = InputRouter::new(input_bindings, ActiveMode::Spotlight);
 
     assert_eq!(
-        router.handle_wheel_for_owner("Ctrl", 1.0, 0, 0, PointerOwner::Annotation),
+        router.handle_wheel_for_owner(Mods::CTRL, 1.0, 0, 0, PointerOwner::Annotation),
         None
     );
 }
@@ -162,7 +149,7 @@ fn active_zoom_owns_wheel_even_when_the_previous_tool_was_spotlight() {
     });
 
     assert_eq!(
-        input.handle_wheel("Ctrl", -1.0, 100, 200),
+        input.handle_wheel(Mods::CTRL, -1.0, 100, 200),
         Some(InputAction::ZoomWheel {
             delta: -1.0,
             cursor_x: 100,
@@ -176,11 +163,12 @@ fn inactive_zoom_leaves_wheel_with_the_previous_tool() {
     let input = coordinator(InputStatus::default());
 
     assert_eq!(input.preferred_owner(), PointerOwner::Desktop);
-    assert_eq!(input.handle_wheel("Ctrl", 1.0, 100, 200), None);
+    assert_eq!(input.handle_wheel(Mods::CTRL, 1.0, 100, 200), None);
 }
 
 fn coordinator(status: InputStatus) -> InputCoordinator {
-    let mut input = InputCoordinator::new(InputBindings::from(&ShortcutConfig::default()));
+    let bindings = ShortcutConfig::default().validate().unwrap();
+    let mut input = InputCoordinator::new(InputBindings::from(&bindings));
     input.set_status(status);
     input
 }
@@ -227,7 +215,7 @@ fn annotation_owns_drawing_but_active_zoom_keeps_the_wheel() {
     });
 
     assert_eq!(input.preferred_owner(), PointerOwner::Annotation);
-    assert_eq!(input.handle_wheel("Ctrl", 1.0, 40, 50), None);
+    assert_eq!(input.handle_wheel(Mods::CTRL, 1.0, 40, 50), None);
 }
 
 #[test]
@@ -250,8 +238,8 @@ fn an_unavailable_annotation_backend_leaves_drawing_to_zoom() {
 
 #[test]
 fn local_keyboard_events_require_the_confirmed_owner_epoch() {
-    let bindings = InputBindings::from(&rpresent_config::ShortcutConfig::default());
-    let mut input = InputCoordinator::new(bindings);
+    let bindings = ShortcutConfig::default().validate().unwrap();
+    let mut input = InputCoordinator::new(InputBindings::from(&bindings));
     input.set_status(InputStatus {
         zoom_ready: true,
         zoom_active: true,
@@ -282,26 +270,15 @@ fn prepared_zoom_does_not_accept_a_gesture_before_it_commits() {
 }
 
 #[test]
-fn zoom_wheel_accepts_modifier_aliases() {
-    let input = coordinator(zoom_only());
-
-    assert_eq!(
-        input.handle_wheel("Control", 1.0, 40, 50),
-        Some(InputAction::ZoomWheel {
-            delta: 1.0,
-            cursor_x: 40,
-            cursor_y: 50,
-        })
-    );
-    assert_eq!(input.handle_wheel("Shift", 1.0, 40, 50), None);
-}
-
-#[test]
 fn annotation_mode_keeps_the_wheel_inactive_while_zoom_is_inactive() {
     let mut input = coordinator(InputStatus::default());
 
-    assert!(input.handle_key("Ctrl+2").is_some());
-    assert_eq!(input.handle_wheel("Ctrl", 1.0, 0, 0), None);
+    assert!(
+        input
+            .handle_key("Ctrl+2".parse::<KeyInput>().unwrap())
+            .is_some()
+    );
+    assert_eq!(input.handle_wheel(Mods::CTRL, 1.0, 0, 0), None);
 }
 
 #[test]
@@ -401,11 +378,11 @@ fn every_status_combination_selects_a_defined_owner_and_wheel_route() {
             _ => None,
         };
         assert_eq!(
-            input.handle_wheel("Ctrl", 1.0, -100, 200),
+            input.handle_wheel(Mods::CTRL, 1.0, -100, 200),
             expected_wheel,
             "bits {bits}"
         );
-        assert_eq!(input.handle_wheel("Shift", 1.0, 0, 0), None);
+        assert_eq!(input.handle_wheel(Mods::SHIFT, 1.0, 0, 0), None);
     }
 }
 

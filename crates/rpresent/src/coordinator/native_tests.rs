@@ -24,10 +24,10 @@ fn service(shape: SpotShape) -> Arc<ConfigService> {
     config.spotlight.dot_opacity = 1.0;
     config.spotlight.shade_color = "#000000".into();
     config.spotlight.shade_opacity = 0.6;
-    Arc::new(ConfigService::new(
-        PathBuf::from("native-test.toml"),
-        config,
-    ))
+    Arc::new(
+        ConfigService::new(PathBuf::from("native-test.toml"), config)
+            .expect("valid test configuration"),
+    )
 }
 
 fn drive(rig: &mut Rig, events: &mpsc::Receiver<AppEvent>, mut done: impl FnMut(&Rig) -> bool) {

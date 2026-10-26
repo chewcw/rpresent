@@ -1,6 +1,8 @@
-use rpresent_config::ShortcutConfig;
-
 use std::time::Duration;
+
+use rpresent_config::shortcuts::{
+    Binding, KeyInput, Mods, ShortcutAction, ShortcutDispatcher, ValidatedShortcuts,
+};
 
 use crate::command::{AnnotationCommand, AppCommand, SpotlightCommand, ZoomCommand};
 use crate::native_input::NativeEvent;
@@ -13,19 +15,15 @@ pub enum ActiveMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputBindings {
-    pub spotlight_mode: String,
-    pub annotation_mode: String,
-    pub zoom_mode: String,
-    pub wheel_modifier: String,
+    pub global: Vec<Binding>,
+    pub wheel_modifier: Mods,
 }
 
-impl From<&ShortcutConfig> for InputBindings {
-    fn from(config: &ShortcutConfig) -> Self {
+impl From<&ValidatedShortcuts> for InputBindings {
+    fn from(bindings: &ValidatedShortcuts) -> Self {
         Self {
-            spotlight_mode: config.spotlight_mode.clone(),
-            annotation_mode: config.annotation_mode.clone(),
-            zoom_mode: config.zoom_mode.clone(),
-            wheel_modifier: config.wheel_modifier.clone(),
+            global: bindings.global.clone(),
+            wheel_modifier: bindings.wheel,
         }
     }
 }
@@ -37,8 +35,8 @@ pub enum InputAction {
     },
     ZoomWheel {
         delta: f32,
-        cursor_x: i16,
-        cursor_y: i16,
+        cursor_x: i32,
+        cursor_y: i32,
     },
 }
 
@@ -210,17 +208,17 @@ impl InputCoordinator {
         self.owner != PointerOwner::Desktop && self.owner == self.preferred_owner()
     }
 
-    pub fn handle_key(&mut self, shortcut: &str) -> Option<AppCommand> {
-        self.router.handle_key(shortcut)
+    pub fn handle_key(&mut self, input: KeyInput) -> Option<AppCommand> {
+        self.router.handle_key(input)
     }
 
-    pub fn handle_wheel(&self, modifier: &str, delta: f32, x: i16, y: i16) -> Option<InputAction> {
+    pub fn handle_wheel(&self, modifiers: Mods, delta: f32, x: i32, y: i32) -> Option<InputAction> {
         self.router
-            .handle_wheel_for_owner(modifier, delta, x, y, self.preferred_owner())
+            .handle_wheel_for_owner(modifiers, delta, x, y, self.preferred_owner())
     }
 
-    pub fn matches_wheel_modifier(&self, modifier: &str) -> bool {
-        self.router.matches_wheel_modifier(modifier)
+    pub fn matches_wheel_modifier(&self, modifiers: Mods) -> bool {
+        self.router.matches_wheel_modifier(modifiers)
     }
 
     pub fn active_mode(&self) -> ActiveMode {
@@ -230,13 +228,16 @@ impl InputCoordinator {
 
 pub struct InputRouter {
     bindings: InputBindings,
+    dispatcher: ShortcutDispatcher,
     active_mode: ActiveMode,
 }
 
 impl InputRouter {
     pub fn new(bindings: InputBindings, active_mode: ActiveMode) -> Self {
+        let dispatcher = ShortcutDispatcher::new(&bindings.global);
         Self {
             bindings,
+            dispatcher,
             active_mode,
         }
     }
@@ -245,37 +246,34 @@ impl InputRouter {
         self.active_mode
     }
 
-    pub fn handle_key(&mut self, shortcut: &str) -> Option<AppCommand> {
-        if shortcut == self.bindings.spotlight_mode {
-            self.active_mode = ActiveMode::Spotlight;
-            return Some(AppCommand::Spotlight(SpotlightCommand::Toggle));
+    pub fn handle_key(&mut self, input: KeyInput) -> Option<AppCommand> {
+        match self.dispatcher.dispatch(input)? {
+            ShortcutAction::SpotlightToggle => {
+                self.active_mode = ActiveMode::Spotlight;
+                Some(AppCommand::Spotlight(SpotlightCommand::Toggle))
+            }
+            ShortcutAction::AnnotationToggle => {
+                self.active_mode = ActiveMode::Annotation;
+                Some(AppCommand::Annotation(AnnotationCommand::Toggle))
+            }
+            ShortcutAction::ZoomToggle => Some(AppCommand::Zoom(ZoomCommand::Toggle)),
+            _ => None,
         }
-
-        if shortcut == self.bindings.annotation_mode {
-            self.active_mode = ActiveMode::Annotation;
-            return Some(AppCommand::Annotation(AnnotationCommand::Toggle));
-        }
-
-        if shortcut == self.bindings.zoom_mode {
-            return Some(AppCommand::Zoom(ZoomCommand::Toggle));
-        }
-
-        None
     }
 
-    pub fn matches_wheel_modifier(&self, modifier: &str) -> bool {
-        normalize_modifier(modifier) == normalize_modifier(&self.bindings.wheel_modifier)
+    pub fn matches_wheel_modifier(&self, modifiers: Mods) -> bool {
+        modifiers == self.bindings.wheel_modifier
     }
 
     pub fn handle_wheel_for_owner(
         &self,
-        modifier: &str,
+        modifiers: Mods,
         delta: f32,
-        cursor_x: i16,
-        cursor_y: i16,
+        cursor_x: i32,
+        cursor_y: i32,
         owner: PointerOwner,
     ) -> Option<InputAction> {
-        if !self.matches_wheel_modifier(modifier) {
+        if !self.matches_wheel_modifier(modifiers) {
             return None;
         }
         match owner {
@@ -287,12 +285,5 @@ impl InputRouter {
             }),
             PointerOwner::Annotation | PointerOwner::Desktop => None,
         }
-    }
-}
-
-fn normalize_modifier(raw: &str) -> &str {
-    match raw {
-        "Control" => "Ctrl",
-        other => other,
     }
 }
