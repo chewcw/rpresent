@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use tempfile::tempdir;
 
-use rpresent::app::{ConfigInitCli, run_config_init};
+use rpresent::app::{Cli, CliSubcommand, ConfigSubcommand, run_config_init};
 use rpresent_config::load_from_str;
 
 #[test]
@@ -15,10 +15,16 @@ fn config_init_writes_default_config_file() {
     let config_path = tempdir.path().join("rpresent.toml");
 
     let cli =
-        ConfigInitCli::try_parse_from(["rpresent", "--config", config_path.to_str().unwrap()])
-            .unwrap();
+        Cli::try_parse_from(["rpresent", "config", "init", config_path.to_str().unwrap()]).unwrap();
 
-    let written_path = run_config_init(cli).unwrap();
+    let Some(CliSubcommand::Config {
+        command: ConfigSubcommand::Init(config_init),
+    }) = cli.subcommand
+    else {
+        panic!("expected config init subcommand");
+    };
+
+    let written_path = run_config_init(config_init).unwrap();
     assert_eq!(written_path, PathBuf::from(&config_path));
 
     let contents = fs::read_to_string(&written_path).unwrap();

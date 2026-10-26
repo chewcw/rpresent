@@ -26,8 +26,8 @@ Logs go to stderr by default. If `RUST_LOG` is unset, `rpresent` falls back to t
 Example commands for debugging:
 
 ```bash
-RUST_LOG=debug cargo run -p rpresent -- spot=toggle
-RUST_LOG=trace cargo run -p rpresent -- zoom=reset
+RUST_LOG=debug cargo run -p rpresent -- spot toggle
+RUST_LOG=trace cargo run -p rpresent -- zoom reset
 ```
 
 The `config init` command still writes the generated config path to stdout; that output is separate from log messages.
@@ -88,9 +88,9 @@ cargo run -p rpresent -- --help
 Send a command directly:
 
 ```bash
-cargo run -p rpresent -- spot=toggle
-cargo run -p rpresent -- annotation=tool=line
-cargo run -p rpresent -- zoom=reset
+cargo run -p rpresent -- spot toggle
+cargo run -p rpresent -- annotation tool line
+cargo run -p rpresent -- zoom reset
 ```
 
 Start the app without a command to launch the daemon and route configured shortcuts:
@@ -110,7 +110,7 @@ cargo run -p rpresent -- config init
 To choose a specific path:
 
 ```bash
-cargo run -p rpresent -- config init --config ~/.config/rpresent/config.toml
+cargo run -p rpresent -- config init ~/.config/rpresent/config.toml
 ```
 
 `config init` writes the default config and will not overwrite an existing file.
@@ -176,7 +176,7 @@ When the daemon starts without a command it enters an idle loop — no overlay a
 
 **Activate zoom mode:**
 - Press the configured zoom shortcut (the default is `Ctrl+3`) to toggle zoom on/off.
-- Or send a command directly: `cargo run -p rpresent -- zoom=on` / `zoom=off`.
+- Or send a command directly: `cargo run -p rpresent -- zoom on` / `zoom off`.
 
 Activation captures the monitor under the pointer once, before the opaque zoom window is shown. The image remains fixed until zoom is closed. Moving the pointer alone does not move the image.
 
@@ -189,7 +189,7 @@ While zoom owns input, hold the configured wheel modifier (the default is `Ctrl`
 
 **Reset zoom:**
 ```bash
-cargo run -p rpresent -- zoom=reset
+cargo run -p rpresent -- zoom reset
 ```
 Restores the initial scale and re-centers the magnified view without capturing again. The next activation captures a fresh screenshot.
 
@@ -223,7 +223,7 @@ A drawing toolbar appears automatically while editing, at the top of the monitor
 Colors can also be selected from the command line; quote the value so the shell keeps the `#`:
 
 ```bash
-cargo run -p rpresent -- 'annotation=color=#00FF00'
+cargo run -p rpresent -- annotation color '#00FF00'
 ```
 
 Deferred for now: IME input, automatic text wrapping, partial-stroke erasing, and disk persistence.
@@ -235,10 +235,16 @@ Deferred for now: IME input, automatic text wrapping, partial-stroke erasing, an
 
 ## Notes
 
-The top-level command parser accepts these routed commands:
+The CLI exposes structured subcommands for the overlay commands:
 
-- `spot=...`
-- `annotation=...`
-- `zoom=...`
+- `spot <on|off|toggle>`
+- `zoom <on|off|toggle|reset>`
+- `annotation <on|off|toggle|clear|undo|redo|delete>`
+- `annotation tool <select|pen|line|arrow|rect|eraser|text>`
+- `annotation color <#RRGGBB|next|prev>`
+- `annotation width <N|next|prev>`
+- `annotation text-size <N|next|prev>`
+
+`rpresent send <COMMAND>` is the escape hatch for legacy command strings such as `spot=toggle`. It parses the same `spot=...`, `annotation=...`, and `zoom=...` grammar and sends the result over the same IPC channel.
 
 Use `--config` with the main CLI to point at a different configuration file when running or sending commands.

@@ -1,13 +1,15 @@
-use clap::Parser;
-use std::ffi::OsString;
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
 
-use rpresent_annotation::{AnnotationEventSink, channel as annotation_channel};
+use rpresent_annotation::{
+    AnnotationCommand, AnnotationEventSink, AnnotationTool, Preset, Rgb,
+    channel as annotation_channel, parse_rgb,
+};
 use rpresent_config::{ConfigService, default_config_path, write_default_config};
-use rpresent_spotlight::SpotlightRuntimeMessage;
-use rpresent_zoom::{channel as zoom_channel, run_overlay};
+use rpresent_spotlight::{SpotlightCommand, SpotlightRuntimeMessage};
+use rpresent_zoom::{ZoomCommand, channel as zoom_channel, run_overlay};
 
 use crate::command::AppCommand;
 use crate::coordinator::{Coordinator, CoordinatorOutputs};
@@ -15,38 +17,218 @@ use crate::input::AppEvent;
 use crate::ipc;
 use crate::native_input::channel as native_channel;
 
-#[derive(Debug, Parser, Clone, PartialEq, Eq)]
+#[derive(Debug, Parser, PartialEq, Eq)]
 #[command(
     version,
     about = "Presentation shell and command router",
-    long_about = None,
-    after_long_help = "Examples:\n  rpresent spot=toggle\n  rpresent annotation=tool=line\n  rpresent zoom=reset\n  rpresent config init --config ~/.config/rpresent/config.toml"
+    long_about = "Presentation shell and command router.\n\nRun with no subcommand to start the daemon.",
+    after_long_help = "Examples:\n  rpresent\n  rpresent --config /tmp/rpresent.toml spot toggle\n  rpresent annotation tool line\n  rpresent send 'annotation=color=#00FF00'\n  rpresent config init"
 )]
 pub struct Cli {
-    #[arg(long)]
+    /// Config file to use instead of the default path
+    #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
-    #[arg(value_name = "COMMAND")]
-    pub command: Option<String>,
+    #[command(subcommand)]
+    pub subcommand: Option<CliSubcommand>,
 }
 
-#[derive(Debug, Parser, Clone, PartialEq, Eq)]
-#[command(version, about = "Write the default config file", long_about = None)]
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum CliSubcommand {
+    /// Write the default config file
+    Config {
+        #[command(subcommand)]
+        command: ConfigSubcommand,
+    },
+    /// Escape hatch for legacy command strings not covered by the structured subcommands
+    Send(SendCli),
+    /// Send a spotlight command
+    Spot(SpotArgs),
+    /// Send a zoom command
+    Zoom(ZoomArgs),
+    /// Send an annotation command
+    Annotation {
+        #[command(subcommand)]
+        command: AnnotationCli,
+    },
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum ConfigSubcommand {
+    /// Write the default config file without overwriting an existing one
+    Init(ConfigInitCli),
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
 pub struct ConfigInitCli {
-    #[arg(long)]
-    pub config: Option<PathBuf>,
+    /// Destination path; defaults to the built-in config path
+    #[arg(value_name = "PATH")]
+    pub path: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AppMode {
-    Run,
-    Send(AppCommand),
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct SendCli {
+    /// Command string routed through the legacy parser, for example `spot=toggle`
+    #[arg(value_name = "COMMAND")]
+    pub command: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AppEntry {
-    Run(Cli),
-    InitConfig(ConfigInitCli),
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct SpotArgs {
+    /// Spotlight action to apply
+    #[arg(value_enum, value_name = "ACTION")]
+    pub action: SpotAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SpotAction {
+    /// Turn the spotlight on
+    On,
+    /// Turn the spotlight off
+    Off,
+    /// Flip the spotlight between on and off
+    Toggle,
+}
+
+impl From<SpotArgs> for SpotlightCommand {
+    fn from(args: SpotArgs) -> Self {
+        match args.action {
+            SpotAction::On => Self::On,
+            SpotAction::Off => Self::Off,
+            SpotAction::Toggle => Self::Toggle,
+        }
+    }
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct ZoomArgs {
+    /// Zoom action to apply
+    #[arg(value_enum, value_name = "ACTION")]
+    pub action: ZoomAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ZoomAction {
+    /// Turn zoom on
+    On,
+    /// Turn zoom off
+    Off,
+    /// Flip zoom between on and off
+    Toggle,
+    /// Return the view to its unzoomed state
+    Reset,
+}
+
+impl From<ZoomArgs> for ZoomCommand {
+    fn from(args: ZoomArgs) -> Self {
+        match args.action {
+            ZoomAction::On => Self::On,
+            ZoomAction::Off => Self::Off,
+            ZoomAction::Toggle => Self::Toggle,
+            ZoomAction::Reset => Self::Reset,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum AnnotationCli {
+    /// Turn the annotation overlay on
+    On,
+    /// Turn the annotation overlay off
+    Off,
+    /// Toggle the annotation overlay
+    Toggle,
+    /// Clear every annotation
+    Clear,
+    /// Undo the last annotation change
+    Undo,
+    /// Redo the last undone annotation change
+    Redo,
+    /// Delete the current selection
+    Delete,
+    /// Select the drawing tool
+    Tool(ToolArgs),
+    /// Set the drawing color
+    Color(ColorArgs),
+    /// Set the stroke width
+    Width(SizeArgs),
+    /// Set the text size
+    TextSize(SizeArgs),
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct ToolArgs {
+    /// Tool name: select, pen, line, arrow, rect, eraser, or text
+    #[arg(value_name = "TOOL", value_parser = parse_tool)]
+    pub tool: AnnotationTool,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct ColorArgs {
+    /// Color as #RRGGBB, or next / prev to cycle the palette
+    #[arg(value_name = "COLOR", value_parser = parse_color)]
+    pub color: Preset<Rgb>,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct SizeArgs {
+    /// Positive integer, or next / prev to cycle the presets
+    #[arg(value_name = "VALUE", value_parser = parse_size)]
+    pub value: Preset<u32>,
+}
+
+impl From<AnnotationCli> for AnnotationCommand {
+    fn from(cli: AnnotationCli) -> Self {
+        match cli {
+            AnnotationCli::On => Self::On,
+            AnnotationCli::Off => Self::Off,
+            AnnotationCli::Toggle => Self::Toggle,
+            AnnotationCli::Clear => Self::Clear,
+            AnnotationCli::Undo => Self::Undo,
+            AnnotationCli::Redo => Self::Redo,
+            AnnotationCli::Delete => Self::Delete,
+            AnnotationCli::Tool(args) => Self::Tool(args.tool),
+            AnnotationCli::Color(args) => Self::Color(args.color),
+            AnnotationCli::Width(args) => Self::Width(args.value),
+            AnnotationCli::TextSize(args) => Self::TextSize(args.value),
+        }
+    }
+}
+
+fn parse_tool(value: &str) -> Result<AnnotationTool, String> {
+    match value {
+        "select" => Ok(AnnotationTool::Select),
+        "pen" => Ok(AnnotationTool::Pen),
+        "line" => Ok(AnnotationTool::Line),
+        "arrow" => Ok(AnnotationTool::Arrow),
+        "rect" => Ok(AnnotationTool::Rect),
+        "eraser" => Ok(AnnotationTool::Eraser),
+        "text" => Ok(AnnotationTool::Text),
+        other => Err(format!(
+            "invalid tool {other}: expected select, pen, line, arrow, rect, eraser, or text"
+        )),
+    }
+}
+
+fn parse_color(value: &str) -> Result<Preset<Rgb>, String> {
+    match value {
+        "next" => Ok(Preset::Next),
+        "prev" => Ok(Preset::Prev),
+        other => parse_rgb(other)
+            .map(Preset::Value)
+            .map_err(|error| error.to_string()),
+    }
+}
+
+fn parse_size(value: &str) -> Result<Preset<u32>, String> {
+    match value {
+        "next" => Ok(Preset::Next),
+        "prev" => Ok(Preset::Prev),
+        other => other
+            .parse::<u32>()
+            .map(Preset::Value)
+            .map_err(|_| "expected a positive integer, next, or prev".to_owned()),
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -67,52 +249,10 @@ pub enum AppError {
     Zoom(#[from] rpresent_zoom::OverlayError),
 }
 
-#[tracing::instrument(level = "debug", skip(args))]
-pub fn parse_entrypoint(args: Vec<OsString>) -> Result<AppEntry, AppError> {
-    tracing::debug!(arg_count = args.len(), "parsing entrypoint");
-
-    if args.get(1).and_then(|arg| arg.to_str()) == Some("config")
-        && args.get(2).and_then(|arg| arg.to_str()) == Some("init")
-    {
-        tracing::debug!("resolved config init entrypoint");
-
-        let filtered_args = std::iter::once(args[0].clone())
-            .chain(args.into_iter().skip(3))
-            .collect::<Vec<_>>();
-        let cli = ConfigInitCli::try_parse_from(filtered_args)?;
-        return Ok(AppEntry::InitConfig(cli));
-    }
-
-    tracing::debug!("resolved run entrypoint");
-
-    Ok(AppEntry::Run(Cli::try_parse_from(args)?))
-}
-
-#[tracing::instrument(level = "debug", skip(cli))]
-pub fn resolve_mode(cli: &Cli) -> Result<AppMode, AppError> {
-    tracing::debug!(command = ?cli.command, "resolving app mode");
-
-    match cli.command.as_deref() {
-        Some(command) => {
-            tracing::debug!(command = %command, "resolved send mode");
-            Ok(AppMode::Send(command.parse()?))
-        }
-        None => {
-            tracing::debug!("resolved run mode");
-            Ok(AppMode::Run)
-        }
-    }
-}
-
 pub fn run_from_env() -> Result<(), AppError> {
-    match parse_entrypoint(std::env::args_os().collect()) {
-        Ok(AppEntry::Run(cli)) => run(cli),
-        Ok(AppEntry::InitConfig(cli)) => {
-            let written_path = run_config_init(cli)?;
-            println!("{}", written_path.display());
-            Ok(())
-        }
-        Err(AppError::Clap(error))
+    let mut cli = match Cli::try_parse_from(std::env::args_os()) {
+        Ok(cli) => cli,
+        Err(error)
             if matches!(
                 error.kind(),
                 clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
@@ -120,7 +260,32 @@ pub fn run_from_env() -> Result<(), AppError> {
         {
             error.exit();
         }
-        Err(error) => Err(error),
+        Err(error) => return Err(error.into()),
+    };
+
+    tracing::debug!(subcommand = ?cli.subcommand, "parsed entrypoint");
+
+    let Some(subcommand) = cli.subcommand.take() else {
+        return run(cli);
+    };
+
+    match subcommand {
+        CliSubcommand::Config {
+            command: ConfigSubcommand::Init(config_init),
+        } => {
+            let written_path = run_config_init(config_init)?;
+            println!("{}", written_path.display());
+            Ok(())
+        }
+        CliSubcommand::Send(send) => {
+            let command = send.command.parse().map_err(AppError::Command)?;
+            send_command(cli.config, command)
+        }
+        CliSubcommand::Spot(args) => send_command(cli.config, AppCommand::Spotlight(args.into())),
+        CliSubcommand::Zoom(args) => send_command(cli.config, AppCommand::Zoom(args.into())),
+        CliSubcommand::Annotation { command } => {
+            send_command(cli.config, AppCommand::Annotation(command.into()))
+        }
     }
 }
 
@@ -128,39 +293,36 @@ pub fn run_from_env() -> Result<(), AppError> {
 pub fn run(cli: Cli) -> Result<(), AppError> {
     tracing::debug!(config_override = cli.config.is_some(), "starting app run");
 
-    let mode = resolve_mode(&cli)?;
-    tracing::debug!(mode = ?mode, "resolved app mode");
+    let config_service = load_config_service(cli.config)?;
+    tracing::debug!("entering daemon mode");
+    run_daemon(config_service)
+}
 
-    let config_path = match cli.config {
+fn load_config_service(config: Option<PathBuf>) -> Result<Arc<ConfigService>, AppError> {
+    let config_path = match config {
         Some(path) => path,
         None => default_config_path()?,
     };
     tracing::debug!(config_path = %config_path.display(), "loading configuration");
 
-    let config_service = Arc::new(ConfigService::load_or_default(config_path)?);
+    Ok(Arc::new(ConfigService::load_or_default(config_path)?))
+}
 
-    match mode {
-        AppMode::Send(command) => {
-            let socket_path = ipc::socket_path_for(&config_service.app().socket_name)?;
-            tracing::debug!(socket_path = %socket_path.display(), "sending command to daemon");
-            ipc::send_command(&socket_path, command)?;
-            Ok(())
-        }
-        AppMode::Run => {
-            tracing::debug!("entering daemon mode");
-            run_daemon(config_service)
-        }
-    }
+#[tracing::instrument(level = "debug", skip(command))]
+fn send_command(config: Option<PathBuf>, command: AppCommand) -> Result<(), AppError> {
+    let config_service = load_config_service(config)?;
+    let socket_path = ipc::socket_path_for(&config_service.app().socket_name)?;
+    tracing::debug!(socket_path = %socket_path.display(), command = %command, "sending command to daemon");
+
+    ipc::send_command(&socket_path, command)?;
+    Ok(())
 }
 
 #[tracing::instrument(level = "debug", skip(cli))]
 pub fn run_config_init(cli: ConfigInitCli) -> Result<PathBuf, AppError> {
-    tracing::debug!(
-        config_override = cli.config.is_some(),
-        "writing default config"
-    );
+    tracing::debug!(path_override = cli.path.is_some(), "writing default config");
 
-    let config_path = match cli.config {
+    let config_path = match cli.path {
         Some(path) => path,
         None => default_config_path()?,
     };

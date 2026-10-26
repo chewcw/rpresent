@@ -2,21 +2,21 @@
 socket_name = "rpresent.sock"
 
 [spotlight]
-enabled_on_start = false
+enabled_on_start = true
 show_spot_shade = true
 show_center_dot = true
 dot_size_px = 8
-dot_color = "#ff0000"
-dot_opacity = 0.8
+dot_color = "#ffffff"
+dot_opacity = 0.800000011920929
 shade_color = "#000000"
-shade_opacity = 0.95
-show_border = false
-border_color = "#bada55"
-border_size_pct = 2
-border_opacity = 0.3
-wheel_speed = 60.0
-softness_px = 20
-radius_px = 150
+shade_opacity = 0.6000000238418579
+show_border = true
+border_color = "#ffffff"
+border_size_pct = 10
+border_opacity = 0.800000011920929
+radius_px = 240
+softness_px = 80
+wheel_speed = 12.0
 
 [spotlight.shape]
 type = "circle"
@@ -24,11 +24,28 @@ type = "circle"
 [annotation]
 enabled_on_start = false
 default_tool = "pen"
-colors = ["#FF0000", "#FFFF00", "#00FF00", "#00FFFF", "#FFFFFF", "#000000"]
+colors = [
+    "#FF0000",
+    "#FFFF00",
+    "#00FF00",
+    "#00FFFF",
+    "#FFFFFF",
+    "#000000",
+]
 color = "#FF0000"
-stroke_widths_px = [2, 4, 6, 10]
+stroke_widths_px = [
+    2,
+    4,
+    6,
+    10,
+]
 stroke_width_px = 6
-text_sizes_px = [16, 24, 32, 48]
+text_sizes_px = [
+    16,
+    24,
+    32,
+    48,
+]
 text_size_px = 24
 history_depth = 64
 
@@ -41,10 +58,28 @@ scroll_speed = 0.25
 drag_friction = 6.0
 scale_friction = 5.0
 
+[shortcuts.global]
+"annotation.toggle" = "Ctrl+2"
+"spotlight.toggle" = "Ctrl+1"
+"zoom.toggle" = "Ctrl+3"
+
+[shortcuts.annotation]
+"annotation.color.next" = "c"
+"annotation.color.prev" = "C"
+"annotation.delete" = "Delete"
+"annotation.redo" = "Ctrl+Z"
+"annotation.text-size.next" = "="
+"annotation.text-size.prev" = "-"
+"annotation.tool.arrow" = "a"
+"annotation.tool.eraser" = "e"
+"annotation.tool.line" = "l"
+"annotation.tool.pen" = "p"
+"annotation.tool.rect" = "r"
+"annotation.tool.select" = "v"
+"annotation.tool.text" = "t"
+"annotation.undo" = "Ctrl+z"
+"annotation.width.next" = "]"
+"annotation.width.prev" = "["
+
 [shortcuts.wheel]
 modifiers = "Ctrl"
-
-[shortcuts.global]
-"spotlight.toggle" = "Ctrl+!"
-"annotation.toggle" = "Ctrl+@"
-"zoom.toggle" = "Ctrl+#"
