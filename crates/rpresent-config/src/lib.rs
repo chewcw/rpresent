@@ -1,6 +1,8 @@
 mod config;
 mod service;
 
+pub mod shortcuts;
+
 pub use config::{
     AnnotationConfig, AnnotationTool, AppConfig, Config, ConfigError, ShortcutConfig, SpotShape,
     SpotlightConfig, ZoomConfig, default_config_path, default_config_toml, load_from_path,

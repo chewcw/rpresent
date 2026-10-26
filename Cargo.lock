@@ -487,6 +487,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "keybinds"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a039c6f55b34108f8ec8caa617cbaa17232ff08ccc9e3d656a41ec974e09d322"
+dependencies = [
+ "bitflags 2.11.1",
+ "smallvec",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -760,6 +770,7 @@ name = "rpresent-config"
 version = "0.1.0"
 dependencies = [
  "directories",
+ "keybinds",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
