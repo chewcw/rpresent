@@ -1,43 +1,45 @@
 # rpresent
 
-`rpresent` is a Linux/X11 presentation shell for toggling spotlight, annotation, and zoom overlays from the command line or through configured shortcuts.
+`rpresent` is a Linux/X11 presentation daemon with three overlays:
 
-## Workspace Layout
+- spotlight, which follows the pointer and shades the rest of the screen
+- annotation, which provides pen, line, arrow, rectangle, text, and eraser tools
+- zoom, which magnifies a captured monitor image
 
-This repository is a Rust workspace with five crates:
+The daemon runs in the background. The CLI sends commands to it over a Unix socket, and configured X11 shortcuts can send the same commands.
 
-- `crates/rpresent-config` - shared TOML config loading, defaults, and config-file writing
-- `crates/rpresent-spotlight` - spotlight state and overlay rendering
-- `crates/rpresent-annotation` - editable pen, line, text, and eraser annotations
-- `crates/rpresent-zoom` - frozen screenshot capture and OpenGL magnified rendering
-- `crates/rpresent` - CLI, IPC, shortcut routing, and runtime composition
+## Workspace layout
+
+- `crates/rpresent-config` loads TOML configuration, applies defaults, and validates shortcuts.
+- `crates/rpresent-spotlight` renders the spotlight overlay.
+- `crates/rpresent-annotation` manages drawing objects, text editing, undo and redo, and the annotation toolbar.
+- `crates/rpresent-zoom` captures a monitor and renders the magnified image with GLX/OpenGL.
+- `crates/rpresent` contains the CLI, Unix-socket IPC, shortcut routing, and runtime coordinator.
 
 ## Requirements
 
+- Linux with an X11 session
 - Rust 2024 toolchain
-- Linux with X11 support
+- X11 development libraries and `pkg-config` to build
+- An X11 compositor for the transparent spotlight and annotation windows
+- GLX 1.3 and OpenGL 3.3 with GLSL 330 support for zoom
 
-The spotlight overlay uses X11 on Linux. It opens one overlay window, tracks the cursor, and redraws the spotlight mask from the current spotlight state. Transparent compositing requires a running compositor on the desktop session. The software render path requires MIT-SHM 1.2, DAMAGE, and SHAPE 1.1; the daemon exits with an error when a required extension is missing. It writes frames through shared memory and re-renders only the rectangle that the cursor moved across.
+The spotlight backend also requires these X11 extensions:
 
-## Logging
+- DAMAGE
+- MIT-SHM 1.2
+- SHAPE 1.1
 
-Logs go to stderr by default. If `RUST_LOG` is unset, `rpresent` falls back to the `info` level.
+The server must provide a 32-bit-per-pixel visual. Circular spotlights use XRender when the required visual is available. Other spotlight shapes use the MIT-SHM renderer.
 
-Example commands for debugging:
+Wayland is not supported. The release workflow builds an x86_64 Linux binary.
 
-```bash
-RUST_LOG=debug cargo run -p rpresent -- spot toggle
-RUST_LOG=trace cargo run -p rpresent -- zoom reset
-```
+## Build and test
 
-The `config init` command still writes the generated config path to stdout; that output is separate from log messages.
-
-## Build and Test
-
-Run the full workspace test suite:
+Run the workspace tests:
 
 ```bash
-cargo test --workspace
+cargo test --workspace --locked
 ```
 
 Format the code:
@@ -46,12 +48,15 @@ Format the code:
 cargo fmt
 ```
 
-## Install
+The CI job also runs Clippy with warnings treated as errors:
 
-Open the repository's GitHub Releases page and download both
-`rpresent-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` and `SHA256SUMS`.
+```bash
+cargo clippy --workspace --all-targets -- -D warnings
+```
 
-Verify the archive, extract it, and install the binary on `PATH`:
+## Install a release
+
+Download the release archive and `SHA256SUMS` from the repository's GitHub Releases page. Verify and extract the archive:
 
 ```bash
 sha256sum -c SHA256SUMS
@@ -59,75 +64,94 @@ tar -xzf rpresent-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz
 sudo install -m 755 rpresent-vX.Y.Z-x86_64-unknown-linux-gnu/rpresent /usr/local/bin/rpresent
 ```
 
-On Debian and Ubuntu, install the runtime libraries the binary links against:
+On Debian or Ubuntu, install the runtime libraries:
 
 ```bash
 sudo apt-get install libx11-6 libgl1
 ```
 
-The archive also ships the example `config.toml`. Copy it into the config
-directory before the first run:
+Each archive includes the example `config.toml`. Install it before the first run if you want an explicit configuration file:
 
 ```bash
 mkdir -p ~/.config/rpresent
 cp rpresent-vX.Y.Z-x86_64-unknown-linux-gnu/config.toml ~/.config/rpresent/config.toml
 ```
 
-Releases support Linux/X11 on x86_64 only, and they do not support Wayland.
-Within an X11 session, transparent compositing still requires a running
-compositor, as described under Requirements.
-
 ## Run
 
-Show the CLI help:
+Start the daemon with the default configuration path:
 
 ```bash
-cargo run -p rpresent -- --help
+rpresent
 ```
 
-Send a command directly:
+A missing configuration file uses the built-in defaults. To use another file, pass `--config` before the subcommand:
 
 ```bash
-cargo run -p rpresent -- spot toggle
-cargo run -p rpresent -- annotation tool line
-cargo run -p rpresent -- zoom reset
+rpresent --config /path/to/config.toml
 ```
 
-Start the app without a command to launch the daemon and route configured shortcuts:
+Send commands from another shell:
 
 ```bash
-cargo run -p rpresent
+rpresent spot toggle
+rpresent annotation tool arrow
+rpresent zoom reset
+```
+
+The structured command forms are:
+
+```text
+spot <on|off|toggle>
+zoom <on|off|toggle|reset>
+annotation <on|off|toggle|clear|undo|redo|delete>
+annotation tool <select|pen|line|arrow|rect|eraser|text>
+annotation color <#RRGGBB|next|prev>
+annotation width <N|next|prev>
+annotation text-size <N|next|prev>
+```
+
+`config init` writes a default configuration and does not overwrite an existing file:
+
+```bash
+rpresent config init
+rpresent config init ~/.config/rpresent/config.toml
+```
+
+The command prints the path it wrote to stdout. Logs go to stderr. If `RUST_LOG` is unset, the daemon uses the `info` level.
+
+The `send` subcommand accepts the legacy command strings:
+
+```bash
+rpresent send 'spot=toggle'
+rpresent send 'annotation=color=#00FF00'
+rpresent send 'zoom=reset'
 ```
 
 ## Configuration
 
-The app reads its config from the XDG config directory by default. To write a fresh config file:
+By default, `rpresent` reads:
 
-```bash
-cargo run -p rpresent -- config init
+```text
+~/.config/rpresent/config.toml
 ```
 
-To choose a specific path:
-
-```bash
-cargo run -p rpresent -- config init ~/.config/rpresent/config.toml
-```
-
-`config init` writes the default config and will not overwrite an existing file.
+The checked-in `config.toml` is a complete example. Configuration uses strict TOML parsing, so removed or unknown keys produce an error.
 
 ### Shortcuts
 
-Shortcuts are configured with two scoped action tables and one wheel modifier:
+The default global shortcuts are:
 
 ```toml
-[shortcuts.wheel]
-modifiers = "Ctrl"
-
 [shortcuts.global]
-"spotlight.toggle" = "Ctrl+1"
-"annotation.toggle" = "Ctrl+2"
-"zoom.toggle" = "Ctrl+3"
+"spotlight.toggle" = "Ctrl+Alt+1"
+"annotation.toggle" = "Ctrl+Alt+2"
+"zoom.toggle" = "Ctrl+Alt+3"
+```
 
+The default annotation shortcuts are:
+
+```toml
 [shortcuts.annotation]
 "annotation.undo" = "Ctrl+z"
 "annotation.redo" = "Ctrl+Z"
@@ -148,104 +172,79 @@ modifiers = "Ctrl"
 "annotation.text-size.next" = "="
 ```
 
-The defaults shown above are also what an omitted scope uses.
+The default wheel modifier is `Ctrl`:
 
-- An omitted scope uses defaults. An explicit scope replaces its entire map. An empty scope disables its configurable bindings.
-- Character keys are case sensitive. `Super+Z` means the uppercase character, which is Shift plus `z` on the keyboard, and `Ctrl+z` differs from `Ctrl+Z`. Use `Ctrl+Z`, not `Ctrl+Shift+z`, for the default redo binding.
-- Wheel combinations use the package modifier names such as `Super+Shift`. `Meta` is not a supported application alias.
-- Global bindings take precedence. Annotation canvas bindings never intercept an active text draft.
-- Keyboard shortcuts follow the current layout. Caps Lock and Num Lock do not change shortcut matching, while typed text still reflects them.
-- A binding this display cannot register, or a grab conflict, is an error. Nothing silently falls back.
-
-The shortcut backend is an implementation boundary used by the Linux/X11 input thread; no other platform is implemented.
-
-### Spotlight settings
-
-The spotlight uses one configured radius and one shade opacity for every render path:
-
-- `radius_px` is the spotlight radius in pixels. Wheel resizing changes this live value for circles and other shapes.
-- `shade_opacity` is the final shade alpha outside the spotlight fade.
-- `softness_px` is the outward fade width in pixels. It affects the shade only.
-
-The built-in defaults are `radius_px = 240`, `shade_opacity = 0.6`, and `softness_px = 80`. The repository example keeps `radius_px = 150`, `shade_opacity = 1.0`, and `softness_px = 50`.
-
-Existing configurations must remove `dim_alpha` and `spot_size_pct`. To migrate a percentage radius, use `max(floor(screen_height * spot_size_pct / 100), 25)` for `radius_px`. If the old XRender opacity is preferred, copy `dim_alpha` to `shade_opacity` before removing it. Removed keys now produce the normal unknown-field parse error.
-
-## Zoom
-
-When the daemon starts without a command it enters an idle loop — no overlay appears until a shortcut or IPC command triggers one.
-
-**Activate zoom mode:**
-- Press the configured zoom shortcut (the default is `Ctrl+3`) to toggle zoom on/off.
-- Or send a command directly: `cargo run -p rpresent -- zoom on` / `zoom off`.
-
-Activation captures the monitor under the pointer once, before the opaque zoom window is shown. The image remains fixed until zoom is closed. Moving the pointer alone does not move the image.
-
-Spotlight and zoom can be active together. Visual and mouse-input priority follow annotation editing, spotlight, zoom, then the desktop. Finished annotation artwork remains visible and click-through when editing is off.
-
-When spotlight is active, the configured modifier-wheel gesture resizes spotlight. Spotlight consumes left-button dragging and other unsupported mouse actions. Disable spotlight to use zoom wheel and drag controls.
-
-**Change zoom level:**
-While zoom owns input, hold the configured wheel modifier (the default is `Ctrl`) and scroll the mouse wheel. Wheel direction reverses immediately, and the pointer position stays anchored in the screenshot. Hold the left mouse button to pan; releasing it continues the pan with time-based inertia.
-
-**Reset zoom:**
-```bash
-cargo run -p rpresent -- zoom reset
-```
-Restores the initial scale and re-centers the magnified view without capturing again. The next activation captures a fresh screenshot.
-
-Activating spotlight or annotation editing cancels the current zoom drag and its remaining pan or scale motion. Input returns to zoom after the higher layer releases it. A new button press is required before zoom can pan again. Global mode shortcuts and explicit CLI/IPC commands remain available.
-
-## Annotations
-
-Press the configured annotation shortcut (the default is `Ctrl+2`) to start editing. The annotation window follows the root desktop coordinates.
-
-While annotation editing owns input, spotlight stays at its last rendered position, including its center dot. Hovering, drawing, moving objects, erasing, and editing text do not move it. When editing stops, spotlight moves to the current pointer position after it regains input ownership. Finished artwork alone does not hold spotlight in place.
-
-- Tools follow the configured bindings. The defaults are `v` Select, `p` Pen, `l` Line, `a` Arrow, `r` Rect, `e` Eraser, and `t` Text.
-- The Arrow tool draws a straight shaft with an open V-shaped head at the drag end. The head scales with the stroke width. Only the shaft and head are selectable and erasable. The open area between the barbs is not a hit.
-- The Rect tool draws an outlined rectangle. Only its edges are selectable and erasable. Its interior is not.
-- `c` cycles colors forward and `C` backward. `[` and `]` cycle stroke widths, and `-` and `=` cycle text sizes.
-- `Ctrl+z` undoes, `Ctrl+Z` redoes, `Delete` removes the selected object, and `x` clears every annotation. `Ctrl+Y` is not a default redo binding.
-- Press Enter to commit text, Shift+Enter to insert a newline, and Escape to cancel the draft.
-- `Ctrl+V` pastes clipboard text into the current text draft.
-- The eraser deletes whole objects, and drag with the Select tool moves one object.
-- Turning annotation off keeps finished artwork visible but click-through. Input returns to spotlight if it is active, then zoom, then the desktop.
-
-A drawing toolbar appears automatically while editing, at the top of the monitor under the pointer (or of the root desktop when monitor information is unavailable). It offers the tools, the configured color, stroke-width, and text-size pickers, and the Undo, Redo, Delete, Clear, and Exit actions. Preset pickers only appear for the active tool, and actions that would do nothing are disabled.
-
-- Drag the handle to move the toolbar. It stays within a visible monitor, can be dragged onto another monitor, and wraps onto extra rows when a monitor is too narrow. Its position is remembered for the current daemon session only and is never saved to disk.
-- Clicking a picker opens it; clicking another picker replaces it; clicking outside dismisses it without drawing or changing the selection; Escape closes an open picker before any other Escape behavior.
-- Clear erases all committed objects immediately, without a confirmation dialog, and the next Undo restores them exactly.
-- Exit stops editing while finished artwork stays visible and click-through.
-- Choosing a tool or preset from the toolbar cancels an uncommitted text draft. Canvas shortcut bindings do not apply while a draft is active, so typing a shortcut letter inserts text instead.
-- Toolbar Undo and Redo act on the document history; `Ctrl+Z` while editing text remains local to the draft.
-
-Colors can also be selected from the command line; quote the value so the shell keeps the `#`:
-
-```bash
-cargo run -p rpresent -- annotation color '#00FF00'
+```toml
+[shortcuts.wheel]
+modifiers = "Ctrl"
 ```
 
-Deferred for now: IME input, automatic text wrapping, partial-stroke erasing, and disk persistence.
+An omitted scope uses its defaults. An explicit scope replaces the whole scope. An empty table disables that scope. Character bindings are case-sensitive, so `Ctrl+z` and `Ctrl+Z` are different bindings. `Meta` is not an application alias for `Super`.
 
-**Known limitations:**
-- Linux/X11 only; Wayland is not supported.
-- Linux/X11 GLX with OpenGL 3.3-compatible shaders is required. The renderer uses an opaque window and does not require a compositor.
-- `follow_cursor`, `pan_friction`, and `capture_target` are removed configuration keys. Use `drag_friction` and `scale_friction` for motion damping.
+A shortcut that cannot register, including one that conflicts with another grab, is an error. Global bindings take precedence over annotation bindings. Annotation canvas bindings do not intercept text entered into an active text draft.
 
-## Notes
+### Spotlight
 
-The CLI exposes structured subcommands for the overlay commands:
+The spotlight has a configurable shade, border, center dot, radius, and fade width. Its default values are:
 
-- `spot <on|off|toggle>`
-- `zoom <on|off|toggle|reset>`
-- `annotation <on|off|toggle|clear|undo|redo|delete>`
-- `annotation tool <select|pen|line|arrow|rect|eraser|text>`
-- `annotation color <#RRGGBB|next|prev>`
-- `annotation width <N|next|prev>`
-- `annotation text-size <N|next|prev>`
+```text
+radius_px = 120
+shade_opacity = 0.8
+softness_px = 20
+```
 
-`rpresent send <COMMAND>` is the escape hatch for legacy command strings such as `spot=toggle`. It parses the same `spot=...`, `annotation=...`, and `zoom=...` grammar and sends the result over the same IPC channel.
+The spotlight shape is configured under `[spotlight.shape]`:
 
-Use `--config` with the main CLI to point at a different configuration file when running or sending commands.
+```toml
+[spotlight.shape]
+type = "circle"
+```
+
+Supported shapes are `circle`, `square`, `star`, and `ngon`. A square accepts `corner_radius_pct`. A star accepts `points` and `inner_radius_pct`. An `ngon` accepts `sides`. Wheel resizing changes `radius_px` while the spotlight is active.
+
+### Zoom
+
+Zoom is idle until activated. Activation captures the monitor under the pointer once, then displays that fixed image. Moving the pointer does not recapture the screen.
+
+While zoom owns input:
+
+- hold the configured wheel modifier and scroll to change scale
+- hold the left mouse button to pan
+- release the button to let the current pan continue with inertia
+- run `rpresent zoom reset` to restore the initial scale and center the view
+
+Zoom and spotlight can be active at the same time. Annotation editing has the highest input priority, followed by spotlight, zoom, and the desktop. Activating spotlight or annotation editing cancels the current zoom motion. The next zoom drag needs a new button press.
+
+### Annotation
+
+Annotation editing uses the configured shortcut, `Ctrl+Alt+2` by default. The toolbar appears at the top of the monitor under the pointer while editing.
+
+The default tools are Select, Pen, Line, Arrow, Rect, Eraser, and Text. The initial tool is Arrow. Arrow heads scale with stroke width. Rectangle interiors are not selectable or erasable. The eraser deletes whole objects, and Select moves one object at a time.
+
+Text editing uses these controls:
+
+- Enter commits the draft.
+- Shift+Enter inserts a newline.
+- Escape cancels the draft.
+- Ctrl+V pastes clipboard text into the draft.
+
+Undo, redo, Delete, and Clear operate on the annotation document. `Ctrl+z` undoes, `Ctrl+Z` redoes, `Delete` removes the current selection, and `x` clears all committed objects. Toolbar actions use the same document history.
+
+Finished artwork remains visible and click-through after editing stops. It is kept only for the current daemon session. Disk persistence, IME input, automatic text wrapping, and partial-stroke erasing are not implemented.
+
+Set a color from the command line by quoting the value so the shell preserves `#`:
+
+```bash
+rpresent annotation color '#00FF00'
+```
+
+## Logging and troubleshooting
+
+Enable more logging when diagnosing startup or input problems:
+
+```bash
+RUST_LOG=debug rpresent
+RUST_LOG=trace rpresent spot toggle
+```
+
+An overlay can fail to start if X11, the required spotlight extensions, a compositor, or the required GLX/OpenGL support is unavailable. Check that the process is running in an X11 session and that the X11 development or runtime libraries are installed for the operation you are testing.
