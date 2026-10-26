@@ -1309,16 +1309,16 @@ fn object_touched(text_system: &mut TextSystem, object: &Object, start: Point, e
         } => {
             let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
             let [tail, tip, barb_a, barb_b] = arrow_outline(*arrow_end, *width_px);
-            [(tail, tip), (tip, barb_a), (tip, barb_b)]
-                .into_iter()
-                .any(|(segment_start, segment_end)| {
+            [(tail, tip), (tip, barb_a), (tip, barb_b)].into_iter().any(
+                |(segment_start, segment_end)| {
                     segment_segment_distance(
                         object.point(segment_start),
                         object.point(segment_end),
                         start,
                         end,
                     ) <= tolerance
-                })
+                },
+            )
         }
         ObjectData::Text { .. } => {
             let bounds = text_system.bounds(object);
@@ -2412,11 +2412,7 @@ mod tests {
     #[test]
     fn arrow_drags_keep_the_direction() {
         let mut forward = arrow_session();
-        drag(
-            &mut forward,
-            Point { x: 10, y: 50 },
-            Point { x: 80, y: 50 },
-        );
+        drag(&mut forward, Point { x: 10, y: 50 }, Point { x: 80, y: 50 });
         let forward_width = forward.width_px();
         assert_eq!(
             forward.document().objects()[0].data,
@@ -2453,22 +2449,14 @@ mod tests {
     #[test]
     fn one_pixel_arrow_drag_inserts() {
         let mut session = arrow_session();
-        drag(
-            &mut session,
-            Point { x: 20, y: 20 },
-            Point { x: 21, y: 20 },
-        );
+        drag(&mut session, Point { x: 20, y: 20 }, Point { x: 21, y: 20 });
         assert_eq!(session.document().objects().len(), 1);
     }
 
     #[test]
     fn arrow_hits_shaft_and_barbs_but_not_the_open_v() {
         let mut session = arrow_session();
-        drag(
-            &mut session,
-            Point { x: 20, y: 50 },
-            Point { x: 80, y: 50 },
-        );
+        drag(&mut session, Point { x: 20, y: 50 }, Point { x: 80, y: 50 });
         session
             .command(AnnotationCommand::Tool(AnnotationTool::Select))
             .unwrap();
@@ -2500,49 +2488,29 @@ mod tests {
     #[test]
     fn eraser_drag_across_an_arrow_barb_deletes_it() {
         let mut session = arrow_session();
-        drag(
-            &mut session,
-            Point { x: 20, y: 50 },
-            Point { x: 90, y: 50 },
-        );
+        drag(&mut session, Point { x: 20, y: 50 }, Point { x: 90, y: 50 });
         session
             .command(AnnotationCommand::Tool(AnnotationTool::Eraser))
             .unwrap();
-        drag(
-            &mut session,
-            Point { x: 75, y: 30 },
-            Point { x: 75, y: 42 },
-        );
+        drag(&mut session, Point { x: 75, y: 30 }, Point { x: 75, y: 42 });
         assert!(session.document().objects().is_empty());
     }
 
     #[test]
     fn eraser_drag_across_an_arrow_shaft_deletes_it() {
         let mut session = arrow_session();
-        drag(
-            &mut session,
-            Point { x: 20, y: 50 },
-            Point { x: 80, y: 50 },
-        );
+        drag(&mut session, Point { x: 20, y: 50 }, Point { x: 80, y: 50 });
         session
             .command(AnnotationCommand::Tool(AnnotationTool::Eraser))
             .unwrap();
-        drag(
-            &mut session,
-            Point { x: 50, y: 40 },
-            Point { x: 50, y: 60 },
-        );
+        drag(&mut session, Point { x: 50, y: 40 }, Point { x: 50, y: 60 });
         assert!(session.document().objects().is_empty());
     }
 
     #[test]
     fn pressing_an_arrow_shaft_then_dragging_moves_it() {
         let mut session = arrow_session();
-        drag(
-            &mut session,
-            Point { x: 20, y: 50 },
-            Point { x: 80, y: 50 },
-        );
+        drag(&mut session, Point { x: 20, y: 50 }, Point { x: 80, y: 50 });
         session
             .command(AnnotationCommand::Tool(AnnotationTool::Select))
             .unwrap();

@@ -277,9 +277,6 @@ mod tests {
 
     #[test]
     fn arrow_outline_collapses_at_zero_length() {
-        assert_eq!(
-            arrow_outline(Point::default(), 6),
-            [Point::default(); 4]
-        );
+        assert_eq!(arrow_outline(Point::default(), 6), [Point::default(); 4]);
     }
 }

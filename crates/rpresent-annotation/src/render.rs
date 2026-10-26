@@ -619,9 +619,8 @@ mod tests {
             data: ObjectData::Arrow { end, width_px },
         };
         renderer.draw_object(&mut text_system, &object, &whole);
-        let alpha = |point: Point| {
-            renderer.pixels()[((point.y as usize) * 100 + point.x as usize) * 4 + 3]
-        };
+        let alpha =
+            |point: Point| renderer.pixels()[((point.y as usize) * 100 + point.x as usize) * 4 + 3];
         assert!(alpha(Point { x: 50, y: 50 }) > 0, "shaft");
         let [_, _, barb_a, barb_b] = crate::geometry::arrow_outline(end, width_px);
         assert!(alpha(object.point(barb_a)) > 0, "first barb");

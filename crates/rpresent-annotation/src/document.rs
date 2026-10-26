@@ -482,10 +482,7 @@ mod tests {
             id: 0,
             origin: Point { x: 10, y: 20 },
             color: [0, 0, 0],
-            data: ObjectData::Arrow {
-                end,
-                width_px: 10,
-            },
+            data: ObjectData::Arrow { end, width_px: 10 },
         };
         let mut text_system = crate::text::TextSystem::new();
         let outline = crate::geometry::arrow_outline(end, 10);
