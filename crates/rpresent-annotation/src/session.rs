@@ -539,6 +539,10 @@ impl Session {
                 self.set_tool(AnnotationTool::Line);
                 Ok(())
             }
+            ShortcutAction::ToolArrow => {
+                self.set_tool(AnnotationTool::Arrow);
+                Ok(())
+            }
             ShortcutAction::ToolRect => {
                 self.set_tool(AnnotationTool::Rect);
                 Ok(())
@@ -2560,5 +2564,17 @@ mod tests {
             session.document().objects()[0].origin,
             Point { x: 25, y: 55 }
         );
+    }
+
+    #[test]
+    fn default_a_shortcut_selects_the_arrow_tool() {
+        let mut session = ready_session();
+        key(
+            &mut session,
+            Key::Char('a'),
+            Some('a'),
+            Modifiers::default(),
+        );
+        assert_eq!(session.tool(), AnnotationTool::Arrow);
     }
 }

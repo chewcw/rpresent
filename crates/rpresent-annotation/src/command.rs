@@ -69,6 +69,7 @@ fn parse_tool(name: &str, command: &str) -> Result<AnnotationTool, AnnotationCom
         "select" => Ok(AnnotationTool::Select),
         "pen" => Ok(AnnotationTool::Pen),
         "line" => Ok(AnnotationTool::Line),
+        "arrow" => Ok(AnnotationTool::Arrow),
         "rect" => Ok(AnnotationTool::Rect),
         "eraser" => Ok(AnnotationTool::Eraser),
         "text" => Ok(AnnotationTool::Text),
