@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use cosmic_text::{Action, Motion};
-use rpresent_config::shortcuts::{Key, KeyInput as ShortcutInput};
+use rpresent_config::shortcuts::{
+    Binding, Key, KeyInput as ShortcutInput, ShortcutAction, ShortcutDispatcher,
+};
 use rpresent_config::{AnnotationConfig, AnnotationTool, ConfigError};
 
 use crate::catalog::{Preset, Rgb, cycle_index, parse_rgb};
@@ -117,6 +119,7 @@ pub struct Session {
     text_sizes: Vec<u32>,
     text_size_index: usize,
     document: Document,
+    shortcuts: ShortcutDispatcher,
     pub(crate) text_system: TextSystem,
     selection: Option<ObjectId>,
     pub(crate) gesture: Option<Gesture>,
@@ -134,7 +137,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(config: &AnnotationConfig) -> Result<Self, ConfigError> {
+    pub fn new(config: &AnnotationConfig, bindings: &[Binding]) -> Result<Self, ConfigError> {
         config.validate()?;
         let colors: Vec<Rgb> = config
             .colors
@@ -167,6 +170,7 @@ impl Session {
             text_sizes: config.text_sizes_px.clone(),
             text_size_index,
             document: Document::new(config.history_depth),
+            shortcuts: ShortcutDispatcher::new(bindings),
             text_system: TextSystem::new(),
             selection: None,
             gesture: None,
@@ -499,11 +503,56 @@ impl Session {
             self.escape();
             return;
         }
-        if input.modifiers.ctrl || input.modifiers.super_key || input.modifiers.alt {
-            self.document_shortcut(input);
-            return;
+        if let Some(shortcut) = input.shortcut
+            && let Some(action) = self.shortcuts.dispatch(shortcut)
+        {
+            self.apply_shortcut(action)
+                .expect("validated annotation shortcuts use configured commands");
         }
-        self.tool_key(input);
+    }
+
+    /// Apply a configured annotation action. Global actions are rejected so
+    /// annotation input can never toggle another layer.
+    pub fn apply_shortcut(&mut self, action: ShortcutAction) -> Result<(), String> {
+        match action {
+            ShortcutAction::AnnotationUndo => self.apply_command(AnnotationCommand::Undo),
+            ShortcutAction::AnnotationRedo => self.apply_command(AnnotationCommand::Redo),
+            ShortcutAction::AnnotationDelete => self.apply_command(AnnotationCommand::Delete),
+            ShortcutAction::AnnotationClear => self.apply_command(AnnotationCommand::Clear),
+            ShortcutAction::ToolSelect => {
+                self.set_tool(AnnotationTool::Select);
+                Ok(())
+            }
+            ShortcutAction::ToolPen => {
+                self.set_tool(AnnotationTool::Pen);
+                Ok(())
+            }
+            ShortcutAction::ToolLine => {
+                self.set_tool(AnnotationTool::Line);
+                Ok(())
+            }
+            ShortcutAction::ToolEraser => {
+                self.set_tool(AnnotationTool::Eraser);
+                Ok(())
+            }
+            ShortcutAction::ToolText => {
+                self.set_tool(AnnotationTool::Text);
+                Ok(())
+            }
+            ShortcutAction::ColorNext => self.apply_command(AnnotationCommand::Color(Preset::Next)),
+            ShortcutAction::ColorPrev => self.apply_command(AnnotationCommand::Color(Preset::Prev)),
+            ShortcutAction::WidthPrev => self.apply_command(AnnotationCommand::Width(Preset::Prev)),
+            ShortcutAction::WidthNext => self.apply_command(AnnotationCommand::Width(Preset::Next)),
+            ShortcutAction::TextSizePrev => {
+                self.apply_command(AnnotationCommand::TextSize(Preset::Prev))
+            }
+            ShortcutAction::TextSizeNext => {
+                self.apply_command(AnnotationCommand::TextSize(Preset::Next))
+            }
+            ShortcutAction::SpotlightToggle
+            | ShortcutAction::AnnotationToggle
+            | ShortcutAction::ZoomToggle => Err(format!("{action:?} is not an annotation action")),
+        }
     }
 
     fn escape(&mut self) {
@@ -516,68 +565,11 @@ impl Session {
         }
     }
 
-    fn document_shortcut(&mut self, input: KeyInput) {
-        let Some(letter) = lower_letter(input.key) else {
-            return;
-        };
-        if !input.modifiers.ctrl {
-            return;
-        }
-        let command = match letter {
-            'z' if input.modifiers.shift => AnnotationCommand::Redo,
-            'z' => AnnotationCommand::Undo,
-            'y' => AnnotationCommand::Redo,
-            _ => return,
-        };
-        self.apply_command(command)
-            .expect("undo and redo commands cannot fail");
-    }
-
-    fn tool_key(&mut self, input: KeyInput) {
-        let Some(letter) = lower_letter(input.key) else {
-            match input.key {
-                Key::Char('[') => self.cycle_width(false),
-                Key::Char(']') => self.cycle_width(true),
-                Key::Char('-') => self.cycle_text_size(false),
-                Key::Char('=') => self.cycle_text_size(true),
-                _ => {}
-            }
-            return;
-        };
-        match letter {
-            'v' => self.set_tool(AnnotationTool::Select),
-            'p' => self.set_tool(AnnotationTool::Pen),
-            'l' => self.set_tool(AnnotationTool::Line),
-            'e' => self.set_tool(AnnotationTool::Eraser),
-            't' => self.set_tool(AnnotationTool::Text),
-            'c' => self.cycle_color(!input.modifiers.shift),
-            _ => {}
-        }
-    }
-
     fn set_tool(&mut self, tool: AnnotationTool) {
         if self.tool != tool {
             self.cancel_transient();
             self.tool = tool;
         }
-    }
-
-    fn cycle_color(&mut self, forward: bool) {
-        let index = cycle_index(self.color_index, self.colors.len(), forward);
-        self.cancel_transient();
-        self.color_index = index;
-    }
-
-    fn cycle_width(&mut self, forward: bool) {
-        let index = cycle_index(self.width_index, self.widths.len(), forward);
-        self.cancel_transient();
-        self.width_index = index;
-    }
-
-    fn cycle_text_size(&mut self, forward: bool) {
-        let index = cycle_index(self.text_size_index, self.text_sizes.len(), forward);
-        self.cancel_transient();
-        self.text_size_index = index;
     }
 
     fn draft_key(&mut self, input: KeyInput) {
@@ -1240,6 +1232,16 @@ fn resolve_preset<T: Copy + PartialEq>(
     Ok((values[next_index], next_index))
 }
 
+/// Shared default annotation bindings for tests that only exercise canvas
+/// behavior.
+#[cfg(test)]
+pub(crate) fn default_bindings() -> Vec<Binding> {
+    rpresent_config::shortcuts::ShortcutConfig::default()
+        .validate()
+        .expect("default shortcuts are valid")
+        .annotation
+}
+
 fn lower_letter(key: Key) -> Option<char> {
     match key {
         Key::Char(character) if character.is_ascii_alphabetic() => {
@@ -1261,7 +1263,7 @@ mod tests {
     }
 
     fn ready_session() -> Session {
-        let mut session = Session::new(&config()).unwrap();
+        let mut session = Session::new(&config(), &crate::session::default_bindings()).unwrap();
         session.command(AnnotationCommand::On).unwrap();
         session.ownership(Some(1));
         session
@@ -1306,6 +1308,22 @@ mod tests {
         );
     }
 
+    fn shortcut_mods(modifiers: Modifiers) -> rpresent_config::shortcuts::Mods {
+        use rpresent_config::shortcuts::Mods;
+        let mut mods = Mods::NONE;
+        for (active, flag) in [
+            (modifiers.shift, Mods::SHIFT),
+            (modifiers.ctrl, Mods::CTRL),
+            (modifiers.alt, Mods::ALT),
+            (modifiers.super_key, Mods::SUPER),
+        ] {
+            if active {
+                mods |= flag;
+            }
+        }
+        mods
+    }
+
     fn key(session: &mut Session, kind: Key, text: Option<char>, modifiers: Modifiers) {
         session.key(
             1,
@@ -1313,9 +1331,31 @@ mod tests {
                 key: kind,
                 text,
                 modifiers,
-                shortcut: None,
+                shortcut: Some(ShortcutInput::new(kind, shortcut_mods(modifiers))),
             },
         );
+    }
+
+    fn press(session: &mut Session, expression: &str) {
+        let shortcut = expression
+            .parse::<ShortcutInput>()
+            .expect("test shortcut parses");
+        session.key(
+            1,
+            KeyInput {
+                key: shortcut.key(),
+                text: None,
+                modifiers: Modifiers::default(),
+                shortcut: Some(shortcut),
+            },
+        );
+    }
+
+    fn ready_session_with_bindings(bindings: &[Binding]) -> Session {
+        let mut session = Session::new(&config(), bindings).unwrap();
+        session.command(AnnotationCommand::On).unwrap();
+        session.ownership(Some(1));
+        session
     }
 
     fn type_text(session: &mut Session, text: &str) {
@@ -1346,7 +1386,11 @@ mod tests {
 
     #[test]
     fn toolbar_values_borrow_catalogs_and_follow_commands() {
-        let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+        let mut session = Session::new(
+            &AnnotationConfig::default(),
+            &crate::session::default_bindings(),
+        )
+        .unwrap();
         let values = session.toolbar_values();
         assert_eq!(values.colors, session.colors.as_slice());
         assert_eq!(values.colors.as_ptr(), session.colors.as_ptr());
@@ -1364,7 +1408,7 @@ mod tests {
 
     #[test]
     fn off_keeps_committed_objects_and_rejects_stale_input() {
-        let mut session = Session::new(&config()).unwrap();
+        let mut session = Session::new(&config(), &crate::session::default_bindings()).unwrap();
         session.command(AnnotationCommand::On).unwrap();
         session.ownership(Some(7));
         let root = Point { x: 10, y: 20 };
@@ -1896,5 +1940,161 @@ mod tests {
             ObjectData::Text { text, .. } => assert_eq!(text, "one\ntwo"),
             other => panic!("unexpected object {other:?}"),
         }
+    }
+
+    #[test]
+    fn configured_tool_binding_replaces_the_fixed_letter() {
+        let settings = rpresent_config::shortcuts::ShortcutConfig {
+            annotation: std::collections::BTreeMap::from([(
+                "annotation.tool.line".into(),
+                "Ctrl+F8".into(),
+            )]),
+            ..rpresent_config::shortcuts::ShortcutConfig::default()
+        };
+        let bindings = settings.validate().unwrap();
+        let mut session = ready_session_with_bindings(&bindings.annotation);
+        key(
+            &mut session,
+            Key::Char('l'),
+            Some('l'),
+            Modifiers::default(),
+        );
+        assert_eq!(session.tool(), AnnotationTool::Pen);
+        session.key(
+            1,
+            KeyInput {
+                key: Key::F8,
+                text: None,
+                modifiers: Modifiers {
+                    ctrl: true,
+                    ..Modifiers::default()
+                },
+                shortcut: Some("Ctrl+F8".parse().unwrap()),
+            },
+        );
+        assert_eq!(session.tool(), AnnotationTool::Line);
+    }
+
+    #[test]
+    fn tool_letters_remain_text_inside_a_draft() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Text))
+            .unwrap();
+        click(&mut session, Point { x: 10, y: 10 }, Duration::ZERO);
+        type_text(&mut session, "vpletCc[]-=");
+        assert_eq!(session.tool(), AnnotationTool::Text);
+        assert!(session.status().text_editing);
+        assert_eq!(
+            session.text_edit.as_ref().unwrap().draft.plain_text(),
+            "vpletCc[]-="
+        );
+    }
+
+    #[test]
+    fn default_tool_bindings_select_every_tool() {
+        for (expression, tool) in [
+            ("v", AnnotationTool::Select),
+            ("p", AnnotationTool::Pen),
+            ("l", AnnotationTool::Line),
+            ("e", AnnotationTool::Eraser),
+            ("t", AnnotationTool::Text),
+        ] {
+            let mut session = ready_session();
+            press(&mut session, expression);
+            assert_eq!(session.tool(), tool, "{expression}");
+        }
+    }
+
+    #[test]
+    fn color_bindings_cycle_in_both_directions() {
+        let mut session = ready_session();
+        let start = session.color();
+        press(&mut session, "c");
+        let next = session.color();
+        assert_ne!(next, start);
+        press(&mut session, "C");
+        assert_eq!(session.color(), start);
+    }
+
+    #[test]
+    fn width_and_text_size_bindings_cycle_in_both_directions() {
+        let mut session = ready_session();
+        let width = session.width_px();
+        press(&mut session, "]");
+        assert_ne!(session.width_px(), width);
+        press(&mut session, "[");
+        assert_eq!(session.width_px(), width);
+
+        let size = session.text_size_px();
+        press(&mut session, "=");
+        assert_ne!(session.text_size_px(), size);
+        press(&mut session, "-");
+        assert_eq!(session.text_size_px(), size);
+    }
+
+    #[test]
+    fn delete_and_clear_bindings_apply_document_commands() {
+        let settings = rpresent_config::shortcuts::ShortcutConfig {
+            annotation: std::collections::BTreeMap::from([
+                ("annotation.delete".into(), "Delete".into()),
+                ("annotation.clear".into(), "Ctrl+F9".into()),
+            ]),
+            ..rpresent_config::shortcuts::ShortcutConfig::default()
+        };
+        let bindings = settings.validate().unwrap();
+        let mut session = ready_session_with_bindings(&bindings.annotation);
+        drag(&mut session, Point { x: 0, y: 0 }, Point { x: 50, y: 0 });
+        drag(&mut session, Point { x: 0, y: 10 }, Point { x: 50, y: 10 });
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Select))
+            .unwrap();
+        click(
+            &mut session,
+            Point { x: 25, y: 0 },
+            Duration::from_millis(500),
+        );
+        assert!(session.selection().is_some());
+        press(&mut session, "Delete");
+        assert_eq!(session.document().objects().len(), 1);
+        press(&mut session, "Ctrl+F9");
+        assert!(session.document().objects().is_empty());
+    }
+
+    #[test]
+    fn document_undo_and_redo_bindings_ignore_ctrl_y() {
+        let mut session = ready_session();
+        drag(&mut session, Point { x: 0, y: 0 }, Point { x: 50, y: 0 });
+        drag(&mut session, Point { x: 0, y: 10 }, Point { x: 50, y: 10 });
+        press(&mut session, "Ctrl+z");
+        assert_eq!(session.document().objects().len(), 1);
+        press(&mut session, "Ctrl+y");
+        assert_eq!(session.document().objects().len(), 1);
+        press(&mut session, "Ctrl+Z");
+        assert_eq!(session.document().objects().len(), 2);
+    }
+
+    #[test]
+    fn empty_annotation_bindings_disable_canvas_commands_but_keep_text_editing() {
+        let mut session = ready_session_with_bindings(&[]);
+        press(&mut session, "l");
+        press(&mut session, "]");
+        assert_eq!(session.tool(), AnnotationTool::Pen);
+        assert_eq!(session.width_px(), config().stroke_width_px);
+
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Text))
+            .unwrap();
+        click(&mut session, Point { x: 10, y: 10 }, Duration::ZERO);
+        type_text(&mut session, "kept");
+        assert_eq!(
+            session.text_edit.as_ref().unwrap().draft.plain_text(),
+            "kept"
+        );
+        key(&mut session, Key::Esc, None, Modifiers::default());
+        assert!(!session.status().text_editing);
+        assert!(session.status().editing_requested);
+        key(&mut session, Key::Esc, None, Modifiers::default());
+        assert!(!session.status().editing_requested);
     }
 }

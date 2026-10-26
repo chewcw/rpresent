@@ -22,7 +22,7 @@ fn geometry(width: u32, height: u32) -> DisplayGeometry {
 
 /// A session with no display geometry: canvas-only until `update_display`.
 fn base_scene(config: &AnnotationConfig) -> Session {
-    let mut session = Session::new(config).unwrap();
+    let mut session = Session::new(config, &crate::session::default_bindings()).unwrap();
     session.text_system =
         crate::TextSystem::with_font(include_bytes!("../../tests/fixtures/DejaVuSans.ttf"));
     session.command(AnnotationCommand::On).unwrap();
@@ -35,7 +35,7 @@ fn scene() -> Session {
 }
 
 fn scene_with(config: &AnnotationConfig, width: u32, height: u32) -> Session {
-    let mut session = Session::new(config).unwrap();
+    let mut session = Session::new(config, &crate::session::default_bindings()).unwrap();
     session.text_system =
         crate::TextSystem::with_font(include_bytes!("../../tests/fixtures/DejaVuSans.ttf"));
     session.update_display(geometry(width, height));

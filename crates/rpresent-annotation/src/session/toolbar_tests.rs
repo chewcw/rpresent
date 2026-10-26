@@ -2,7 +2,11 @@ use super::*;
 use crate::toolbar::{DisplayGeometry, PickerKind, Target};
 
 fn ready() -> Session {
-    let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+    let mut session = Session::new(
+        &AnnotationConfig::default(),
+        &crate::session::default_bindings(),
+    )
+    .unwrap();
     session.update_display(DisplayGeometry {
         root: Rect {
             x: 0,

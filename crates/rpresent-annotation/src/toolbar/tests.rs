@@ -29,7 +29,11 @@ fn geometry() -> DisplayGeometry {
 }
 
 fn editing_session() -> Session {
-    let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+    let mut session = Session::new(
+        &AnnotationConfig::default(),
+        &crate::session::default_bindings(),
+    )
+    .unwrap();
     session.command(AnnotationCommand::On).unwrap();
     session
 }
@@ -213,7 +217,7 @@ fn width_picker_pages_cover_every_configured_value_in_order() {
         stroke_width_px: 1,
         ..Default::default()
     };
-    let mut session = Session::new(&config).unwrap();
+    let mut session = Session::new(&config, &crate::session::default_bindings()).unwrap();
     session.command(AnnotationCommand::On).unwrap();
 
     let geometry = DisplayGeometry {
@@ -289,7 +293,11 @@ fn single_page_picker_shows_no_page_controls() {
 
 #[test]
 fn visibility_changes_return_damage_but_keep_the_remembered_origin() {
-    let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+    let mut session = Session::new(
+        &AnnotationConfig::default(),
+        &crate::session::default_bindings(),
+    )
+    .unwrap();
     let mut toolbar = Toolbar::new(geometry());
 
     assert!(toolbar.sync(&session.toolbar_values()).is_none());
@@ -313,7 +321,11 @@ fn visibility_changes_return_damage_but_keep_the_remembered_origin() {
 
 #[test]
 fn tool_changes_swap_applicable_presets_and_highlight() {
-    let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+    let mut session = Session::new(
+        &AnnotationConfig::default(),
+        &crate::session::default_bindings(),
+    )
+    .unwrap();
     session.command(AnnotationCommand::On).unwrap();
     let mut toolbar = Toolbar::new(geometry());
     toolbar.sync(&session.toolbar_values());
@@ -361,7 +373,11 @@ fn tool_changes_swap_applicable_presets_and_highlight() {
 
 #[test]
 fn toolbar_starts_on_pointer_monitor_without_creating_content() {
-    let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+    let mut session = Session::new(
+        &AnnotationConfig::default(),
+        &crate::session::default_bindings(),
+    )
+    .unwrap();
     session.command(AnnotationCommand::On).unwrap();
     let mut toolbar = Toolbar::new(geometry());
     assert!(toolbar.sync(&session.toolbar_values()).is_some());

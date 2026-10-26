@@ -7,7 +7,11 @@ fn native_toolbar_keeps_one_click_through_window() {
     let mut backend = X11AnnotationBackend::new().unwrap();
     let window = backend.window_id();
     let geometry = backend.geometry().unwrap();
-    let mut session = crate::Session::new(&rpresent_config::AnnotationConfig::default()).unwrap();
+    let mut session = crate::Session::new(
+        &rpresent_config::AnnotationConfig::default(),
+        &crate::session::default_bindings(),
+    )
+    .unwrap();
     session.update_display(geometry);
     session.command(crate::AnnotationCommand::On).unwrap();
     session.ownership(Some(1));

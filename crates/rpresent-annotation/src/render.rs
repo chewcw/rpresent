@@ -558,7 +558,11 @@ mod parity_tests {
         use std::time::Instant;
 
         for (width, height) in [(1920, 1080), (3840, 2160)] {
-            let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+            let mut session = Session::new(
+                &AnnotationConfig::default(),
+                &crate::session::default_bindings(),
+            )
+            .unwrap();
             session.command(AnnotationCommand::On).unwrap();
             session.ownership(Some(1));
 
@@ -687,7 +691,11 @@ mod parity_tests {
 
     #[test]
     fn partial_redraw_matches_full_scene() {
-        let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+        let mut session = Session::new(
+            &AnnotationConfig::default(),
+            &crate::session::default_bindings(),
+        )
+        .unwrap();
         session.command(AnnotationCommand::On).unwrap();
         session
             .command(AnnotationCommand::Tool(AnnotationTool::Line))
@@ -812,7 +820,11 @@ mod parity_tests {
 
     #[test]
     fn extended_partial_redraws_match_full_scene() {
-        let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+        let mut session = Session::new(
+            &AnnotationConfig::default(),
+            &crate::session::default_bindings(),
+        )
+        .unwrap();
         session.command(AnnotationCommand::On).unwrap();
         session.ownership(Some(1));
         let mut partial = Renderer::new(100, 100).unwrap();
@@ -930,7 +942,11 @@ mod parity_tests {
 
     #[test]
     fn unchanged_state_produces_no_damage() {
-        let mut session = Session::new(&AnnotationConfig::default()).unwrap();
+        let mut session = Session::new(
+            &AnnotationConfig::default(),
+            &crate::session::default_bindings(),
+        )
+        .unwrap();
         session.command(AnnotationCommand::On).unwrap();
         session.ownership(Some(1));
         let mut renderer = Renderer::new(100, 100).unwrap();

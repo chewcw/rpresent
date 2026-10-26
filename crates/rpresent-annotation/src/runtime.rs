@@ -105,7 +105,7 @@ impl AnnotationRuntime {
         factory: BackendFactory,
         events: AnnotationEventSink,
     ) -> Result<Self, OverlayError> {
-        let session = Session::new(config.annotation())
+        let session = Session::new(config.annotation(), &config.bindings().annotation)
             .map_err(|error| OverlayError::Runtime(error.to_string()))?;
         let mut runtime = Self {
             session,
@@ -804,25 +804,30 @@ mod tests {
         let alpha = ((10 * renderer.width() + 10) * 4 + 3) as usize;
         assert!(renderer.pixels()[alpha] > 0);
 
-        for (letter, shift, visible) in [
-            ('z', false, false),
-            ('y', false, true),
-            ('z', false, false),
-            ('Z', true, true),
+        for (expression, visible) in [
+            ("Ctrl+z", false),
+            ("Ctrl+Z", true),
+            ("Ctrl+z", false),
+            ("Ctrl+Z", true),
         ] {
             log.lock().unwrap().uploads.clear();
+            let shortcut = expression
+                .parse::<rpresent_config::shortcuts::KeyInput>()
+                .unwrap();
             runtime.process(
                 AnnotationRequest::Key {
                     epoch: 1,
                     input: KeyInput {
-                        key: rpresent_config::shortcuts::Key::Char(letter),
+                        key: shortcut.key(),
                         text: None,
                         modifiers: crate::Modifiers {
                             ctrl: true,
-                            shift,
+                            shift: shortcut
+                                .mods()
+                                .contains(rpresent_config::shortcuts::Mods::SHIFT),
                             ..crate::Modifiers::default()
                         },
-                        shortcut: None,
+                        shortcut: Some(shortcut),
                     },
                 },
                 now(),
