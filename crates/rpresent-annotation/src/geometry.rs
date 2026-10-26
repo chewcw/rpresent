@@ -135,6 +135,32 @@ pub(crate) fn rect_outline(end: Point) -> [Point; 5] {
     ]
 }
 
+/// Tail, tip, and two barb endpoints for an arrow whose tip is `end`.
+/// Points are relative to the arrow origin. The head is an open V whose
+/// length scales with the stroke width.
+pub(crate) fn arrow_outline(end: Point, width_px: u32) -> [Point; 4] {
+    let tail = Point::default();
+    let length = (end.x as f64).hypot(end.y as f64);
+    if length == 0.0 {
+        return [tail; 4];
+    }
+    let head_length = ((width_px as f64 * 4.0).max(12.0)).min(length / 2.0);
+    let angle = (end.y as f64).atan2(end.x as f64) + std::f64::consts::PI;
+    let barb = |rotation: f64| {
+        let direction = angle + rotation;
+        Point {
+            x: end.x + (head_length * direction.cos()).round() as i32,
+            y: end.y + (head_length * direction.sin()).round() as i32,
+        }
+    };
+    [
+        tail,
+        end,
+        barb(std::f64::consts::FRAC_PI_6),
+        barb(-std::f64::consts::FRAC_PI_6),
+    ]
+}
+
 fn distance(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
     (ax - bx).hypot(ay - by)
 }
@@ -212,4 +238,48 @@ pub(crate) fn segment_rect_distance(start: Point, end: Point, rect: &Rect) -> f6
         .map(|(edge_start, edge_end)| segment_segment_distance(start, end, edge_start, edge_end))
         .into_iter()
         .fold(f64::INFINITY, f64::min)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn distance(a: Point, b: Point) -> f64 {
+        ((a.x - b.x) as f64).hypot((a.y - b.y) as f64)
+    }
+
+    #[test]
+    fn arrow_outline_places_tail_tip_and_barbs() {
+        let end = Point { x: 80, y: 0 };
+        let [tail, tip, barb_a, barb_b] = arrow_outline(end, 6);
+        assert_eq!(tail, Point::default());
+        assert_eq!(tip, end);
+        assert!(barb_a.x < tip.x);
+        assert!(barb_b.x < tip.x);
+        assert!(barb_a.y < tip.y);
+        assert!(barb_b.y > tip.y);
+    }
+
+    #[test]
+    fn arrow_outline_scales_the_head_with_stroke_width() {
+        let end = Point { x: 200, y: 0 };
+        let thin = arrow_outline(end, 2);
+        let thick = arrow_outline(end, 10);
+        assert!(distance(thick[2], end) > distance(thin[2], end));
+    }
+
+    #[test]
+    fn arrow_outline_caps_a_short_head_at_half_the_shaft() {
+        let end = Point { x: 10, y: 0 };
+        let [_, tip, barb, _] = arrow_outline(end, 10);
+        assert!((distance(barb, tip) - 5.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn arrow_outline_collapses_at_zero_length() {
+        assert_eq!(
+            arrow_outline(Point::default(), 6),
+            [Point::default(); 4]
+        );
+    }
 }
