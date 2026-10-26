@@ -39,9 +39,15 @@ impl PickerKind {
         match self {
             PickerKind::Color => matches!(
                 tool,
-                AnnotationTool::Pen | AnnotationTool::Line | AnnotationTool::Text
+                AnnotationTool::Pen
+                    | AnnotationTool::Line
+                    | AnnotationTool::Rect
+                    | AnnotationTool::Text
             ),
-            PickerKind::Width => matches!(tool, AnnotationTool::Pen | AnnotationTool::Line),
+            PickerKind::Width => matches!(
+                tool,
+                AnnotationTool::Pen | AnnotationTool::Line | AnnotationTool::Rect
+            ),
             PickerKind::TextSize => tool == AnnotationTool::Text,
         }
     }

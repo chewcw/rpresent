@@ -69,6 +69,7 @@ fn parse_tool(name: &str, command: &str) -> Result<AnnotationTool, AnnotationCom
         "select" => Ok(AnnotationTool::Select),
         "pen" => Ok(AnnotationTool::Pen),
         "line" => Ok(AnnotationTool::Line),
+        "rect" => Ok(AnnotationTool::Rect),
         "eraser" => Ok(AnnotationTool::Eraser),
         "text" => Ok(AnnotationTool::Text),
         _ => Err(AnnotationCommandParseError::UnknownCommand(
@@ -112,6 +113,7 @@ impl Display for AnnotationCommand {
                 AnnotationTool::Select => f.write_str("annotation=tool=select"),
                 AnnotationTool::Pen => f.write_str("annotation=tool=pen"),
                 AnnotationTool::Line => f.write_str("annotation=tool=line"),
+                AnnotationTool::Rect => f.write_str("annotation=tool=rect"),
                 AnnotationTool::Eraser => f.write_str("annotation=tool=eraser"),
                 AnnotationTool::Text => f.write_str("annotation=tool=text"),
             },

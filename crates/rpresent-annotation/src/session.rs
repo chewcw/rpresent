@@ -11,7 +11,7 @@ use crate::catalog::{Preset, Rgb, cycle_index, parse_rgb};
 use crate::command::AnnotationCommand;
 use crate::document::{Document, Object, ObjectData, ObjectId, Point};
 use crate::geometry::{
-    Rect, point_rect_distance, point_segment_distance, segment_rect_distance,
+    Rect, point_rect_distance, point_segment_distance, rect_outline, segment_rect_distance,
     segment_segment_distance,
 };
 use crate::text::{TextDraft, TextSystem};
@@ -85,6 +85,10 @@ pub(crate) enum Gesture {
         points: Vec<Point>,
     },
     Line {
+        origin: Point,
+        end: Point,
+    },
+    Rect {
         origin: Point,
         end: Point,
     },
@@ -531,6 +535,10 @@ impl Session {
                 self.set_tool(AnnotationTool::Line);
                 Ok(())
             }
+            ShortcutAction::ToolRect => {
+                self.set_tool(AnnotationTool::Rect);
+                Ok(())
+            }
             ShortcutAction::ToolEraser => {
                 self.set_tool(AnnotationTool::Eraser);
                 Ok(())
@@ -723,6 +731,12 @@ impl Session {
                     end: Point::default(),
                 });
             }
+            AnnotationTool::Rect => {
+                self.gesture = Some(Gesture::Rect {
+                    origin: root,
+                    end: Point::default(),
+                });
+            }
             AnnotationTool::Eraser => {
                 let hidden = self.erase_hits(root, root);
                 self.gesture = Some(Gesture::Erase { hidden, last: root });
@@ -746,7 +760,7 @@ impl Session {
                     points.push(local);
                 }
             }
-            Some(Gesture::Line { origin, end }) => {
+            Some(Gesture::Line { origin, end }) | Some(Gesture::Rect { origin, end }) => {
                 *end = Point {
                     x: root.x - origin.x,
                     y: root.y - origin.y,
@@ -818,6 +832,20 @@ impl Session {
                 let color = self.color();
                 self.document
                     .insert(origin, color, ObjectData::Line { end, width_px });
+                self.mark_last_object();
+            }
+            Some(Gesture::Rect { origin, .. }) => {
+                let end = Point {
+                    x: root.x - origin.x,
+                    y: root.y - origin.y,
+                };
+                if end == Point::default() {
+                    return;
+                }
+                let width_px = self.width_px();
+                let color = self.color();
+                self.document
+                    .insert(origin, color, ObjectData::Rect { end, width_px });
                 self.mark_last_object();
             }
             Some(Gesture::Move {
@@ -1114,6 +1142,11 @@ impl Session {
                 &[Point::default(), end],
                 self.width_px(),
             )),
+            Some(Gesture::Rect { origin, end }) => Some(crate::render::stroke_bounds(
+                origin,
+                &rect_outline(end),
+                self.width_px(),
+            )),
             Some(Gesture::Move { id, offset, .. }) => {
                 let object = self
                     .document
@@ -1182,6 +1215,13 @@ fn object_hit(text_system: &mut TextSystem, object: &Object, point: Point) -> bo
             let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
             point_segment_distance(point, object.origin, object.point(*end)) <= tolerance
         }
+        ObjectData::Rect { end, width_px } => {
+            let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
+            rect_outline(*end).windows(2).any(|pair| {
+                point_segment_distance(point, object.point(pair[0]), object.point(pair[1]))
+                    <= tolerance
+            })
+        }
         ObjectData::Text { .. } => text_system.bounds(object).contains(point),
     }
 }
@@ -1207,6 +1247,16 @@ fn object_touched(text_system: &mut TextSystem, object: &Object, start: Point, e
             let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
             segment_segment_distance(object.origin, object.point(*line_end), start, end)
                 <= tolerance
+        }
+        ObjectData::Rect {
+            end: rect_end,
+            width_px,
+        } => {
+            let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
+            rect_outline(*rect_end).windows(2).any(|pair| {
+                segment_segment_distance(object.point(pair[0]), object.point(pair[1]), start, end)
+                    <= tolerance
+            })
         }
         ObjectData::Text { .. } => {
             let bounds = text_system.bounds(object);
@@ -2096,5 +2146,175 @@ mod tests {
         assert!(session.status().editing_requested);
         key(&mut session, Key::Esc, None, Modifiers::default());
         assert!(!session.status().editing_requested);
+    }
+
+    fn rect_session() -> Session {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Rect))
+            .unwrap();
+        session
+    }
+
+    fn rect_bounds(session: &mut Session) -> Rect {
+        let object = session.document().objects()[0].clone();
+        crate::render::object_paint_bounds(&mut session.text_system, &object)
+    }
+
+    #[test]
+    fn default_r_shortcut_selects_the_rect_tool() {
+        let mut session = ready_session();
+        key(
+            &mut session,
+            Key::Char('r'),
+            Some('r'),
+            Modifiers::default(),
+        );
+        assert_eq!(session.tool(), AnnotationTool::Rect);
+    }
+
+    #[test]
+    fn rect_drag_stores_the_active_style_and_corners() {
+        let mut session = rect_session();
+        let color = session.color();
+        let width_px = session.width_px();
+        drag(&mut session, Point { x: 10, y: 20 }, Point { x: 70, y: 60 });
+        let object = &session.document().objects()[0];
+        assert_eq!(object.origin, Point { x: 10, y: 20 });
+        assert_eq!(object.color, color);
+        match &object.data {
+            ObjectData::Rect {
+                end,
+                width_px: stored,
+            } => {
+                assert_eq!(*end, Point { x: 60, y: 40 });
+                assert_eq!(*stored, width_px);
+            }
+            other => panic!("unexpected object {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rect_drags_normalize_in_every_direction() {
+        let mut bounds = Vec::new();
+        for (x, y) in [(70, 60), (30, 60), (30, 40), (70, 40)] {
+            let mut session = rect_session();
+            drag(&mut session, Point { x: 50, y: 50 }, Point { x, y });
+            bounds.push(rect_bounds(&mut session));
+        }
+        let sizes: Vec<(u32, u32)> = bounds
+            .iter()
+            .map(|rect| (rect.width, rect.height))
+            .collect();
+        assert!(
+            sizes.windows(2).all(|pair| pair[0] == pair[1]),
+            "outline sizes differ: {sizes:?}"
+        );
+    }
+
+    #[test]
+    fn rect_click_without_movement_inserts_nothing() {
+        let mut session = rect_session();
+        click(&mut session, Point { x: 20, y: 20 }, Duration::ZERO);
+        assert!(session.document().objects().is_empty());
+        assert!(!session.document().can_undo());
+    }
+
+    #[test]
+    fn rect_hits_only_its_edges() {
+        let mut session = rect_session();
+        drag(&mut session, Point { x: 20, y: 20 }, Point { x: 80, y: 60 });
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Select))
+            .unwrap();
+        click(
+            &mut session,
+            Point { x: 50, y: 40 },
+            Duration::from_millis(100),
+        );
+        assert!(session.selection().is_none());
+        click(
+            &mut session,
+            Point { x: 50, y: 20 },
+            Duration::from_millis(300),
+        );
+        assert!(session.selection().is_some());
+    }
+
+    #[test]
+    fn zero_width_rect_keeps_its_single_edge() {
+        let mut session = rect_session();
+        drag(&mut session, Point { x: 20, y: 20 }, Point { x: 20, y: 60 });
+        assert_eq!(
+            session.document().objects()[0].data,
+            ObjectData::Rect {
+                end: Point { x: 0, y: 40 },
+                width_px: session.width_px(),
+            }
+        );
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Select))
+            .unwrap();
+        click(
+            &mut session,
+            Point { x: 20, y: 40 },
+            Duration::from_millis(100),
+        );
+        assert!(session.selection().is_some());
+        click(
+            &mut session,
+            Point { x: 40, y: 40 },
+            Duration::from_millis(300),
+        );
+        assert!(session.selection().is_none());
+    }
+
+    #[test]
+    fn eraser_drag_across_a_rect_edge_deletes_it() {
+        let mut session = rect_session();
+        drag(&mut session, Point { x: 20, y: 20 }, Point { x: 80, y: 60 });
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Eraser))
+            .unwrap();
+        drag(&mut session, Point { x: 40, y: 10 }, Point { x: 40, y: 30 });
+        assert!(session.document().objects().is_empty());
+    }
+
+    #[test]
+    fn eraser_drag_through_the_interior_leaves_the_rect() {
+        let mut session = rect_session();
+        drag(&mut session, Point { x: 20, y: 20 }, Point { x: 80, y: 60 });
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Eraser))
+            .unwrap();
+        drag(&mut session, Point { x: 40, y: 35 }, Point { x: 60, y: 45 });
+        assert_eq!(session.document().objects().len(), 1);
+    }
+
+    #[test]
+    fn pressing_a_rect_edge_then_dragging_moves_it() {
+        let mut session = rect_session();
+        drag(&mut session, Point { x: 20, y: 20 }, Point { x: 80, y: 60 });
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Select))
+            .unwrap();
+        pointer(
+            &mut session,
+            PointerInput::Down {
+                root: Point { x: 50, y: 20 },
+                time: Duration::from_millis(100),
+            },
+        );
+        pointer(
+            &mut session,
+            PointerInput::Up {
+                root: Point { x: 55, y: 25 },
+                time: Duration::from_millis(180),
+            },
+        );
+        assert_eq!(
+            session.document().objects()[0].origin,
+            Point { x: 25, y: 25 }
+        );
     }
 }

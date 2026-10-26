@@ -115,6 +115,26 @@ impl Rect {
     }
 }
 
+/// The four corners of a rectangle spanned by the origin and `end`, in
+/// winding order and closed by repeating the first corner. Both deltas are
+/// relative to the origin and may be negative.
+pub(crate) fn rect_outline(end: Point) -> [Point; 5] {
+    let left = 0.min(end.x);
+    let right = 0.max(end.x);
+    let top = 0.min(end.y);
+    let bottom = 0.max(end.y);
+    [
+        Point { x: left, y: top },
+        Point { x: right, y: top },
+        Point {
+            x: right,
+            y: bottom,
+        },
+        Point { x: left, y: bottom },
+        Point { x: left, y: top },
+    ]
+}
+
 fn distance(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
     (ax - bx).hypot(ay - by)
 }

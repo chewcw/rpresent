@@ -135,6 +135,7 @@ modifiers = "Ctrl"
 "annotation.tool.select" = "v"
 "annotation.tool.pen" = "p"
 "annotation.tool.line" = "l"
+"annotation.tool.rect" = "r"
 "annotation.tool.eraser" = "e"
 "annotation.tool.text" = "t"
 "annotation.color.next" = "c"
@@ -199,7 +200,8 @@ Press the configured annotation shortcut (the default is `Ctrl+2`) to start edit
 
 While annotation editing owns input, spotlight stays at its last rendered position, including its center dot. Hovering, drawing, moving objects, erasing, and editing text do not move it. When editing stops, spotlight moves to the current pointer position after it regains input ownership. Finished artwork alone does not hold spotlight in place.
 
-- Tools follow the configured bindings; the defaults are `v` Select, `p` Pen, `l` Line, `e` Eraser, and `t` Text.
+- Tools follow the configured bindings; the defaults are `v` Select, `p` Pen, `l` Line, `r` Rect, `e` Eraser, and `t` Text.
+- The Rect tool draws an outlined rectangle. Only its edges are selectable and erasable; its interior is not.
 - `c` cycles colors forward and `C` backward. `[` and `]` cycle stroke widths, and `-` and `=` cycle text sizes.
 - `Ctrl+z` undoes, `Ctrl+Z` redoes, and `Delete` removes the selected object. `Ctrl+Y` is not a default redo binding.
 - Press Enter to commit text, Shift+Enter to insert a newline, and Escape to cancel the draft.

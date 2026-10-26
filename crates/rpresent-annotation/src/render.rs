@@ -3,7 +3,7 @@ use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, S
 
 use crate::document::{Object, ObjectData, Point};
 use crate::error::OverlayError;
-use crate::geometry::Rect;
+use crate::geometry::{Rect, rect_outline};
 use crate::session::{Gesture, Session, TEXT_BOX_PADDING_PX, TextEdit};
 use crate::text::TextSystem;
 
@@ -114,6 +114,18 @@ impl Renderer {
                     &clip,
                 );
             }
+            Some(Gesture::Rect { origin, end }) => {
+                let width = session.width_px();
+                draw_polyline(
+                    &mut self.pixmap,
+                    &self.mask,
+                    *origin,
+                    &rect_outline(*end),
+                    width,
+                    session.color(),
+                    &clip,
+                );
+            }
             _ => {}
         }
 
@@ -194,6 +206,15 @@ impl Renderer {
                 object.color,
                 clip,
             ),
+            ObjectData::Rect { end, width_px } => draw_polyline(
+                &mut self.pixmap,
+                &self.mask,
+                object.origin,
+                &rect_outline(*end),
+                *width_px,
+                object.color,
+                clip,
+            ),
             ObjectData::Text { .. } => {
                 let [red, green, blue] = object.color;
                 let color = TextColor::rgb(red, green, blue);
@@ -227,6 +248,9 @@ pub(crate) fn object_paint_bounds(text_system: &mut TextSystem, object: &Object)
         ObjectData::Pen { points, width_px } => stroke_bounds(object.origin, points, *width_px),
         ObjectData::Line { end, width_px } => {
             stroke_bounds(object.origin, &[Point::default(), *end], *width_px)
+        }
+        ObjectData::Rect { end, width_px } => {
+            stroke_bounds(object.origin, &rect_outline(*end), *width_px)
         }
         ObjectData::Text { .. } => text_system.bounds(object).padded(2),
     }
@@ -961,5 +985,76 @@ mod parity_tests {
             .command(AnnotationCommand::Color(crate::Preset::Next))
             .unwrap();
         assert!(session.take_damage().is_none());
+    }
+
+    #[test]
+    fn rect_paints_edges_but_leaves_the_interior_transparent() {
+        let mut session = Session::new(
+            &AnnotationConfig::default(),
+            &crate::session::default_bindings(),
+        )
+        .unwrap();
+        session.command(AnnotationCommand::On).unwrap();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Rect))
+            .unwrap();
+        session.ownership(Some(1));
+        drag(&mut session, (20, 20), (80, 60));
+
+        let mut renderer = Renderer::new(100, 100).unwrap();
+        let whole = renderer.full_bounds();
+        renderer.redraw(&mut session, whole).unwrap();
+        let alpha = |x: usize, y: usize| renderer.pixels()[(y * 100 + x) * 4 + 3];
+        assert!(alpha(50, 20) > 0, "top edge");
+        assert!(alpha(20, 40) > 0, "left edge");
+        assert!(alpha(80, 40) > 0, "right edge");
+        assert!(alpha(50, 60) > 0, "bottom edge");
+        assert_eq!(alpha(50, 40), 0, "interior");
+    }
+
+    #[test]
+    fn rect_drag_preview_matches_the_released_object() {
+        let mut session = Session::new(
+            &AnnotationConfig::default(),
+            &crate::session::default_bindings(),
+        )
+        .unwrap();
+        session.command(AnnotationCommand::On).unwrap();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Rect))
+            .unwrap();
+        session.ownership(Some(1));
+        session.pointer(
+            1,
+            PointerInput::Down {
+                root: CanvasPoint { x: 20, y: 20 },
+                time: Duration::ZERO,
+            },
+        );
+        session.pointer(
+            1,
+            PointerInput::Move {
+                root: CanvasPoint { x: 80, y: 60 },
+                time: Duration::from_millis(5),
+            },
+        );
+        let mut preview = Renderer::new(100, 100).unwrap();
+        let whole = preview.full_bounds();
+        preview.redraw(&mut session, whole).unwrap();
+        assert_eq!(
+            preview.pixels()[(40 * 100 + 50) * 4 + 3],
+            0,
+            "preview interior"
+        );
+        session.pointer(
+            1,
+            PointerInput::Up {
+                root: CanvasPoint { x: 80, y: 60 },
+                time: Duration::from_millis(10),
+            },
+        );
+        let mut released = Renderer::new(100, 100).unwrap();
+        released.redraw(&mut session, whole).unwrap();
+        assert_eq!(preview.pixels(), released.pixels());
     }
 }

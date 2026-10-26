@@ -21,6 +21,10 @@ pub enum ObjectData {
         end: Point,
         width_px: u32,
     },
+    Rect {
+        end: Point,
+        width_px: u32,
+    },
     Text {
         text: String,
         family: String,
@@ -198,6 +202,10 @@ mod tests {
 
     fn line(end: Point) -> ObjectData {
         ObjectData::Line { end, width_px: 6 }
+    }
+
+    fn rect(end: Point) -> ObjectData {
+        ObjectData::Rect { end, width_px: 6 }
     }
 
     #[test]
@@ -396,5 +404,46 @@ mod tests {
             },
         );
         assert!(!document.can_redo());
+    }
+
+    #[test]
+    fn rect_round_trips_through_undo_and_redo() {
+        let mut document = Document::new(4);
+        let origin = Point { x: 10, y: 20 };
+        let end = Point { x: 40, y: 30 };
+        let id = document.insert(origin, [1, 2, 3], rect(end));
+        assert!(document.undo());
+        assert!(document.objects().is_empty());
+        assert!(document.redo());
+        assert_eq!(
+            document.objects(),
+            &[Object {
+                id,
+                origin,
+                color: [1, 2, 3],
+                data: rect(end),
+            }]
+        );
+    }
+
+    #[test]
+    fn rect_bounds_cover_stroke_width_and_negative_deltas() {
+        let object = Object {
+            id: 0,
+            origin: Point { x: 100, y: 100 },
+            color: [0, 0, 0],
+            data: rect(Point { x: -40, y: 20 }),
+        };
+        let mut text_system = crate::text::TextSystem::new();
+        let bounds = crate::render::object_paint_bounds(&mut text_system, &object);
+        assert_eq!(
+            bounds,
+            crate::geometry::Rect {
+                x: 55,
+                y: 95,
+                width: 50,
+                height: 30,
+            }
+        );
     }
 }
