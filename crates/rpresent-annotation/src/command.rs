@@ -113,6 +113,7 @@ impl Display for AnnotationCommand {
                 AnnotationTool::Select => f.write_str("annotation=tool=select"),
                 AnnotationTool::Pen => f.write_str("annotation=tool=pen"),
                 AnnotationTool::Line => f.write_str("annotation=tool=line"),
+                AnnotationTool::Arrow => f.write_str("annotation=tool=arrow"),
                 AnnotationTool::Rect => f.write_str("annotation=tool=rect"),
                 AnnotationTool::Eraser => f.write_str("annotation=tool=eraser"),
                 AnnotationTool::Text => f.write_str("annotation=tool=text"),

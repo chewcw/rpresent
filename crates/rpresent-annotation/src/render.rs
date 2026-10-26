@@ -114,6 +114,17 @@ impl Renderer {
                     &clip,
                 );
             }
+            Some(Gesture::Arrow { origin, end }) => {
+                draw_arrow(
+                    &mut self.pixmap,
+                    &self.mask,
+                    *origin,
+                    *end,
+                    session.width_px(),
+                    session.color(),
+                    &clip,
+                );
+            }
             Some(Gesture::Rect { origin, end }) => {
                 let width = session.width_px();
                 draw_polyline(
@@ -1102,6 +1113,50 @@ mod parity_tests {
             1,
             PointerInput::Up {
                 root: CanvasPoint { x: 80, y: 60 },
+                time: Duration::from_millis(10),
+            },
+        );
+        let mut released = Renderer::new(100, 100).unwrap();
+        released.redraw(&mut session, whole).unwrap();
+        assert_eq!(preview.pixels(), released.pixels());
+    }
+
+    #[test]
+    fn arrow_drag_preview_matches_the_released_object() {
+        let mut session = Session::new(
+            &AnnotationConfig::default(),
+            &crate::session::default_bindings(),
+        )
+        .unwrap();
+        session.command(AnnotationCommand::On).unwrap();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Arrow))
+            .unwrap();
+        session.ownership(Some(1));
+        session.pointer(
+            1,
+            PointerInput::Down {
+                root: CanvasPoint { x: 20, y: 50 },
+                time: Duration::ZERO,
+            },
+        );
+        session.pointer(
+            1,
+            PointerInput::Move {
+                root: CanvasPoint { x: 80, y: 50 },
+                time: Duration::from_millis(5),
+            },
+        );
+        let mut preview = Renderer::new(100, 100).unwrap();
+        let whole = preview.full_bounds();
+        preview.redraw(&mut session, whole).unwrap();
+        let alpha = |x: usize, y: usize| preview.pixels()[(y * 100 + x) * 4 + 3];
+        assert!(alpha(50, 50) > 0, "preview shaft");
+        assert_eq!(alpha(30, 40), 0, "preview open V");
+        session.pointer(
+            1,
+            PointerInput::Up {
+                root: CanvasPoint { x: 80, y: 50 },
                 time: Duration::from_millis(10),
             },
         );

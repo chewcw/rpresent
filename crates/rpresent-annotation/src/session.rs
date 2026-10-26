@@ -92,6 +92,10 @@ pub(crate) enum Gesture {
         origin: Point,
         end: Point,
     },
+    Arrow {
+        origin: Point,
+        end: Point,
+    },
     Move {
         id: ObjectId,
         start: Point,
@@ -737,6 +741,12 @@ impl Session {
                     end: Point::default(),
                 });
             }
+            AnnotationTool::Arrow => {
+                self.gesture = Some(Gesture::Arrow {
+                    origin: root,
+                    end: Point::default(),
+                });
+            }
             AnnotationTool::Eraser => {
                 let hidden = self.erase_hits(root, root);
                 self.gesture = Some(Gesture::Erase { hidden, last: root });
@@ -760,7 +770,9 @@ impl Session {
                     points.push(local);
                 }
             }
-            Some(Gesture::Line { origin, end }) | Some(Gesture::Rect { origin, end }) => {
+            Some(Gesture::Line { origin, end })
+            | Some(Gesture::Rect { origin, end })
+            | Some(Gesture::Arrow { origin, end }) => {
                 *end = Point {
                     x: root.x - origin.x,
                     y: root.y - origin.y,
@@ -846,6 +858,20 @@ impl Session {
                 let color = self.color();
                 self.document
                     .insert(origin, color, ObjectData::Rect { end, width_px });
+                self.mark_last_object();
+            }
+            Some(Gesture::Arrow { origin, .. }) => {
+                let end = Point {
+                    x: root.x - origin.x,
+                    y: root.y - origin.y,
+                };
+                if end == Point::default() {
+                    return;
+                }
+                let width_px = self.width_px();
+                let color = self.color();
+                self.document
+                    .insert(origin, color, ObjectData::Arrow { end, width_px });
                 self.mark_last_object();
             }
             Some(Gesture::Move {
@@ -1145,6 +1171,11 @@ impl Session {
             Some(Gesture::Rect { origin, end }) => Some(crate::render::stroke_bounds(
                 origin,
                 &rect_outline(end),
+                self.width_px(),
+            )),
+            Some(Gesture::Arrow { origin, end }) => Some(crate::render::stroke_bounds(
+                origin,
+                &arrow_outline(end, self.width_px()),
                 self.width_px(),
             )),
             Some(Gesture::Move { id, offset, .. }) => {
@@ -2342,6 +2373,192 @@ mod tests {
         assert_eq!(
             session.document().objects()[0].origin,
             Point { x: 25, y: 25 }
+        );
+    }
+
+    fn arrow_session() -> Session {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Arrow))
+            .unwrap();
+        session
+    }
+
+    #[test]
+    fn arrow_drag_stores_the_active_style_and_tip() {
+        let mut session = arrow_session();
+        let color = session.color();
+        let width_px = session.width_px();
+        drag(&mut session, Point { x: 10, y: 20 }, Point { x: 70, y: 60 });
+        let object = &session.document().objects()[0];
+        assert_eq!(object.origin, Point { x: 10, y: 20 });
+        assert_eq!(object.color, color);
+        match &object.data {
+            ObjectData::Arrow {
+                end,
+                width_px: stored,
+            } => {
+                assert_eq!(*end, Point { x: 60, y: 40 });
+                assert_eq!(*stored, width_px);
+            }
+            other => panic!("unexpected object {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arrow_drags_keep_the_direction() {
+        let mut forward = arrow_session();
+        drag(
+            &mut forward,
+            Point { x: 10, y: 50 },
+            Point { x: 80, y: 50 },
+        );
+        let forward_width = forward.width_px();
+        assert_eq!(
+            forward.document().objects()[0].data,
+            ObjectData::Arrow {
+                end: Point { x: 70, y: 0 },
+                width_px: forward_width,
+            }
+        );
+
+        let mut backward = arrow_session();
+        drag(
+            &mut backward,
+            Point { x: 80, y: 50 },
+            Point { x: 10, y: 50 },
+        );
+        let backward_width = backward.width_px();
+        assert_eq!(
+            backward.document().objects()[0].data,
+            ObjectData::Arrow {
+                end: Point { x: -70, y: 0 },
+                width_px: backward_width,
+            }
+        );
+    }
+
+    #[test]
+    fn arrow_click_without_movement_inserts_nothing() {
+        let mut session = arrow_session();
+        click(&mut session, Point { x: 20, y: 20 }, Duration::ZERO);
+        assert!(session.document().objects().is_empty());
+        assert!(!session.document().can_undo());
+    }
+
+    #[test]
+    fn one_pixel_arrow_drag_inserts() {
+        let mut session = arrow_session();
+        drag(
+            &mut session,
+            Point { x: 20, y: 20 },
+            Point { x: 21, y: 20 },
+        );
+        assert_eq!(session.document().objects().len(), 1);
+    }
+
+    #[test]
+    fn arrow_hits_shaft_and_barbs_but_not_the_open_v() {
+        let mut session = arrow_session();
+        drag(
+            &mut session,
+            Point { x: 20, y: 50 },
+            Point { x: 80, y: 50 },
+        );
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Select))
+            .unwrap();
+
+        click(
+            &mut session,
+            Point { x: 50, y: 50 },
+            Duration::from_millis(100),
+        );
+        assert!(session.selection().is_some(), "shaft");
+
+        click(
+            &mut session,
+            Point { x: 30, y: 40 },
+            Duration::from_millis(300),
+        );
+        assert!(session.selection().is_none(), "open V");
+
+        let arrow = session.document().objects()[0].clone();
+        let [_, _, barb_a, _] = arrow_outline(Point { x: 60, y: 0 }, session.width_px());
+        click(
+            &mut session,
+            arrow.point(barb_a),
+            Duration::from_millis(500),
+        );
+        assert!(session.selection().is_some(), "barb");
+    }
+
+    #[test]
+    fn eraser_drag_across_an_arrow_barb_deletes_it() {
+        let mut session = arrow_session();
+        drag(
+            &mut session,
+            Point { x: 20, y: 50 },
+            Point { x: 90, y: 50 },
+        );
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Eraser))
+            .unwrap();
+        drag(
+            &mut session,
+            Point { x: 75, y: 30 },
+            Point { x: 75, y: 42 },
+        );
+        assert!(session.document().objects().is_empty());
+    }
+
+    #[test]
+    fn eraser_drag_across_an_arrow_shaft_deletes_it() {
+        let mut session = arrow_session();
+        drag(
+            &mut session,
+            Point { x: 20, y: 50 },
+            Point { x: 80, y: 50 },
+        );
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Eraser))
+            .unwrap();
+        drag(
+            &mut session,
+            Point { x: 50, y: 40 },
+            Point { x: 50, y: 60 },
+        );
+        assert!(session.document().objects().is_empty());
+    }
+
+    #[test]
+    fn pressing_an_arrow_shaft_then_dragging_moves_it() {
+        let mut session = arrow_session();
+        drag(
+            &mut session,
+            Point { x: 20, y: 50 },
+            Point { x: 80, y: 50 },
+        );
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Select))
+            .unwrap();
+        pointer(
+            &mut session,
+            PointerInput::Down {
+                root: Point { x: 50, y: 50 },
+                time: Duration::from_millis(100),
+            },
+        );
+        pointer(
+            &mut session,
+            PointerInput::Up {
+                root: Point { x: 55, y: 55 },
+                time: Duration::from_millis(180),
+            },
+        );
+        assert_eq!(
+            session.document().objects()[0].origin,
+            Point { x: 25, y: 55 }
         );
     }
 }
