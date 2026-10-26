@@ -282,9 +282,9 @@ pub fn parse_wheel_modifiers(value: &str) -> Result<Mods, ShortcutError> {
 
 fn default_global() -> BTreeMap<String, String> {
     BTreeMap::from([
-        ("spotlight.toggle".into(), "Ctrl+1".into()),
-        ("annotation.toggle".into(), "Ctrl+2".into()),
-        ("zoom.toggle".into(), "Ctrl+3".into()),
+        ("spotlight.toggle".into(), "Ctrl+Alt+1".into()),
+        ("annotation.toggle".into(), "Ctrl+Alt+2".into()),
+        ("zoom.toggle".into(), "Ctrl+Alt+3".into()),
     ])
 }
 

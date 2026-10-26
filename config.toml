@@ -2,28 +2,28 @@
 socket_name = "rpresent.sock"
 
 [spotlight]
-enabled_on_start = true
+enabled_on_start = false
 show_spot_shade = true
 show_center_dot = true
 dot_size_px = 8
 dot_color = "#ffffff"
-dot_opacity = 0.800000011920929
+dot_opacity = 0.8
 shade_color = "#000000"
-shade_opacity = 0.6000000238418579
+shade_opacity = 0.8
 show_border = true
-border_color = "#ffffff"
-border_size_pct = 10
-border_opacity = 0.800000011920929
-radius_px = 240
-softness_px = 80
-wheel_speed = 12.0
+border_color = "#111111"
+border_size_pct = 2
+border_opacity = 1.0
+radius_px = 120
+softness_px = 20
+wheel_speed = 24.0
 
 [spotlight.shape]
 type = "circle"
 
 [annotation]
 enabled_on_start = false
-default_tool = "pen"
+default_tool = "arrow"
 colors = [
     "#FF0000",
     "#FFFF00",
@@ -59,9 +59,9 @@ drag_friction = 6.0
 scale_friction = 5.0
 
 [shortcuts.global]
-"annotation.toggle" = "Ctrl+2"
-"spotlight.toggle" = "Ctrl+1"
-"zoom.toggle" = "Ctrl+3"
+"annotation.toggle" = "Ctrl+Alt+2"
+"spotlight.toggle" = "Ctrl+Alt+1"
+"zoom.toggle" = "Ctrl+Alt+3"
 
 [shortcuts.annotation]
 "annotation.clear" = "x"

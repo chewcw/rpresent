@@ -423,7 +423,7 @@ fn default_socket_name() -> String {
 }
 
 fn default_spotlight_enabled() -> bool {
-    true
+    false
 }
 
 fn default_show_spot_shade() -> bool {
@@ -451,7 +451,7 @@ fn default_shade_color() -> String {
 }
 
 fn default_shade_opacity() -> f32 {
-    0.6
+    0.8
 }
 
 fn default_show_border() -> bool {
@@ -459,15 +459,15 @@ fn default_show_border() -> bool {
 }
 
 fn default_border_color() -> String {
-    "#ffffff".to_owned()
+    "#111111".to_owned()
 }
 
 fn default_border_size_pct() -> u32 {
-    10
+    2
 }
 
 fn default_border_opacity() -> f32 {
-    0.8
+    1.0
 }
 
 fn default_corner_radius_pct() -> u32 {
@@ -487,15 +487,15 @@ fn default_ngon_sides() -> u32 {
 }
 
 fn default_radius_px() -> u32 {
-    240
+    120
 }
 
 fn default_softness_px() -> u32 {
-    80
+    20
 }
 
 fn default_wheel_speed() -> f32 {
-    12.0
+    24.0
 }
 
 fn default_annotation_enabled() -> bool {
@@ -503,7 +503,7 @@ fn default_annotation_enabled() -> bool {
 }
 
 fn default_annotation_tool() -> AnnotationTool {
-    AnnotationTool::Pen
+    AnnotationTool::Arrow
 }
 
 fn default_zoom_enabled() -> bool {
