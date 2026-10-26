@@ -2094,12 +2094,12 @@ mod tests {
             .command(AnnotationCommand::Tool(AnnotationTool::Text))
             .unwrap();
         click(&mut session, Point { x: 10, y: 10 }, Duration::ZERO);
-        type_text(&mut session, "vpletCc[]-=");
+        type_text(&mut session, "vpletCc[]-=x");
         assert_eq!(session.tool(), AnnotationTool::Text);
         assert!(session.status().text_editing);
         assert_eq!(
             session.text_edit.as_ref().unwrap().draft.plain_text(),
-            "vpletCc[]-="
+            "vpletCc[]-=x"
         );
     }
 
@@ -2143,6 +2143,31 @@ mod tests {
         assert_ne!(session.text_size_px(), size);
         press(&mut session, "-");
         assert_eq!(session.text_size_px(), size);
+    }
+
+    #[test]
+    fn default_clear_binding_erases_and_undo_restores() {
+        let mut session = ready_session();
+        drag(&mut session, Point { x: 0, y: 0 }, Point { x: 50, y: 0 });
+        drag(&mut session, Point { x: 0, y: 10 }, Point { x: 50, y: 10 });
+        let ids: Vec<ObjectId> = session
+            .document()
+            .objects()
+            .iter()
+            .map(|object| object.id)
+            .collect();
+
+        press(&mut session, "x");
+        assert!(session.document().objects().is_empty());
+
+        session.command(AnnotationCommand::Undo).unwrap();
+        let restored: Vec<ObjectId> = session
+            .document()
+            .objects()
+            .iter()
+            .map(|object| object.id)
+            .collect();
+        assert_eq!(restored, ids);
     }
 
     #[test]

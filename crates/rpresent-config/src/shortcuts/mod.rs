@@ -293,6 +293,7 @@ fn default_annotation() -> BTreeMap<String, String> {
         ("annotation.undo".into(), "Ctrl+z".into()),
         ("annotation.redo".into(), "Ctrl+Z".into()),
         ("annotation.delete".into(), "Delete".into()),
+        ("annotation.clear".into(), "x".into()),
         ("annotation.tool.select".into(), "v".into()),
         ("annotation.tool.pen".into(), "p".into()),
         ("annotation.tool.line".into(), "l".into()),

@@ -2,6 +2,8 @@ use rpresent_config::shortcuts::{KeyInput, Mods, ShortcutConfig};
 
 #[test]
 fn explicit_scope_replaces_defaults() {
+    use rpresent_config::shortcuts::ShortcutDispatcher;
+
     let settings: ShortcutConfig =
         toml::from_str("[global]\n\"zoom.toggle\" = \"Ctrl+F8\"\n[annotation]\n").unwrap();
     let bindings = settings.validate().unwrap();
@@ -12,6 +14,9 @@ fn explicit_scope_replaces_defaults() {
     );
     assert!(bindings.annotation.is_empty());
     assert_eq!(bindings.wheel, Mods::CTRL);
+
+    let mut dispatcher = ShortcutDispatcher::new(&bindings.annotation);
+    assert_eq!(dispatcher.dispatch("x".parse().unwrap()), None);
 }
 
 #[test]
@@ -32,7 +37,7 @@ fn absent_tables_use_scope_defaults() {
     let settings: ShortcutConfig = toml::from_str("").unwrap();
     let bindings = settings.validate().unwrap();
     assert_eq!(bindings.global.len(), 3);
-    assert_eq!(bindings.annotation.len(), 16);
+    assert_eq!(bindings.annotation.len(), 17);
     assert_eq!(bindings.wheel, Mods::CTRL);
     assert_eq!(bindings.global[0].action.name(), "annotation.toggle");
     assert_eq!(bindings.global[1].action.name(), "spotlight.toggle");
@@ -60,6 +65,14 @@ fn absent_tables_use_scope_defaults() {
             .find(|binding| binding.action.name() == "annotation.tool.arrow")
             .map(|binding| binding.expression.as_str()),
         Some("a")
+    );
+    assert_eq!(
+        bindings
+            .annotation
+            .iter()
+            .find(|binding| binding.action.name() == "annotation.clear")
+            .map(|binding| binding.expression.as_str()),
+        Some("x")
     );
 }
 
@@ -177,6 +190,10 @@ fn uppercase_and_lowercase_dispatch_distinct_actions() {
     assert_eq!(
         dispatcher.dispatch("Ctrl+Z".parse().unwrap()),
         Some(ShortcutAction::AnnotationRedo)
+    );
+    assert_eq!(
+        dispatcher.dispatch("x".parse().unwrap()),
+        Some(ShortcutAction::AnnotationClear)
     );
     assert_eq!(dispatcher.dispatch("Alt+z".parse().unwrap()), None);
 }
