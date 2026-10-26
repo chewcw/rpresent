@@ -115,6 +115,47 @@ cargo run -p rpresent -- config init --config ~/.config/rpresent/config.toml
 
 `config init` writes the default config and will not overwrite an existing file.
 
+### Shortcuts
+
+Shortcuts are configured with two scoped action tables and one wheel modifier:
+
+```toml
+[shortcuts.wheel]
+modifiers = "Ctrl"
+
+[shortcuts.global]
+"spotlight.toggle" = "Ctrl+1"
+"annotation.toggle" = "Ctrl+2"
+"zoom.toggle" = "Ctrl+3"
+
+[shortcuts.annotation]
+"annotation.undo" = "Ctrl+z"
+"annotation.redo" = "Ctrl+Z"
+"annotation.delete" = "Delete"
+"annotation.tool.select" = "v"
+"annotation.tool.pen" = "p"
+"annotation.tool.line" = "l"
+"annotation.tool.eraser" = "e"
+"annotation.tool.text" = "t"
+"annotation.color.next" = "c"
+"annotation.color.prev" = "C"
+"annotation.width.prev" = "["
+"annotation.width.next" = "]"
+"annotation.text-size.prev" = "-"
+"annotation.text-size.next" = "="
+```
+
+`annotation.clear` has no default binding; add it to the annotation table to enable it. The defaults shown above are also what an omitted scope uses.
+
+- An omitted scope uses defaults. An explicit scope replaces its entire map. An empty scope disables its configurable bindings.
+- Character keys are case sensitive. `Super+Z` means the uppercase character, which is Shift plus `z` on the keyboard, and `Ctrl+z` differs from `Ctrl+Z`. Use `Ctrl+Z`, not `Ctrl+Shift+z`, for the default redo binding.
+- Wheel combinations use the package modifier names such as `Super+Shift`. `Meta` is not a supported application alias.
+- Global bindings take precedence. Annotation canvas bindings never intercept an active text draft.
+- Keyboard shortcuts follow the current layout. Caps Lock and Num Lock do not change shortcut matching, while typed text still reflects them.
+- A binding this display cannot register, or a grab conflict, is an error. Nothing silently falls back.
+
+The shortcut backend is an implementation boundary used by the Linux/X11 input thread; no other platform is implemented.
+
 ### Spotlight settings
 
 The spotlight uses one configured radius and one shade opacity for every render path:
@@ -158,9 +199,9 @@ Press the configured annotation shortcut (the default is `Ctrl+2`) to start edit
 
 While annotation editing owns input, spotlight stays at its last rendered position, including its center dot. Hovering, drawing, moving objects, erasing, and editing text do not move it. When editing stops, spotlight moves to the current pointer position after it regains input ownership. Finished artwork alone does not hold spotlight in place.
 
-- Tools: `v` Select, `p` Pen, `l` Line, `e` Eraser, `t` Text.
-- `c` cycles colors (hold Shift to cycle backward). `[` and `]` cycle stroke widths. `-` and `=` cycle text sizes.
-- `Ctrl+Z` undoes, `Ctrl+Shift+Z` or `Ctrl+Y` redoes, and `Delete` removes the selected object.
+- Tools follow the configured bindings; the defaults are `v` Select, `p` Pen, `l` Line, `e` Eraser, and `t` Text.
+- `c` cycles colors forward and `C` backward. `[` and `]` cycle stroke widths, and `-` and `=` cycle text sizes.
+- `Ctrl+z` undoes, `Ctrl+Z` redoes, and `Delete` removes the selected object. `Ctrl+Y` is not a default redo binding.
 - Press Enter to commit text, Shift+Enter to insert a newline, and Escape to cancel the draft.
 - `Ctrl+V` pastes clipboard text into the current text draft.
 - The eraser deletes whole objects, and drag with the Select tool moves one object.
@@ -172,7 +213,7 @@ A drawing toolbar appears automatically while editing, at the top of the monitor
 - Clicking a picker opens it; clicking another picker replaces it; clicking outside dismisses it without drawing or changing the selection; Escape closes an open picker before any other Escape behavior.
 - Clear erases all committed objects immediately, without a confirmation dialog, and the next Undo restores them exactly.
 - Exit stops editing while finished artwork stays visible and click-through.
-- Choosing a tool or preset from the toolbar cancels an uncommitted text draft, just like the keyboard shortcuts do.
+- Choosing a tool or preset from the toolbar cancels an uncommitted text draft. Canvas shortcut bindings do not apply while a draft is active, so typing a shortcut letter inserts text instead.
 - Toolbar Undo and Redo act on the document history; `Ctrl+Z` while editing text remains local to the draft.
 
 Colors can also be selected from the command line; quote the value so the shell keeps the `#`:
