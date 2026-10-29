@@ -1698,10 +1698,18 @@ mod tests {
             ellipse_object(Point { x: 60, y: 60 }),
         );
 
-        click(&mut session, Point { x: 50, y: 50 }, Duration::from_millis(0));
+        click(
+            &mut session,
+            Point { x: 50, y: 50 },
+            Duration::from_millis(0),
+        );
         assert_eq!(session.selection(), None, "interior misses");
 
-        click(&mut session, Point { x: 50, y: 20 }, Duration::from_millis(100));
+        click(
+            &mut session,
+            Point { x: 50, y: 20 },
+            Duration::from_millis(100),
+        );
         assert!(session.selection().is_some(), "outline hits");
     }
 
