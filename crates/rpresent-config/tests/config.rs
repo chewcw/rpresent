@@ -350,3 +350,9 @@ fn arrow_is_a_valid_default_tool() {
     let config = load_from_str("[annotation]\ndefault_tool = \"arrow\"\n").unwrap();
     assert_eq!(config.annotation.default_tool, AnnotationTool::Arrow);
 }
+
+#[test]
+fn ellipse_is_a_valid_default_tool() {
+    let config = load_from_str("[annotation]\ndefault_tool = \"ellipse\"\n").unwrap();
+    assert_eq!(config.annotation.default_tool, AnnotationTool::Ellipse);
+}

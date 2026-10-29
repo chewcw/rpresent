@@ -309,6 +309,7 @@ fn translate_event(
                     input: RawPointer::Down {
                         root: (i32::from(press.root_x), i32::from(press.root_y)),
                         time: Duration::from_millis(u64::from(press.time)),
+                        modifiers: backend.pointer_modifiers(u16::from(press.state)),
                     },
                 });
             }
@@ -320,6 +321,7 @@ fn translate_event(
                     input: RawPointer::Up {
                         root: (i32::from(event.root_x), i32::from(event.root_y)),
                         time: Duration::from_millis(u64::from(event.time)),
+                        modifiers: backend.pointer_modifiers(u16::from(event.state)),
                     },
                 });
             }
@@ -331,6 +333,7 @@ fn translate_event(
                     input: RawPointer::Move {
                         root: (i32::from(event.root_x), i32::from(event.root_y)),
                         time: Duration::from_millis(u64::from(event.time)),
+                        modifiers: backend.pointer_modifiers(u16::from(event.state)),
                     },
                 });
             }

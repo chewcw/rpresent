@@ -38,6 +38,7 @@ pub enum AnnotationTool {
     Line,
     Arrow,
     Rect,
+    Ellipse,
     Eraser,
     Text,
 }

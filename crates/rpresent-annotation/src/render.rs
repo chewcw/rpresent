@@ -3,7 +3,7 @@ use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, S
 
 use crate::document::{Object, ObjectData, Point};
 use crate::error::OverlayError;
-use crate::geometry::{Rect, arrow_outline, rect_outline};
+use crate::geometry::{Rect, arrow_outline, ellipse_outline, rect_outline};
 use crate::session::{Gesture, Session, TEXT_BOX_PADDING_PX, TextEdit};
 use crate::text::TextSystem;
 
@@ -137,6 +137,18 @@ impl Renderer {
                     &clip,
                 );
             }
+            Some(Gesture::Ellipse { origin, end }) => {
+                let width = session.width_px();
+                draw_polyline(
+                    &mut self.pixmap,
+                    &self.mask,
+                    *origin,
+                    &ellipse_outline(*end),
+                    width,
+                    session.color(),
+                    &clip,
+                );
+            }
             _ => {}
         }
 
@@ -226,6 +238,15 @@ impl Renderer {
                 object.color,
                 clip,
             ),
+            ObjectData::Ellipse { end, width_px } => draw_polyline(
+                &mut self.pixmap,
+                &self.mask,
+                object.origin,
+                &ellipse_outline(*end),
+                *width_px,
+                object.color,
+                clip,
+            ),
             ObjectData::Arrow { end, width_px } => draw_arrow(
                 &mut self.pixmap,
                 &self.mask,
@@ -271,6 +292,9 @@ pub(crate) fn object_paint_bounds(text_system: &mut TextSystem, object: &Object)
         }
         ObjectData::Rect { end, width_px } => {
             stroke_bounds(object.origin, &rect_outline(*end), *width_px)
+        }
+        ObjectData::Ellipse { end, width_px } => {
+            stroke_bounds(object.origin, &ellipse_outline(*end), *width_px)
         }
         ObjectData::Arrow { end, width_px } => {
             stroke_bounds(object.origin, &arrow_outline(*end, *width_px), *width_px)
@@ -627,6 +651,30 @@ mod tests {
         assert!(alpha(object.point(barb_b)) > 0, "second barb");
         assert_eq!(alpha(Point { x: 30, y: 40 }), 0, "open V");
     }
+
+    #[test]
+    fn ellipse_paints_the_outline_but_leaves_the_interior_transparent() {
+        let mut renderer = Renderer::new(100, 100).unwrap();
+        let whole = renderer.full_bounds();
+        renderer.reset_mask(whole);
+        let mut text_system = crate::text::TextSystem::new();
+        let object = Object {
+            id: 0,
+            origin: Point { x: 20, y: 20 },
+            color: [255, 0, 0],
+            data: ObjectData::Ellipse {
+                end: Point { x: 60, y: 60 },
+                width_px: 4,
+            },
+        };
+        renderer.draw_object(&mut text_system, &object, &whole);
+        let alpha = |x: usize, y: usize| renderer.pixels()[(y * 100 + x) * 4 + 3];
+        assert!(alpha(50, 20) > 0, "top");
+        assert!(alpha(20, 50) > 0, "left");
+        assert!(alpha(80, 50) > 0, "right");
+        assert!(alpha(50, 80) > 0, "bottom");
+        assert_eq!(alpha(50, 50), 0, "interior");
+    }
 }
 
 #[cfg(test)]
@@ -662,6 +710,7 @@ mod parity_tests {
                     PointerInput::Down {
                         root: Point { x: 40, y },
                         time: Duration::from_millis(stroke as u64 * 10),
+                        modifiers: crate::Modifiers::default(),
                     },
                 );
                 session.pointer(
@@ -672,6 +721,7 @@ mod parity_tests {
                             y,
                         },
                         time: Duration::from_millis(stroke as u64 * 10 + 5),
+                        modifiers: crate::Modifiers::default(),
                     },
                 );
                 session.pointer(
@@ -682,6 +732,7 @@ mod parity_tests {
                             y,
                         },
                         time: Duration::from_millis(stroke as u64 * 10 + 6),
+                        modifiers: crate::Modifiers::default(),
                     },
                 );
             }
@@ -696,6 +747,7 @@ mod parity_tests {
                     PointerInput::Down {
                         root: Point { x, y: 60 },
                         time: Duration::from_millis(600 + line as u64),
+                        modifiers: crate::Modifiers::default(),
                     },
                 );
                 session.pointer(
@@ -706,6 +758,7 @@ mod parity_tests {
                             y: height as i32 - 80,
                         },
                         time: Duration::from_millis(700 + line as u64),
+                        modifiers: crate::Modifiers::default(),
                     },
                 );
             }
@@ -718,6 +771,7 @@ mod parity_tests {
                 PointerInput::Down {
                     root: Point { x: 80, y: 80 },
                     time: Duration::from_millis(1000),
+                    modifiers: crate::Modifiers::default(),
                 },
             );
             if let Some(edit) = session.text_edit.as_mut() {
@@ -750,6 +804,7 @@ mod parity_tests {
                 PointerInput::Down {
                     root: Point { x: 60, y: 60 },
                     time: Duration::from_millis(2000),
+                    modifiers: crate::Modifiers::default(),
                 },
             );
             session.pointer(
@@ -757,6 +812,7 @@ mod parity_tests {
                 PointerInput::Up {
                     root: Point { x: 60, y: 60 },
                     time: Duration::from_millis(2001),
+                    modifiers: crate::Modifiers::default(),
                 },
             );
             if let Some(damage) = session.take_damage() {
@@ -796,6 +852,7 @@ mod parity_tests {
                         y: start.1,
                     },
                     time: Duration::ZERO,
+                    modifiers: crate::Modifiers::default(),
                 },
             );
             session.pointer(
@@ -803,6 +860,7 @@ mod parity_tests {
                 PointerInput::Up {
                     root: CanvasPoint { x: end.0, y: end.1 },
                     time: Duration::from_millis(10),
+                    modifiers: crate::Modifiers::default(),
                 },
             );
         }
@@ -818,6 +876,7 @@ mod parity_tests {
             PointerInput::Down {
                 root: CanvasPoint { x: 20, y: 20 },
                 time: Duration::from_millis(100),
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -825,6 +884,7 @@ mod parity_tests {
             PointerInput::Up {
                 root: CanvasPoint { x: 20, y: 40 },
                 time: Duration::from_millis(120),
+                modifiers: crate::Modifiers::default(),
             },
         );
         let damage = session.take_damage().unwrap();
@@ -840,6 +900,7 @@ mod parity_tests {
             PointerInput::Down {
                 root: CanvasPoint { x, y },
                 time: Duration::from_millis(millis),
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -847,6 +908,7 @@ mod parity_tests {
             PointerInput::Up {
                 root: CanvasPoint { x, y },
                 time: Duration::from_millis(millis + 10),
+                modifiers: crate::Modifiers::default(),
             },
         );
     }
@@ -860,6 +922,7 @@ mod parity_tests {
                     y: from.1,
                 },
                 time: Duration::from_millis(0),
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -867,6 +930,7 @@ mod parity_tests {
             PointerInput::Move {
                 root: CanvasPoint { x: to.0, y: to.1 },
                 time: Duration::from_millis(5),
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -874,6 +938,7 @@ mod parity_tests {
             PointerInput::Up {
                 root: CanvasPoint { x: to.0, y: to.1 },
                 time: Duration::from_millis(10),
+                modifiers: crate::Modifiers::default(),
             },
         );
     }
@@ -1091,6 +1156,7 @@ mod parity_tests {
             PointerInput::Down {
                 root: CanvasPoint { x: 20, y: 20 },
                 time: Duration::ZERO,
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -1098,6 +1164,7 @@ mod parity_tests {
             PointerInput::Move {
                 root: CanvasPoint { x: 80, y: 60 },
                 time: Duration::from_millis(5),
+                modifiers: crate::Modifiers::default(),
             },
         );
         let mut preview = Renderer::new(100, 100).unwrap();
@@ -1113,6 +1180,76 @@ mod parity_tests {
             PointerInput::Up {
                 root: CanvasPoint { x: 80, y: 60 },
                 time: Duration::from_millis(10),
+                modifiers: crate::Modifiers::default(),
+            },
+        );
+        let mut released = Renderer::new(100, 100).unwrap();
+        released.redraw(&mut session, whole).unwrap();
+        assert_eq!(preview.pixels(), released.pixels());
+    }
+
+    #[test]
+    fn ellipse_paints_edges_but_leaves_the_interior_transparent() {
+        let mut session = Session::new(
+            &AnnotationConfig::default(),
+            &crate::session::default_bindings(),
+        )
+        .unwrap();
+        session.command(AnnotationCommand::On).unwrap();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Ellipse))
+            .unwrap();
+        session.ownership(Some(1));
+        drag(&mut session, (20, 20), (80, 60));
+
+        let mut renderer = Renderer::new(100, 100).unwrap();
+        let whole = renderer.full_bounds();
+        renderer.redraw(&mut session, whole).unwrap();
+        let alpha = |x: usize, y: usize| renderer.pixels()[(y * 100 + x) * 4 + 3];
+        assert!(alpha(50, 20) > 0, "top edge");
+        assert!(alpha(20, 40) > 0, "left edge");
+        assert!(alpha(80, 40) > 0, "right edge");
+        assert!(alpha(50, 60) > 0, "bottom edge");
+        assert_eq!(alpha(50, 40), 0, "interior");
+    }
+
+    #[test]
+    fn ellipse_drag_preview_matches_the_released_object() {
+        let mut session = Session::new(
+            &AnnotationConfig::default(),
+            &crate::session::default_bindings(),
+        )
+        .unwrap();
+        session.command(AnnotationCommand::On).unwrap();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Ellipse))
+            .unwrap();
+        session.ownership(Some(1));
+        session.pointer(
+            1,
+            PointerInput::Down {
+                root: CanvasPoint { x: 20, y: 20 },
+                time: Duration::ZERO,
+                modifiers: crate::Modifiers::default(),
+            },
+        );
+        session.pointer(
+            1,
+            PointerInput::Move {
+                root: CanvasPoint { x: 80, y: 60 },
+                time: Duration::from_millis(5),
+                modifiers: crate::Modifiers::default(),
+            },
+        );
+        let mut preview = Renderer::new(100, 100).unwrap();
+        let whole = preview.full_bounds();
+        preview.redraw(&mut session, whole).unwrap();
+        session.pointer(
+            1,
+            PointerInput::Up {
+                root: CanvasPoint { x: 80, y: 60 },
+                time: Duration::from_millis(10),
+                modifiers: crate::Modifiers::default(),
             },
         );
         let mut released = Renderer::new(100, 100).unwrap();
@@ -1137,6 +1274,7 @@ mod parity_tests {
             PointerInput::Down {
                 root: CanvasPoint { x: 20, y: 50 },
                 time: Duration::ZERO,
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -1144,6 +1282,7 @@ mod parity_tests {
             PointerInput::Move {
                 root: CanvasPoint { x: 80, y: 50 },
                 time: Duration::from_millis(5),
+                modifiers: crate::Modifiers::default(),
             },
         );
         let mut preview = Renderer::new(100, 100).unwrap();
@@ -1157,6 +1296,7 @@ mod parity_tests {
             PointerInput::Up {
                 root: CanvasPoint { x: 80, y: 50 },
                 time: Duration::from_millis(10),
+                modifiers: crate::Modifiers::default(),
             },
         );
         let mut released = Renderer::new(100, 100).unwrap();

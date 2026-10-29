@@ -72,6 +72,7 @@ scale_friction = 5.0
 "annotation.text-size.next" = "="
 "annotation.text-size.prev" = "-"
 "annotation.tool.arrow" = "a"
+"annotation.tool.ellipse" = "o"
 "annotation.tool.eraser" = "e"
 "annotation.tool.line" = "l"
 "annotation.tool.pen" = "p"

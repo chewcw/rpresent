@@ -44,6 +44,7 @@ fn tool_label(tool: AnnotationTool) -> &'static str {
         AnnotationTool::Line => "Line",
         AnnotationTool::Arrow => "Arrow",
         AnnotationTool::Rect => "Rect",
+        AnnotationTool::Ellipse => "Ellipse",
         AnnotationTool::Eraser => "Eraser",
         AnnotationTool::Text => "Text",
     }

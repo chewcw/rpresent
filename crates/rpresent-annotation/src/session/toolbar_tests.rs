@@ -43,6 +43,7 @@ fn click(session: &mut Session, at: Point, epoch: u64) {
         PointerInput::Down {
             root: at,
             time: Duration::ZERO,
+            modifiers: crate::Modifiers::default(),
         },
     );
     session.pointer(
@@ -50,6 +51,7 @@ fn click(session: &mut Session, at: Point, epoch: u64) {
         PointerInput::Up {
             root: at,
             time: Duration::from_millis(10),
+            modifiers: crate::Modifiers::default(),
         },
     );
 }
@@ -85,6 +87,7 @@ fn drag_line(session: &mut Session, from: Point, to: Point) {
         PointerInput::Down {
             root: from,
             time: Duration::ZERO,
+            modifiers: crate::Modifiers::default(),
         },
     );
     session.pointer(
@@ -92,6 +95,7 @@ fn drag_line(session: &mut Session, from: Point, to: Point) {
         PointerInput::Move {
             root: to,
             time: Duration::from_millis(10),
+            modifiers: crate::Modifiers::default(),
         },
     );
     session.pointer(
@@ -99,6 +103,7 @@ fn drag_line(session: &mut Session, from: Point, to: Point) {
         PointerInput::Up {
             root: to,
             time: Duration::from_millis(20),
+            modifiers: crate::Modifiers::default(),
         },
     );
 }
@@ -146,6 +151,7 @@ fn tool_press_released_on_the_canvas_never_activates() {
         PointerInput::Down {
             root: at,
             time: Duration::ZERO,
+            modifiers: crate::Modifiers::default(),
         },
     );
     let canvas = canvas_point(&session);
@@ -154,6 +160,7 @@ fn tool_press_released_on_the_canvas_never_activates() {
         PointerInput::Up {
             root: canvas,
             time: Duration::from_millis(10),
+            modifiers: crate::Modifiers::default(),
         },
     );
     assert_eq!(session.tool(), AnnotationTool::Arrow);
@@ -189,6 +196,7 @@ fn canvas_stroke_completes_across_the_toolbar() {
         PointerInput::Down {
             root: from,
             time: Duration::ZERO,
+            modifiers: crate::Modifiers::default(),
         },
     );
     session.pointer(
@@ -196,6 +204,7 @@ fn canvas_stroke_completes_across_the_toolbar() {
         PointerInput::Move {
             root: release,
             time: Duration::from_millis(10),
+            modifiers: crate::Modifiers::default(),
         },
     );
     session.pointer(
@@ -203,6 +212,7 @@ fn canvas_stroke_completes_across_the_toolbar() {
         PointerInput::Up {
             root: release,
             time: Duration::from_millis(20),
+            modifiers: crate::Modifiers::default(),
         },
     );
     assert_eq!(session.document().objects().len(), 1);
@@ -233,6 +243,7 @@ fn handle_drag_moves_the_toolbar_without_touching_document_or_history() {
         PointerInput::Down {
             root: handle,
             time: Duration::ZERO,
+            modifiers: crate::Modifiers::default(),
         },
     );
     session.pointer(
@@ -240,6 +251,7 @@ fn handle_drag_moves_the_toolbar_without_touching_document_or_history() {
         PointerInput::Move {
             root: to,
             time: Duration::from_millis(10),
+            modifiers: crate::Modifiers::default(),
         },
     );
     session.pointer(
@@ -247,6 +259,7 @@ fn handle_drag_moves_the_toolbar_without_touching_document_or_history() {
         PointerInput::Up {
             root: to,
             time: Duration::from_millis(20),
+            modifiers: crate::Modifiers::default(),
         },
     );
     let after = session.toolbar_layout().unwrap().bar;
@@ -334,6 +347,7 @@ fn escape_restores_a_drag_and_consumes_the_rest_of_the_sequence() {
         PointerInput::Down {
             root: handle,
             time: Duration::ZERO,
+            modifiers: crate::Modifiers::default(),
         },
     );
     let moved = canvas_point(&session);
@@ -342,6 +356,7 @@ fn escape_restores_a_drag_and_consumes_the_rest_of_the_sequence() {
         PointerInput::Move {
             root: moved,
             time: Duration::from_millis(10),
+            modifiers: crate::Modifiers::default(),
         },
     );
     assert_ne!(
@@ -362,6 +377,7 @@ fn escape_restores_a_drag_and_consumes_the_rest_of_the_sequence() {
         PointerInput::Move {
             root: away,
             time: Duration::from_millis(20),
+            modifiers: crate::Modifiers::default(),
         },
     );
     session.pointer(
@@ -369,6 +385,7 @@ fn escape_restores_a_drag_and_consumes_the_rest_of_the_sequence() {
         PointerInput::Up {
             root: away,
             time: Duration::from_millis(30),
+            modifiers: crate::Modifiers::default(),
         },
     );
     assert_eq!(session.toolbar_layout().unwrap().bar, before);
@@ -388,6 +405,7 @@ fn ownership_loss_cancels_a_pending_toolbar_press() {
         PointerInput::Down {
             root: at,
             time: Duration::ZERO,
+            modifiers: crate::Modifiers::default(),
         },
     );
     session.ownership(None);
@@ -396,6 +414,7 @@ fn ownership_loss_cancels_a_pending_toolbar_press() {
         PointerInput::Up {
             root: at,
             time: Duration::from_millis(10),
+            modifiers: crate::Modifiers::default(),
         },
     );
     assert_eq!(session.tool(), AnnotationTool::Arrow);
@@ -412,6 +431,7 @@ fn input_from_an_obsolete_epoch_changes_nothing() {
         PointerInput::Down {
             root: handle,
             time: Duration::ZERO,
+            modifiers: crate::Modifiers::default(),
         },
     );
     session.pointer(
@@ -419,6 +439,7 @@ fn input_from_an_obsolete_epoch_changes_nothing() {
         PointerInput::Move {
             root: Point { x: 50, y: 50 },
             time: Duration::from_millis(10),
+            modifiers: crate::Modifiers::default(),
         },
     );
     session.pointer(
@@ -426,6 +447,7 @@ fn input_from_an_obsolete_epoch_changes_nothing() {
         PointerInput::Up {
             root: Point { x: 50, y: 50 },
             time: Duration::from_millis(20),
+            modifiers: crate::Modifiers::default(),
         },
     );
     assert_eq!(session.toolbar_layout().unwrap().bar, before);
@@ -541,6 +563,7 @@ fn dragging_the_handle_with_a_picker_open_issues_no_command() {
         PointerInput::Down {
             root: handle,
             time: Duration::ZERO,
+            modifiers: crate::Modifiers::default(),
         },
     );
     assert!(
@@ -552,6 +575,7 @@ fn dragging_the_handle_with_a_picker_open_issues_no_command() {
         PointerInput::Move {
             root: to,
             time: Duration::from_millis(10),
+            modifiers: crate::Modifiers::default(),
         },
     );
     session.pointer(
@@ -559,6 +583,7 @@ fn dragging_the_handle_with_a_picker_open_issues_no_command() {
         PointerInput::Up {
             root: to,
             time: Duration::from_millis(20),
+            modifiers: crate::Modifiers::default(),
         },
     );
     assert_eq!(

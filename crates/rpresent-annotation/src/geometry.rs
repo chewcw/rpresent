@@ -135,6 +135,34 @@ pub(crate) fn rect_outline(end: Point) -> [Point; 5] {
     ]
 }
 
+/// Points on the ellipse inscribed in the box spanned by the origin and
+/// `end`, in winding order and closed by repeating the first point. Both
+/// deltas are relative to the origin and may be negative. A zero-size box
+/// collapses every point to the origin, which mirrors `arrow_outline`.
+pub(crate) fn ellipse_outline(end: Point) -> Vec<Point> {
+    const SAMPLES: usize = 64;
+    let left = 0.0_f64.min(end.x as f64);
+    let right = 0.0_f64.max(end.x as f64);
+    let top = 0.0_f64.min(end.y as f64);
+    let bottom = 0.0_f64.max(end.y as f64);
+    let center_x = (left + right) / 2.0;
+    let center_y = (top + bottom) / 2.0;
+    let radius_x = (right - left) / 2.0;
+    let radius_y = (bottom - top) / 2.0;
+    if radius_x == 0.0 && radius_y == 0.0 {
+        return vec![Point::default(); SAMPLES + 1];
+    }
+    let mut points = Vec::with_capacity(SAMPLES + 1);
+    for index in 0..=SAMPLES {
+        let angle = std::f64::consts::TAU * index as f64 / SAMPLES as f64;
+        points.push(Point {
+            x: (center_x + radius_x * angle.cos()).round() as i32,
+            y: (center_y + radius_y * angle.sin()).round() as i32,
+        });
+    }
+    points
+}
+
 /// Tail, tip, and two barb endpoints for an arrow whose tip is `end`.
 /// Points are relative to the arrow origin. The head is an open V whose
 /// length scales with the stroke width.
@@ -278,5 +306,40 @@ mod tests {
     #[test]
     fn arrow_outline_collapses_at_zero_length() {
         assert_eq!(arrow_outline(Point::default(), 6), [Point::default(); 4]);
+    }
+
+    #[test]
+    fn ellipse_outline_touches_every_side_of_the_box() {
+        let points = ellipse_outline(Point { x: 100, y: 60 });
+        let min_x = points.iter().map(|point| point.x).min().unwrap();
+        let max_x = points.iter().map(|point| point.x).max().unwrap();
+        let min_y = points.iter().map(|point| point.y).min().unwrap();
+        let max_y = points.iter().map(|point| point.y).max().unwrap();
+        assert_eq!((min_x, max_x, min_y, max_y), (0, 100, 0, 60));
+    }
+
+    #[test]
+    fn ellipse_outline_is_a_closed_ring_of_sixty_five_points() {
+        let points = ellipse_outline(Point { x: 80, y: 40 });
+        assert_eq!(points.len(), 65);
+        assert_eq!(points.first(), points.last());
+    }
+
+    #[test]
+    fn ellipse_outline_normalizes_negative_deltas() {
+        let points = ellipse_outline(Point { x: -60, y: -30 });
+        let min_x = points.iter().map(|point| point.x).min().unwrap();
+        let max_x = points.iter().map(|point| point.x).max().unwrap();
+        let min_y = points.iter().map(|point| point.y).min().unwrap();
+        let max_y = points.iter().map(|point| point.y).max().unwrap();
+        assert_eq!((min_x, max_x, min_y, max_y), (-60, 0, -30, 0));
+    }
+
+    #[test]
+    fn ellipse_outline_collapses_at_zero_size() {
+        assert_eq!(
+            ellipse_outline(Point::default()),
+            vec![Point::default(); 65]
+        );
     }
 }

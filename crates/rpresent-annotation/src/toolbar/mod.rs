@@ -43,6 +43,7 @@ impl PickerKind {
                     | AnnotationTool::Line
                     | AnnotationTool::Arrow
                     | AnnotationTool::Rect
+                    | AnnotationTool::Ellipse
                     | AnnotationTool::Text
             ),
             PickerKind::Width => matches!(
@@ -51,6 +52,7 @@ impl PickerKind {
                     | AnnotationTool::Line
                     | AnnotationTool::Arrow
                     | AnnotationTool::Rect
+                    | AnnotationTool::Ellipse
             ),
             PickerKind::TextSize => tool == AnnotationTool::Text,
         }

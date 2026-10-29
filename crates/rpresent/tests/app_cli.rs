@@ -133,6 +133,25 @@ fn parses_annotation_tool_subcommand() {
 }
 
 #[test]
+fn parses_ellipse_annotation_tool_subcommand() {
+    rpresent::logging::init();
+
+    let cli = Cli::try_parse_from(["rpresent", "annotation", "tool", "ellipse"]).unwrap();
+
+    let Some(CliSubcommand::Annotation {
+        command: annotation,
+    }) = cli.subcommand
+    else {
+        panic!("expected annotation subcommand");
+    };
+
+    assert_eq!(
+        AppCommand::Annotation(annotation.into()),
+        AppCommand::Annotation(AnnotationCommand::Tool(AnnotationTool::Ellipse))
+    );
+}
+
+#[test]
 fn parses_annotation_color_subcommand() {
     rpresent::logging::init();
 
@@ -212,6 +231,10 @@ fn rejects_unknown_annotation_tool_value() {
     assert!(
         error.contains("tool"),
         "error should mention the failing value: {error}"
+    );
+    assert!(
+        error.contains("ellipse"),
+        "error should list the valid tools: {error}"
     );
 }
 

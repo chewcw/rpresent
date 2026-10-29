@@ -11,8 +11,8 @@ use crate::catalog::{Preset, Rgb, cycle_index, parse_rgb};
 use crate::command::AnnotationCommand;
 use crate::document::{Document, Object, ObjectData, ObjectId, Point};
 use crate::geometry::{
-    Rect, arrow_outline, point_rect_distance, point_segment_distance, rect_outline,
-    segment_rect_distance, segment_segment_distance,
+    Rect, arrow_outline, ellipse_outline, point_rect_distance, point_segment_distance,
+    rect_outline, segment_rect_distance, segment_segment_distance,
 };
 use crate::text::{TextDraft, TextSystem};
 use crate::toolbar::{DisplayGeometry, Toolbar, ToolbarLayout};
@@ -32,9 +32,21 @@ pub(crate) const TEXT_BOX_PADDING_PX: i32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerInput {
-    Down { root: Point, time: Duration },
-    Move { root: Point, time: Duration },
-    Up { root: Point, time: Duration },
+    Down {
+        root: Point,
+        time: Duration,
+        modifiers: Modifiers,
+    },
+    Move {
+        root: Point,
+        time: Duration,
+        modifiers: Modifiers,
+    },
+    Up {
+        root: Point,
+        time: Duration,
+        modifiers: Modifiers,
+    },
 }
 
 impl PointerInput {
@@ -89,6 +101,10 @@ pub(crate) enum Gesture {
         end: Point,
     },
     Rect {
+        origin: Point,
+        end: Point,
+    },
+    Ellipse {
         origin: Point,
         end: Point,
     },
@@ -383,9 +399,13 @@ impl Session {
             return;
         }
         match input {
-            PointerInput::Down { root, time } => self.pointer_down(root, time),
-            PointerInput::Move { root, .. } => self.pointer_move(root),
-            PointerInput::Up { root, .. } => self.pointer_up(root),
+            PointerInput::Down { root, time, .. } => self.pointer_down(root, time),
+            PointerInput::Move {
+                root, modifiers, ..
+            } => self.pointer_move(root, modifiers),
+            PointerInput::Up {
+                root, modifiers, ..
+            } => self.pointer_up(root, modifiers),
         }
     }
 
@@ -545,6 +565,10 @@ impl Session {
             }
             ShortcutAction::ToolRect => {
                 self.set_tool(AnnotationTool::Rect);
+                Ok(())
+            }
+            ShortcutAction::ToolEllipse => {
+                self.set_tool(AnnotationTool::Ellipse);
                 Ok(())
             }
             ShortcutAction::ToolEraser => {
@@ -745,6 +769,12 @@ impl Session {
                     end: Point::default(),
                 });
             }
+            AnnotationTool::Ellipse => {
+                self.gesture = Some(Gesture::Ellipse {
+                    origin: root,
+                    end: Point::default(),
+                });
+            }
             AnnotationTool::Arrow => {
                 self.gesture = Some(Gesture::Arrow {
                     origin: root,
@@ -762,7 +792,7 @@ impl Session {
         self.mark_selection();
     }
 
-    fn pointer_move(&mut self, root: Point) {
+    fn pointer_move(&mut self, root: Point, modifiers: Modifiers) {
         self.mark_transient();
         match &mut self.gesture {
             Some(Gesture::Pen { origin, points }) => {
@@ -780,6 +810,17 @@ impl Session {
                 *end = Point {
                     x: root.x - origin.x,
                     y: root.y - origin.y,
+                };
+            }
+            Some(Gesture::Ellipse { origin, end }) => {
+                let raw = Point {
+                    x: root.x - origin.x,
+                    y: root.y - origin.y,
+                };
+                *end = if modifiers.shift {
+                    constrain_square(raw)
+                } else {
+                    raw
                 };
             }
             Some(Gesture::Move {
@@ -821,7 +862,7 @@ impl Session {
         self.mark_transient();
     }
 
-    fn pointer_up(&mut self, root: Point) {
+    fn pointer_up(&mut self, root: Point, modifiers: Modifiers) {
         self.mark_transient();
         self.mark_selection();
         match self.gesture.take() {
@@ -862,6 +903,25 @@ impl Session {
                 let color = self.color();
                 self.document
                     .insert(origin, color, ObjectData::Rect { end, width_px });
+                self.mark_last_object();
+            }
+            Some(Gesture::Ellipse { origin, .. }) => {
+                let raw = Point {
+                    x: root.x - origin.x,
+                    y: root.y - origin.y,
+                };
+                let end = if modifiers.shift {
+                    constrain_square(raw)
+                } else {
+                    raw
+                };
+                if end == Point::default() {
+                    return;
+                }
+                let width_px = self.width_px();
+                let color = self.color();
+                self.document
+                    .insert(origin, color, ObjectData::Ellipse { end, width_px });
                 self.mark_last_object();
             }
             Some(Gesture::Arrow { origin, .. }) => {
@@ -1177,6 +1237,11 @@ impl Session {
                 &rect_outline(end),
                 self.width_px(),
             )),
+            Some(Gesture::Ellipse { origin, end }) => Some(crate::render::stroke_bounds(
+                origin,
+                &ellipse_outline(end),
+                self.width_px(),
+            )),
             Some(Gesture::Arrow { origin, end }) => Some(crate::render::stroke_bounds(
                 origin,
                 &arrow_outline(end, self.width_px()),
@@ -1257,6 +1322,13 @@ fn object_hit(text_system: &mut TextSystem, object: &Object, point: Point) -> bo
                     <= tolerance
             })
         }
+        ObjectData::Ellipse { end, width_px } => {
+            let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
+            ellipse_outline(*end).windows(2).any(|pair| {
+                point_segment_distance(point, object.point(pair[0]), object.point(pair[1]))
+                    <= tolerance
+            })
+        }
         ObjectData::Arrow { end, width_px } => {
             let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
             let [tail, tip, barb_a, barb_b] = arrow_outline(*end, *width_px);
@@ -1299,6 +1371,16 @@ fn object_touched(text_system: &mut TextSystem, object: &Object, start: Point, e
         } => {
             let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
             rect_outline(*rect_end).windows(2).any(|pair| {
+                segment_segment_distance(object.point(pair[0]), object.point(pair[1]), start, end)
+                    <= tolerance
+            })
+        }
+        ObjectData::Ellipse {
+            end: ellipse_end,
+            width_px,
+        } => {
+            let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
+            ellipse_outline(*ellipse_end).windows(2).any(|pair| {
                 segment_segment_distance(object.point(pair[0]), object.point(pair[1]), start, end)
                     <= tolerance
             })
@@ -1354,6 +1436,17 @@ pub(crate) fn default_bindings() -> Vec<Binding> {
         .annotation
 }
 
+/// Box for a Shift-constrained ellipse drag. The longer axis decides the
+/// side, each axis keeps its direction, and a zero axis counts as positive
+/// so a straight horizontal or vertical drag still becomes a square.
+fn constrain_square(end: Point) -> Point {
+    let side = end.x.abs().max(end.y.abs());
+    Point {
+        x: if end.x < 0 { -side } else { side },
+        y: if end.y < 0 { -side } else { side },
+    }
+}
+
 fn lower_letter(key: Key) -> Option<char> {
     match key {
         Key::Char(character) if character.is_ascii_alphabetic() => {
@@ -1391,6 +1484,7 @@ mod tests {
             PointerInput::Down {
                 root: from,
                 time: Duration::ZERO,
+                modifiers: crate::Modifiers::default(),
             },
         );
         pointer(
@@ -1398,6 +1492,7 @@ mod tests {
             PointerInput::Move {
                 root: to,
                 time: Duration::from_millis(10),
+                modifiers: crate::Modifiers::default(),
             },
         );
         pointer(
@@ -1405,18 +1500,242 @@ mod tests {
             PointerInput::Up {
                 root: to,
                 time: Duration::from_millis(20),
+                modifiers: crate::Modifiers::default(),
             },
         );
     }
 
+    fn drag_with(session: &mut Session, from: Point, to: Point, modifiers: Modifiers) {
+        pointer(
+            session,
+            PointerInput::Down {
+                root: from,
+                time: Duration::ZERO,
+                modifiers: Modifiers::default(),
+            },
+        );
+        pointer(
+            session,
+            PointerInput::Move {
+                root: to,
+                time: Duration::from_millis(10),
+                modifiers,
+            },
+        );
+        pointer(
+            session,
+            PointerInput::Up {
+                root: to,
+                time: Duration::from_millis(20),
+                modifiers,
+            },
+        );
+    }
+
+    #[test]
+    fn shift_squares_the_ellipse_drag_box() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Ellipse))
+            .unwrap();
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        drag_with(
+            &mut session,
+            Point { x: 20, y: 20 },
+            Point { x: 120, y: 70 },
+            shift,
+        );
+        assert_eq!(
+            session.document().objects()[0].data,
+            ObjectData::Ellipse {
+                end: Point { x: 100, y: 100 },
+                width_px: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn shift_can_toggle_during_the_drag() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Ellipse))
+            .unwrap();
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        let free = Modifiers::default();
+        pointer(
+            &mut session,
+            PointerInput::Down {
+                root: Point { x: 20, y: 20 },
+                time: Duration::ZERO,
+                modifiers: free,
+            },
+        );
+        pointer(
+            &mut session,
+            PointerInput::Move {
+                root: Point { x: 120, y: 70 },
+                time: Duration::from_millis(5),
+                modifiers: free,
+            },
+        );
+        assert_eq!(
+            session.gesture,
+            Some(Gesture::Ellipse {
+                origin: Point { x: 20, y: 20 },
+                end: Point { x: 100, y: 50 },
+            }),
+            "free drag stores the raw box"
+        );
+        pointer(
+            &mut session,
+            PointerInput::Move {
+                root: Point { x: 130, y: 80 },
+                time: Duration::from_millis(10),
+                modifiers: shift,
+            },
+        );
+        assert_eq!(
+            session.gesture,
+            Some(Gesture::Ellipse {
+                origin: Point { x: 20, y: 20 },
+                end: Point { x: 110, y: 110 },
+            }),
+            "pressing Shift mid-drag resquares the box"
+        );
+        pointer(
+            &mut session,
+            PointerInput::Up {
+                root: Point { x: 130, y: 80 },
+                time: Duration::from_millis(15),
+                modifiers: free,
+            },
+        );
+        assert_eq!(
+            session.document().objects()[0].data,
+            ObjectData::Ellipse {
+                end: Point { x: 110, y: 60 },
+                width_px: 6,
+            },
+            "releasing Shift before the release frees the box"
+        );
+    }
+
     fn click(session: &mut Session, at: Point, time: Duration) {
-        pointer(session, PointerInput::Down { root: at, time });
+        pointer(
+            session,
+            PointerInput::Down {
+                root: at,
+                time,
+                modifiers: crate::Modifiers::default(),
+            },
+        );
         pointer(
             session,
             PointerInput::Up {
                 root: at,
                 time: time + Duration::from_millis(10),
+                modifiers: crate::Modifiers::default(),
             },
+        );
+    }
+
+    fn ellipse_object(end: Point) -> ObjectData {
+        ObjectData::Ellipse { end, width_px: 4 }
+    }
+
+    #[test]
+    fn ellipse_drag_stores_the_drag_box() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Ellipse))
+            .unwrap();
+        drag(
+            &mut session,
+            Point { x: 20, y: 20 },
+            Point { x: 100, y: 70 },
+        );
+        let objects = session.document().objects();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].origin, Point { x: 20, y: 20 });
+        assert_eq!(
+            objects[0].data,
+            ObjectData::Ellipse {
+                end: Point { x: 80, y: 50 },
+                width_px: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn degenerate_ellipse_drag_creates_nothing() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Ellipse))
+            .unwrap();
+        click(
+            &mut session,
+            Point { x: 30, y: 30 },
+            Duration::from_millis(0),
+        );
+        assert!(session.document().objects().is_empty());
+    }
+
+    #[test]
+    fn ellipse_outline_is_selectable_but_the_interior_is_not() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Select))
+            .unwrap();
+        session.document.insert(
+            Point { x: 20, y: 20 },
+            [255, 0, 0],
+            ellipse_object(Point { x: 60, y: 60 }),
+        );
+
+        click(
+            &mut session,
+            Point { x: 50, y: 50 },
+            Duration::from_millis(0),
+        );
+        assert_eq!(session.selection(), None, "interior misses");
+
+        click(
+            &mut session,
+            Point { x: 50, y: 20 },
+            Duration::from_millis(100),
+        );
+        assert!(session.selection().is_some(), "outline hits");
+    }
+
+    #[test]
+    fn eraser_skips_a_drag_that_stays_inside_an_ellipse() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Eraser))
+            .unwrap();
+        session.document.insert(
+            Point { x: 20, y: 20 },
+            [255, 0, 0],
+            ellipse_object(Point { x: 60, y: 60 }),
+        );
+
+        drag(&mut session, Point { x: 40, y: 50 }, Point { x: 60, y: 55 });
+        assert_eq!(
+            session.document().objects().len(),
+            1,
+            "interior drag misses"
+        );
+
+        drag(&mut session, Point { x: 10, y: 50 }, Point { x: 90, y: 50 });
+        assert!(
+            session.document().objects().is_empty(),
+            "crossing drag hits"
         );
     }
 
@@ -1539,6 +1858,7 @@ mod tests {
             PointerInput::Down {
                 root,
                 time: Duration::ZERO,
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -1546,6 +1866,7 @@ mod tests {
             PointerInput::Up {
                 root,
                 time: Duration::from_millis(20),
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.command(AnnotationCommand::Off).unwrap();
@@ -1556,6 +1877,7 @@ mod tests {
             PointerInput::Down {
                 root,
                 time: Duration::from_millis(30),
+                modifiers: crate::Modifiers::default(),
             },
         );
         assert_eq!(session.document().objects().len(), 1);
@@ -1598,6 +1920,7 @@ mod tests {
             PointerInput::Down {
                 root: Point { x: 40, y: 20 },
                 time: Duration::from_millis(100),
+                modifiers: crate::Modifiers::default(),
             },
         );
         pointer(
@@ -1605,6 +1928,7 @@ mod tests {
             PointerInput::Move {
                 root: Point { x: 55, y: 20 },
                 time: Duration::from_millis(120),
+                modifiers: crate::Modifiers::default(),
             },
         );
         key(&mut session, Key::Esc, None, Modifiers::default());
@@ -1627,6 +1951,7 @@ mod tests {
             PointerInput::Down {
                 root: Point { x: 40, y: 20 },
                 time: Duration::from_millis(100),
+                modifiers: crate::Modifiers::default(),
             },
         );
         pointer(
@@ -1634,6 +1959,7 @@ mod tests {
             PointerInput::Up {
                 root: Point { x: 60, y: 40 },
                 time: Duration::from_millis(180),
+                modifiers: crate::Modifiers::default(),
             },
         );
         assert_eq!(
@@ -1676,6 +2002,7 @@ mod tests {
             PointerInput::Down {
                 root: Point { x: 40, y: 0 },
                 time: Duration::from_millis(100),
+                modifiers: crate::Modifiers::default(),
             },
         );
         pointer(
@@ -1683,6 +2010,7 @@ mod tests {
             PointerInput::Up {
                 root: Point { x: 40, y: 60 },
                 time: Duration::from_millis(110),
+                modifiers: crate::Modifiers::default(),
             },
         );
         assert!(session.document().objects().is_empty());
@@ -2021,6 +2349,7 @@ mod tests {
             PointerInput::Down {
                 root: Point { x: 1, y: 1 },
                 time: Duration::ZERO,
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -2028,6 +2357,7 @@ mod tests {
             PointerInput::Up {
                 root: Point { x: 1, y: 1 },
                 time: Duration::from_millis(10),
+                modifiers: crate::Modifiers::default(),
             },
         );
         assert!(session.document().objects().is_empty());
@@ -2037,6 +2367,7 @@ mod tests {
             PointerInput::Down {
                 root: Point { x: 1, y: 1 },
                 time: Duration::from_millis(20),
+                modifiers: crate::Modifiers::default(),
             },
         );
         assert!(session.document().objects().is_empty());
@@ -2109,6 +2440,7 @@ mod tests {
             ("v", AnnotationTool::Select),
             ("p", AnnotationTool::Pen),
             ("l", AnnotationTool::Line),
+            ("o", AnnotationTool::Ellipse),
             ("e", AnnotationTool::Eraser),
             ("t", AnnotationTool::Text),
         ] {
@@ -2390,6 +2722,7 @@ mod tests {
             PointerInput::Down {
                 root: Point { x: 50, y: 20 },
                 time: Duration::from_millis(100),
+                modifiers: crate::Modifiers::default(),
             },
         );
         pointer(
@@ -2397,6 +2730,7 @@ mod tests {
             PointerInput::Up {
                 root: Point { x: 55, y: 25 },
                 time: Duration::from_millis(180),
+                modifiers: crate::Modifiers::default(),
             },
         );
         assert_eq!(
@@ -2544,6 +2878,7 @@ mod tests {
             PointerInput::Down {
                 root: Point { x: 50, y: 50 },
                 time: Duration::from_millis(100),
+                modifiers: crate::Modifiers::default(),
             },
         );
         pointer(
@@ -2551,6 +2886,7 @@ mod tests {
             PointerInput::Up {
                 root: Point { x: 55, y: 55 },
                 time: Duration::from_millis(180),
+                modifiers: crate::Modifiers::default(),
             },
         );
         assert_eq!(

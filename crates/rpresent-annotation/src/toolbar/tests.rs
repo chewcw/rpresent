@@ -394,6 +394,23 @@ fn tool_changes_swap_applicable_presets_and_highlight() {
     assert_controls_fit(toolbar.layout().unwrap());
 
     session
+        .command(AnnotationCommand::Tool(AnnotationTool::Ellipse))
+        .unwrap();
+    assert!(toolbar.sync(&session.toolbar_values()).is_some());
+    assert_eq!(
+        picker_targets(toolbar.layout().unwrap()),
+        vec![
+            Target::Picker(PickerKind::Color),
+            Target::Picker(PickerKind::Width)
+        ]
+    );
+    assert_eq!(
+        selected_tool(toolbar.layout().unwrap()),
+        vec![AnnotationTool::Ellipse]
+    );
+    assert_controls_fit(toolbar.layout().unwrap());
+
+    session
         .command(AnnotationCommand::Tool(AnnotationTool::Select))
         .unwrap();
     assert!(toolbar.sync(&session.toolbar_values()).is_some());
@@ -437,6 +454,7 @@ fn toolbar_starts_on_pointer_monitor_without_creating_content() {
             AnnotationTool::Line,
             AnnotationTool::Arrow,
             AnnotationTool::Rect,
+            AnnotationTool::Ellipse,
             AnnotationTool::Eraser,
             AnnotationTool::Text,
         ]

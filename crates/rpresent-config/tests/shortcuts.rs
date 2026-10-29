@@ -1,6 +1,18 @@
 use rpresent_config::shortcuts::{KeyInput, Mods, ShortcutConfig};
 
 #[test]
+fn ellipse_tool_binds_to_o_by_default() {
+    let bindings = ShortcutConfig::default().validate().unwrap();
+    let binding = bindings
+        .annotation
+        .iter()
+        .find(|binding| binding.action.name() == "annotation.tool.ellipse")
+        .expect("the default annotation bindings include the ellipse tool");
+    assert_eq!(binding.expression, "o");
+    assert_eq!(binding.input, "o".parse::<KeyInput>().unwrap());
+}
+
+#[test]
 fn explicit_scope_replaces_defaults() {
     use rpresent_config::shortcuts::ShortcutDispatcher;
 
@@ -37,7 +49,7 @@ fn absent_tables_use_scope_defaults() {
     let settings: ShortcutConfig = toml::from_str("").unwrap();
     let bindings = settings.validate().unwrap();
     assert_eq!(bindings.global.len(), 3);
-    assert_eq!(bindings.annotation.len(), 17);
+    assert_eq!(bindings.annotation.len(), 18);
     assert_eq!(bindings.wheel, Mods::CTRL);
     assert_eq!(bindings.global[0].action.name(), "annotation.toggle");
     assert_eq!(bindings.global[1].action.name(), "spotlight.toggle");

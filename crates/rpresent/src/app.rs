@@ -158,7 +158,7 @@ pub enum AnnotationCli {
 
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct ToolArgs {
-    /// Tool name: select, pen, line, arrow, rect, eraser, or text
+    /// Tool name: select, pen, line, arrow, rect, ellipse, eraser, or text
     #[arg(value_name = "TOOL", value_parser = parse_tool)]
     pub tool: AnnotationTool,
 }
@@ -202,10 +202,11 @@ fn parse_tool(value: &str) -> Result<AnnotationTool, String> {
         "line" => Ok(AnnotationTool::Line),
         "arrow" => Ok(AnnotationTool::Arrow),
         "rect" => Ok(AnnotationTool::Rect),
+        "ellipse" => Ok(AnnotationTool::Ellipse),
         "eraser" => Ok(AnnotationTool::Eraser),
         "text" => Ok(AnnotationTool::Text),
         other => Err(format!(
-            "invalid tool {other}: expected select, pen, line, arrow, rect, eraser, or text"
+            "invalid tool {other}: expected select, pen, line, arrow, rect, ellipse, eraser, or text"
         )),
     }
 }

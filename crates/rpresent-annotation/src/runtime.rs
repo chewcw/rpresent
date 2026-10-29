@@ -667,6 +667,7 @@ mod tests {
                 input: PointerInput::Down {
                     root: Point { x: 10, y: 10 },
                     time: std::time::Duration::ZERO,
+                    modifiers: crate::Modifiers::default(),
                 },
             },
             now(),
@@ -677,6 +678,7 @@ mod tests {
                 input: PointerInput::Up {
                     root: Point { x: 10, y: 10 },
                     time: std::time::Duration::from_millis(10),
+                    modifiers: crate::Modifiers::default(),
                 },
             },
             now(),
@@ -691,6 +693,7 @@ mod tests {
                 input: PointerInput::Down {
                     root,
                     time: std::time::Duration::from_millis(millis),
+                    modifiers: crate::Modifiers::default(),
                 },
             },
             now(),
@@ -701,6 +704,7 @@ mod tests {
                 input: PointerInput::Up {
                     root,
                     time: std::time::Duration::from_millis(millis + 10),
+                    modifiers: crate::Modifiers::default(),
                 },
             },
             now(),
@@ -1037,6 +1041,7 @@ mod tests {
                 input: PointerInput::Down {
                     root: Point { x: 5, y: 5 },
                     time: std::time::Duration::ZERO,
+                    modifiers: crate::Modifiers::default(),
                 },
             },
             now(),
@@ -1130,6 +1135,7 @@ mod tests {
                 input: PointerInput::Down {
                     root: Point { x: 5, y: 5 },
                     time: std::time::Duration::ZERO,
+                    modifiers: crate::Modifiers::default(),
                 },
             },
             now(),
@@ -1159,6 +1165,7 @@ mod tests {
             PointerInput::Down {
                 root: handle,
                 time: std::time::Duration::ZERO,
+                modifiers: crate::Modifiers::default(),
             },
         );
         runtime.process(AnnotationRequest::Ownership { epoch: None }, now());
@@ -1169,6 +1176,7 @@ mod tests {
             PointerInput::Move {
                 root: far,
                 time: std::time::Duration::from_millis(20),
+                modifiers: crate::Modifiers::default(),
             },
         );
         pointer_event(
@@ -1177,6 +1185,7 @@ mod tests {
             PointerInput::Up {
                 root: far,
                 time: std::time::Duration::from_millis(30),
+                modifiers: crate::Modifiers::default(),
             },
         );
         assert_eq!(runtime.session.toolbar_layout().unwrap().bar, bar_before);
@@ -1272,6 +1281,7 @@ mod tests {
             PointerInput::Down {
                 root: value,
                 time: std::time::Duration::from_millis(150),
+                modifiers: crate::Modifiers::default(),
             },
         );
 
@@ -1314,6 +1324,7 @@ mod tests {
             PointerInput::Up {
                 root: value,
                 time: std::time::Duration::from_millis(210),
+                modifiers: crate::Modifiers::default(),
             },
         );
         assert_eq!(
@@ -1448,6 +1459,7 @@ mod tests {
             PointerInput::Down {
                 root: handle,
                 time: std::time::Duration::ZERO,
+                modifiers: crate::Modifiers::default(),
             },
         );
         let moved = Point { x: 400, y: 300 };
@@ -1457,6 +1469,7 @@ mod tests {
             PointerInput::Move {
                 root: moved,
                 time: std::time::Duration::from_millis(10),
+                modifiers: crate::Modifiers::default(),
             },
         );
         pointer_event(
@@ -1465,6 +1478,7 @@ mod tests {
             PointerInput::Up {
                 root: moved,
                 time: std::time::Duration::from_millis(20),
+                modifiers: crate::Modifiers::default(),
             },
         );
         let bar_after_move = runtime.session.toolbar_layout().unwrap().bar;
