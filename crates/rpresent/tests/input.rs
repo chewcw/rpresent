@@ -209,6 +209,7 @@ fn down(x: i32, y: i32) -> RawPointer {
     RawPointer::Down {
         root: (x, y),
         time: Duration::from_millis(1),
+        modifiers: Mods::NONE,
     }
 }
 
@@ -216,6 +217,7 @@ fn moved(x: i32, y: i32) -> RawPointer {
     RawPointer::Move {
         root: (x, y),
         time: Duration::from_millis(2),
+        modifiers: Mods::NONE,
     }
 }
 
@@ -223,6 +225,7 @@ fn up() -> RawPointer {
     RawPointer::Up {
         root: (0, 0),
         time: Duration::from_millis(3),
+        modifiers: Mods::NONE,
     }
 }
 

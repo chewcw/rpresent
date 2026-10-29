@@ -32,9 +32,21 @@ pub(crate) const TEXT_BOX_PADDING_PX: i32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerInput {
-    Down { root: Point, time: Duration },
-    Move { root: Point, time: Duration },
-    Up { root: Point, time: Duration },
+    Down {
+        root: Point,
+        time: Duration,
+        modifiers: Modifiers,
+    },
+    Move {
+        root: Point,
+        time: Duration,
+        modifiers: Modifiers,
+    },
+    Up {
+        root: Point,
+        time: Duration,
+        modifiers: Modifiers,
+    },
 }
 
 impl PointerInput {
@@ -387,9 +399,13 @@ impl Session {
             return;
         }
         match input {
-            PointerInput::Down { root, time } => self.pointer_down(root, time),
-            PointerInput::Move { root, .. } => self.pointer_move(root),
-            PointerInput::Up { root, .. } => self.pointer_up(root),
+            PointerInput::Down { root, time, .. } => self.pointer_down(root, time),
+            PointerInput::Move {
+                root, modifiers, ..
+            } => self.pointer_move(root, modifiers),
+            PointerInput::Up {
+                root, modifiers, ..
+            } => self.pointer_up(root, modifiers),
         }
     }
 
@@ -776,7 +792,7 @@ impl Session {
         self.mark_selection();
     }
 
-    fn pointer_move(&mut self, root: Point) {
+    fn pointer_move(&mut self, root: Point, modifiers: Modifiers) {
         self.mark_transient();
         match &mut self.gesture {
             Some(Gesture::Pen { origin, points }) => {
@@ -790,11 +806,21 @@ impl Session {
             }
             Some(Gesture::Line { origin, end })
             | Some(Gesture::Rect { origin, end })
-            | Some(Gesture::Ellipse { origin, end })
             | Some(Gesture::Arrow { origin, end }) => {
                 *end = Point {
                     x: root.x - origin.x,
                     y: root.y - origin.y,
+                };
+            }
+            Some(Gesture::Ellipse { origin, end }) => {
+                let raw = Point {
+                    x: root.x - origin.x,
+                    y: root.y - origin.y,
+                };
+                *end = if modifiers.shift {
+                    constrain_square(raw)
+                } else {
+                    raw
                 };
             }
             Some(Gesture::Move {
@@ -836,7 +862,7 @@ impl Session {
         self.mark_transient();
     }
 
-    fn pointer_up(&mut self, root: Point) {
+    fn pointer_up(&mut self, root: Point, modifiers: Modifiers) {
         self.mark_transient();
         self.mark_selection();
         match self.gesture.take() {
@@ -880,9 +906,14 @@ impl Session {
                 self.mark_last_object();
             }
             Some(Gesture::Ellipse { origin, .. }) => {
-                let end = Point {
+                let raw = Point {
                     x: root.x - origin.x,
                     y: root.y - origin.y,
+                };
+                let end = if modifiers.shift {
+                    constrain_square(raw)
+                } else {
+                    raw
                 };
                 if end == Point::default() {
                     return;
@@ -1405,6 +1436,17 @@ pub(crate) fn default_bindings() -> Vec<Binding> {
         .annotation
 }
 
+/// Box for a Shift-constrained ellipse drag. The longer axis decides the
+/// side, each axis keeps its direction, and a zero axis counts as positive
+/// so a straight horizontal or vertical drag still becomes a square.
+fn constrain_square(end: Point) -> Point {
+    let side = end.x.abs().max(end.y.abs());
+    Point {
+        x: if end.x < 0 { -side } else { side },
+        y: if end.y < 0 { -side } else { side },
+    }
+}
+
 fn lower_letter(key: Key) -> Option<char> {
     match key {
         Key::Char(character) if character.is_ascii_alphabetic() => {
@@ -1442,6 +1484,7 @@ mod tests {
             PointerInput::Down {
                 root: from,
                 time: Duration::ZERO,
+                modifiers: crate::Modifiers::default(),
             },
         );
         pointer(
@@ -1449,6 +1492,7 @@ mod tests {
             PointerInput::Move {
                 root: to,
                 time: Duration::from_millis(10),
+                modifiers: crate::Modifiers::default(),
             },
         );
         pointer(
@@ -1456,17 +1500,147 @@ mod tests {
             PointerInput::Up {
                 root: to,
                 time: Duration::from_millis(20),
+                modifiers: crate::Modifiers::default(),
             },
         );
     }
 
+    fn drag_with(session: &mut Session, from: Point, to: Point, modifiers: Modifiers) {
+        pointer(
+            session,
+            PointerInput::Down {
+                root: from,
+                time: Duration::ZERO,
+                modifiers: Modifiers::default(),
+            },
+        );
+        pointer(
+            session,
+            PointerInput::Move {
+                root: to,
+                time: Duration::from_millis(10),
+                modifiers,
+            },
+        );
+        pointer(
+            session,
+            PointerInput::Up {
+                root: to,
+                time: Duration::from_millis(20),
+                modifiers,
+            },
+        );
+    }
+
+    #[test]
+    fn shift_squares_the_ellipse_drag_box() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Ellipse))
+            .unwrap();
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        drag_with(
+            &mut session,
+            Point { x: 20, y: 20 },
+            Point { x: 120, y: 70 },
+            shift,
+        );
+        assert_eq!(
+            session.document().objects()[0].data,
+            ObjectData::Ellipse {
+                end: Point { x: 100, y: 100 },
+                width_px: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn shift_can_toggle_during_the_drag() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Ellipse))
+            .unwrap();
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        let free = Modifiers::default();
+        pointer(
+            &mut session,
+            PointerInput::Down {
+                root: Point { x: 20, y: 20 },
+                time: Duration::ZERO,
+                modifiers: free,
+            },
+        );
+        pointer(
+            &mut session,
+            PointerInput::Move {
+                root: Point { x: 120, y: 70 },
+                time: Duration::from_millis(5),
+                modifiers: free,
+            },
+        );
+        assert_eq!(
+            session.gesture,
+            Some(Gesture::Ellipse {
+                origin: Point { x: 20, y: 20 },
+                end: Point { x: 100, y: 50 },
+            }),
+            "free drag stores the raw box"
+        );
+        pointer(
+            &mut session,
+            PointerInput::Move {
+                root: Point { x: 130, y: 80 },
+                time: Duration::from_millis(10),
+                modifiers: shift,
+            },
+        );
+        assert_eq!(
+            session.gesture,
+            Some(Gesture::Ellipse {
+                origin: Point { x: 20, y: 20 },
+                end: Point { x: 110, y: 110 },
+            }),
+            "pressing Shift mid-drag resquares the box"
+        );
+        pointer(
+            &mut session,
+            PointerInput::Up {
+                root: Point { x: 130, y: 80 },
+                time: Duration::from_millis(15),
+                modifiers: free,
+            },
+        );
+        assert_eq!(
+            session.document().objects()[0].data,
+            ObjectData::Ellipse {
+                end: Point { x: 110, y: 60 },
+                width_px: 6,
+            },
+            "releasing Shift before the release frees the box"
+        );
+    }
+
     fn click(session: &mut Session, at: Point, time: Duration) {
-        pointer(session, PointerInput::Down { root: at, time });
+        pointer(
+            session,
+            PointerInput::Down {
+                root: at,
+                time,
+                modifiers: crate::Modifiers::default(),
+            },
+        );
         pointer(
             session,
             PointerInput::Up {
                 root: at,
                 time: time + Duration::from_millis(10),
+                modifiers: crate::Modifiers::default(),
             },
         );
     }
@@ -1676,6 +1850,7 @@ mod tests {
             PointerInput::Down {
                 root,
                 time: Duration::ZERO,
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -1683,6 +1858,7 @@ mod tests {
             PointerInput::Up {
                 root,
                 time: Duration::from_millis(20),
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.command(AnnotationCommand::Off).unwrap();
@@ -1693,6 +1869,7 @@ mod tests {
             PointerInput::Down {
                 root,
                 time: Duration::from_millis(30),
+                modifiers: crate::Modifiers::default(),
             },
         );
         assert_eq!(session.document().objects().len(), 1);
@@ -1735,6 +1912,7 @@ mod tests {
             PointerInput::Down {
                 root: Point { x: 40, y: 20 },
                 time: Duration::from_millis(100),
+                modifiers: crate::Modifiers::default(),
             },
         );
         pointer(
@@ -1742,6 +1920,7 @@ mod tests {
             PointerInput::Move {
                 root: Point { x: 55, y: 20 },
                 time: Duration::from_millis(120),
+                modifiers: crate::Modifiers::default(),
             },
         );
         key(&mut session, Key::Esc, None, Modifiers::default());
@@ -1764,6 +1943,7 @@ mod tests {
             PointerInput::Down {
                 root: Point { x: 40, y: 20 },
                 time: Duration::from_millis(100),
+                modifiers: crate::Modifiers::default(),
             },
         );
         pointer(
@@ -1771,6 +1951,7 @@ mod tests {
             PointerInput::Up {
                 root: Point { x: 60, y: 40 },
                 time: Duration::from_millis(180),
+                modifiers: crate::Modifiers::default(),
             },
         );
         assert_eq!(
@@ -1813,6 +1994,7 @@ mod tests {
             PointerInput::Down {
                 root: Point { x: 40, y: 0 },
                 time: Duration::from_millis(100),
+                modifiers: crate::Modifiers::default(),
             },
         );
         pointer(
@@ -1820,6 +2002,7 @@ mod tests {
             PointerInput::Up {
                 root: Point { x: 40, y: 60 },
                 time: Duration::from_millis(110),
+                modifiers: crate::Modifiers::default(),
             },
         );
         assert!(session.document().objects().is_empty());
@@ -2158,6 +2341,7 @@ mod tests {
             PointerInput::Down {
                 root: Point { x: 1, y: 1 },
                 time: Duration::ZERO,
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -2165,6 +2349,7 @@ mod tests {
             PointerInput::Up {
                 root: Point { x: 1, y: 1 },
                 time: Duration::from_millis(10),
+                modifiers: crate::Modifiers::default(),
             },
         );
         assert!(session.document().objects().is_empty());
@@ -2174,6 +2359,7 @@ mod tests {
             PointerInput::Down {
                 root: Point { x: 1, y: 1 },
                 time: Duration::from_millis(20),
+                modifiers: crate::Modifiers::default(),
             },
         );
         assert!(session.document().objects().is_empty());
@@ -2528,6 +2714,7 @@ mod tests {
             PointerInput::Down {
                 root: Point { x: 50, y: 20 },
                 time: Duration::from_millis(100),
+                modifiers: crate::Modifiers::default(),
             },
         );
         pointer(
@@ -2535,6 +2722,7 @@ mod tests {
             PointerInput::Up {
                 root: Point { x: 55, y: 25 },
                 time: Duration::from_millis(180),
+                modifiers: crate::Modifiers::default(),
             },
         );
         assert_eq!(
@@ -2682,6 +2870,7 @@ mod tests {
             PointerInput::Down {
                 root: Point { x: 50, y: 50 },
                 time: Duration::from_millis(100),
+                modifiers: crate::Modifiers::default(),
             },
         );
         pointer(
@@ -2689,6 +2878,7 @@ mod tests {
             PointerInput::Up {
                 root: Point { x: 55, y: 55 },
                 time: Duration::from_millis(180),
+                modifiers: crate::Modifiers::default(),
             },
         );
         assert_eq!(

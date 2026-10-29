@@ -238,6 +238,12 @@ impl X11ShortcutBackend {
         }
     }
 
+    /// Translate a native pointer event's state into portable modifier flags.
+    /// The wheel path uses the same conversion for its modifier match.
+    pub(crate) fn pointer_modifiers(&mut self, state: u16) -> Mods {
+        self.keys.modifiers(state)
+    }
+
     fn release_pending(&mut self) -> Result<(), BackendError> {
         let Some((_, time)) = self.pending_wheel.take() else {
             return Ok(());

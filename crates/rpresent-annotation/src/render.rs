@@ -710,6 +710,7 @@ mod parity_tests {
                     PointerInput::Down {
                         root: Point { x: 40, y },
                         time: Duration::from_millis(stroke as u64 * 10),
+                        modifiers: crate::Modifiers::default(),
                     },
                 );
                 session.pointer(
@@ -720,6 +721,7 @@ mod parity_tests {
                             y,
                         },
                         time: Duration::from_millis(stroke as u64 * 10 + 5),
+                        modifiers: crate::Modifiers::default(),
                     },
                 );
                 session.pointer(
@@ -730,6 +732,7 @@ mod parity_tests {
                             y,
                         },
                         time: Duration::from_millis(stroke as u64 * 10 + 6),
+                        modifiers: crate::Modifiers::default(),
                     },
                 );
             }
@@ -744,6 +747,7 @@ mod parity_tests {
                     PointerInput::Down {
                         root: Point { x, y: 60 },
                         time: Duration::from_millis(600 + line as u64),
+                        modifiers: crate::Modifiers::default(),
                     },
                 );
                 session.pointer(
@@ -754,6 +758,7 @@ mod parity_tests {
                             y: height as i32 - 80,
                         },
                         time: Duration::from_millis(700 + line as u64),
+                        modifiers: crate::Modifiers::default(),
                     },
                 );
             }
@@ -766,6 +771,7 @@ mod parity_tests {
                 PointerInput::Down {
                     root: Point { x: 80, y: 80 },
                     time: Duration::from_millis(1000),
+                    modifiers: crate::Modifiers::default(),
                 },
             );
             if let Some(edit) = session.text_edit.as_mut() {
@@ -798,6 +804,7 @@ mod parity_tests {
                 PointerInput::Down {
                     root: Point { x: 60, y: 60 },
                     time: Duration::from_millis(2000),
+                    modifiers: crate::Modifiers::default(),
                 },
             );
             session.pointer(
@@ -805,6 +812,7 @@ mod parity_tests {
                 PointerInput::Up {
                     root: Point { x: 60, y: 60 },
                     time: Duration::from_millis(2001),
+                    modifiers: crate::Modifiers::default(),
                 },
             );
             if let Some(damage) = session.take_damage() {
@@ -844,6 +852,7 @@ mod parity_tests {
                         y: start.1,
                     },
                     time: Duration::ZERO,
+                    modifiers: crate::Modifiers::default(),
                 },
             );
             session.pointer(
@@ -851,6 +860,7 @@ mod parity_tests {
                 PointerInput::Up {
                     root: CanvasPoint { x: end.0, y: end.1 },
                     time: Duration::from_millis(10),
+                    modifiers: crate::Modifiers::default(),
                 },
             );
         }
@@ -866,6 +876,7 @@ mod parity_tests {
             PointerInput::Down {
                 root: CanvasPoint { x: 20, y: 20 },
                 time: Duration::from_millis(100),
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -873,6 +884,7 @@ mod parity_tests {
             PointerInput::Up {
                 root: CanvasPoint { x: 20, y: 40 },
                 time: Duration::from_millis(120),
+                modifiers: crate::Modifiers::default(),
             },
         );
         let damage = session.take_damage().unwrap();
@@ -888,6 +900,7 @@ mod parity_tests {
             PointerInput::Down {
                 root: CanvasPoint { x, y },
                 time: Duration::from_millis(millis),
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -895,6 +908,7 @@ mod parity_tests {
             PointerInput::Up {
                 root: CanvasPoint { x, y },
                 time: Duration::from_millis(millis + 10),
+                modifiers: crate::Modifiers::default(),
             },
         );
     }
@@ -908,6 +922,7 @@ mod parity_tests {
                     y: from.1,
                 },
                 time: Duration::from_millis(0),
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -915,6 +930,7 @@ mod parity_tests {
             PointerInput::Move {
                 root: CanvasPoint { x: to.0, y: to.1 },
                 time: Duration::from_millis(5),
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -922,6 +938,7 @@ mod parity_tests {
             PointerInput::Up {
                 root: CanvasPoint { x: to.0, y: to.1 },
                 time: Duration::from_millis(10),
+                modifiers: crate::Modifiers::default(),
             },
         );
     }
@@ -1139,6 +1156,7 @@ mod parity_tests {
             PointerInput::Down {
                 root: CanvasPoint { x: 20, y: 20 },
                 time: Duration::ZERO,
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -1146,6 +1164,7 @@ mod parity_tests {
             PointerInput::Move {
                 root: CanvasPoint { x: 80, y: 60 },
                 time: Duration::from_millis(5),
+                modifiers: crate::Modifiers::default(),
             },
         );
         let mut preview = Renderer::new(100, 100).unwrap();
@@ -1161,6 +1180,7 @@ mod parity_tests {
             PointerInput::Up {
                 root: CanvasPoint { x: 80, y: 60 },
                 time: Duration::from_millis(10),
+                modifiers: crate::Modifiers::default(),
             },
         );
         let mut released = Renderer::new(100, 100).unwrap();
@@ -1210,6 +1230,7 @@ mod parity_tests {
             PointerInput::Down {
                 root: CanvasPoint { x: 20, y: 20 },
                 time: Duration::ZERO,
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -1217,6 +1238,7 @@ mod parity_tests {
             PointerInput::Move {
                 root: CanvasPoint { x: 80, y: 60 },
                 time: Duration::from_millis(5),
+                modifiers: crate::Modifiers::default(),
             },
         );
         let mut preview = Renderer::new(100, 100).unwrap();
@@ -1227,6 +1249,7 @@ mod parity_tests {
             PointerInput::Up {
                 root: CanvasPoint { x: 80, y: 60 },
                 time: Duration::from_millis(10),
+                modifiers: crate::Modifiers::default(),
             },
         );
         let mut released = Renderer::new(100, 100).unwrap();
@@ -1251,6 +1274,7 @@ mod parity_tests {
             PointerInput::Down {
                 root: CanvasPoint { x: 20, y: 50 },
                 time: Duration::ZERO,
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -1258,6 +1282,7 @@ mod parity_tests {
             PointerInput::Move {
                 root: CanvasPoint { x: 80, y: 50 },
                 time: Duration::from_millis(5),
+                modifiers: crate::Modifiers::default(),
             },
         );
         let mut preview = Renderer::new(100, 100).unwrap();
@@ -1271,6 +1296,7 @@ mod parity_tests {
             PointerInput::Up {
                 root: CanvasPoint { x: 80, y: 50 },
                 time: Duration::from_millis(10),
+                modifiers: crate::Modifiers::default(),
             },
         );
         let mut released = Renderer::new(100, 100).unwrap();

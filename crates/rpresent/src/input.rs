@@ -73,9 +73,21 @@ pub enum PointerOwner {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawPointer {
-    Down { root: (i32, i32), time: Duration },
-    Move { root: (i32, i32), time: Duration },
-    Up { root: (i32, i32), time: Duration },
+    Down {
+        root: (i32, i32),
+        time: Duration,
+        modifiers: Mods,
+    },
+    Move {
+        root: (i32, i32),
+        time: Duration,
+        modifiers: Mods,
+    },
+    Up {
+        root: (i32, i32),
+        time: Duration,
+        modifiers: Mods,
+    },
 }
 
 pub fn preferred_pointer_owner(status: InputStatus) -> PointerOwner {

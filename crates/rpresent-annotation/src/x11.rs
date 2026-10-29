@@ -892,6 +892,7 @@ mod tests {
             crate::PointerInput::Down {
                 root: crate::Point { x: 4, y: 4 },
                 time: std::time::Duration::ZERO,
+                modifiers: crate::Modifiers::default(),
             },
         );
         session.pointer(
@@ -899,6 +900,7 @@ mod tests {
             crate::PointerInput::Up {
                 root: crate::Point { x: 60, y: 60 },
                 time: std::time::Duration::from_millis(10),
+                modifiers: crate::Modifiers::default(),
             },
         );
         renderer

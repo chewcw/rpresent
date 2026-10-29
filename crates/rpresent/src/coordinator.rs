@@ -1066,31 +1066,55 @@ pub(crate) fn annotation_pointer(input: RawPointer) -> rpresent_annotation::Poin
         y: root.1,
     };
     match input {
-        RawPointer::Down { root, time } => rpresent_annotation::PointerInput::Down {
+        RawPointer::Down {
+            root,
+            time,
+            modifiers,
+        } => rpresent_annotation::PointerInput::Down {
             root: point(root),
             time,
+            modifiers: annotation_modifiers(modifiers),
         },
-        RawPointer::Move { root, time } => rpresent_annotation::PointerInput::Move {
+        RawPointer::Move {
+            root,
+            time,
+            modifiers,
+        } => rpresent_annotation::PointerInput::Move {
             root: point(root),
             time,
+            modifiers: annotation_modifiers(modifiers),
         },
-        RawPointer::Up { root, time } => rpresent_annotation::PointerInput::Up {
+        RawPointer::Up {
+            root,
+            time,
+            modifiers,
+        } => rpresent_annotation::PointerInput::Up {
             root: point(root),
             time,
+            modifiers: annotation_modifiers(modifiers),
         },
+    }
+}
+
+fn annotation_modifiers(mods: Mods) -> Modifiers {
+    Modifiers {
+        shift: mods.contains(Mods::SHIFT),
+        ctrl: mods.contains(Mods::CTRL),
+        alt: mods.contains(Mods::ALT),
+        super_key: mods.contains(Mods::SUPER),
     }
 }
 
 pub(crate) fn zoom_pointer(input: RawPointer, monitor: rpresent_zoom::MonitorRect) -> PointerInput {
     match input {
-        RawPointer::Down { root, time } => PointerInput::Down {
+        RawPointer::Down { root, time, .. } => PointerInput::Down {
             local: (
                 f64::from(root.0) - f64::from(monitor.x),
                 f64::from(root.1) - f64::from(monitor.y),
             ),
             time,
         },
-        RawPointer::Move { root, time } => PointerInput::Move {
+        RawPointer::Move { root, time, .. } => PointerInput::Move {
             local: (
                 f64::from(root.0) - f64::from(monitor.x),
                 f64::from(root.1) - f64::from(monitor.y),
@@ -1112,6 +1136,42 @@ mod tests {
 
     use super::*;
     use crate::native_input::{NativeEvent, NativeRequest, channel as native_channel};
+
+    #[test]
+    fn annotation_pointer_maps_every_modifier_flag() {
+        use std::time::Duration;
+
+        let all = Mods::SHIFT | Mods::CTRL | Mods::ALT | Mods::SUPER;
+        assert_eq!(
+            annotation_pointer(RawPointer::Move {
+                root: (10, 20),
+                time: Duration::from_millis(5),
+                modifiers: all,
+            }),
+            rpresent_annotation::PointerInput::Move {
+                root: rpresent_annotation::Point { x: 10, y: 20 },
+                time: Duration::from_millis(5),
+                modifiers: Modifiers {
+                    shift: true,
+                    ctrl: true,
+                    alt: true,
+                    super_key: true,
+                },
+            }
+        );
+        assert_eq!(
+            annotation_pointer(RawPointer::Down {
+                root: (0, 0),
+                time: Duration::ZERO,
+                modifiers: Mods::NONE,
+            }),
+            rpresent_annotation::PointerInput::Down {
+                root: rpresent_annotation::Point { x: 0, y: 0 },
+                time: Duration::ZERO,
+                modifiers: Modifiers::default(),
+            }
+        );
+    }
 
     fn coordinator() -> (
         Coordinator,
@@ -1339,6 +1399,7 @@ mod tests {
             RawPointer::Up {
                 root: (900, 800),
                 time: std::time::Duration::from_millis(5),
+                modifiers: Mods::NONE,
             },
             monitor(),
         );
@@ -1662,14 +1723,17 @@ mod tests {
             RawPointer::Down {
                 root: (10, 20),
                 time: std::time::Duration::ZERO,
+                modifiers: Mods::NONE,
             },
             RawPointer::Move {
                 root: (30, 40),
                 time: std::time::Duration::from_millis(10),
+                modifiers: Mods::NONE,
             },
             RawPointer::Up {
                 root: (30, 40),
                 time: std::time::Duration::from_millis(20),
+                modifiers: Mods::NONE,
             },
         ] {
             rig.event(AppEvent::Native(NativeEvent::Pointer { epoch, input }));
@@ -1690,6 +1754,7 @@ mod tests {
             input: RawPointer::Down {
                 root: (10, 20),
                 time: std::time::Duration::ZERO,
+                modifiers: Mods::NONE,
             },
         }));
         rig.settle();
@@ -1702,6 +1767,7 @@ mod tests {
             input: RawPointer::Move {
                 root: (300, 400),
                 time: std::time::Duration::from_millis(10),
+                modifiers: Mods::NONE,
             },
         }));
         rig.settle();

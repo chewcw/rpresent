@@ -73,6 +73,7 @@ fn click(session: &mut Session, at: crate::Point, millis: u64) {
         PointerInput::Down {
             root: at,
             time: Duration::from_millis(millis),
+            modifiers: crate::Modifiers::default(),
         },
     );
     session.pointer(
@@ -80,6 +81,7 @@ fn click(session: &mut Session, at: crate::Point, millis: u64) {
         PointerInput::Up {
             root: at,
             time: Duration::from_millis(millis + 10),
+            modifiers: crate::Modifiers::default(),
         },
     );
 }
@@ -102,6 +104,7 @@ fn drag(session: &mut Session, from: crate::Point, to: crate::Point, millis: u64
         PointerInput::Down {
             root: from,
             time: Duration::from_millis(millis),
+            modifiers: crate::Modifiers::default(),
         },
     );
     session.pointer(
@@ -109,6 +112,7 @@ fn drag(session: &mut Session, from: crate::Point, to: crate::Point, millis: u64
         PointerInput::Move {
             root: to,
             time: Duration::from_millis(millis + 5),
+            modifiers: crate::Modifiers::default(),
         },
     );
     session.pointer(
@@ -116,6 +120,7 @@ fn drag(session: &mut Session, from: crate::Point, to: crate::Point, millis: u64
         PointerInput::Up {
             root: to,
             time: Duration::from_millis(millis + 10),
+            modifiers: crate::Modifiers::default(),
         },
     );
 }
