@@ -220,7 +220,7 @@ Zoom and spotlight can be active at the same time. Annotation editing has the hi
 
 Annotation editing uses the configured shortcut, `Ctrl+Alt+2` by default. The toolbar appears at the top of the monitor under the pointer while editing.
 
-The default tools are Select, Pen, Line, Arrow, Rect, Ellipse, Eraser, and Text, selected with `v`, `p`, `l`, `a`, `r`, `o`, `e`, and `t`. The initial tool is Arrow. Arrow heads scale with stroke width. Rectangle and ellipse interiors are not selectable or erasable. Hold Shift while dragging an ellipse to draw a perfect circle instead of a free ellipse. The eraser deletes whole objects, and Select moves one object at a time.
+The default tools are Select, Pen, Line, Arrow, Rect, Ellipse, Eraser, and Text, selected with `v`, `p`, `l`, `a`, `r`, `o`, `e`, and `t`. The initial tool is Arrow. Arrow heads scale with stroke width. Rectangle and ellipse interiors are not selectable or erasable. Hold Shift while dragging a rectangle to draw a square, or while dragging an ellipse to draw a circle. The eraser deletes whole objects, and Select moves one object at a time.
 
 Text editing uses these controls:
 
