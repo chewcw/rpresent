@@ -92,6 +92,10 @@ pub(crate) enum Gesture {
         origin: Point,
         end: Point,
     },
+    Ellipse {
+        origin: Point,
+        end: Point,
+    },
     Arrow {
         origin: Point,
         end: Point,
@@ -547,6 +551,10 @@ impl Session {
                 self.set_tool(AnnotationTool::Rect);
                 Ok(())
             }
+            ShortcutAction::ToolEllipse => {
+                self.set_tool(AnnotationTool::Ellipse);
+                Ok(())
+            }
             ShortcutAction::ToolEraser => {
                 self.set_tool(AnnotationTool::Eraser);
                 Ok(())
@@ -745,6 +753,12 @@ impl Session {
                     end: Point::default(),
                 });
             }
+            AnnotationTool::Ellipse => {
+                self.gesture = Some(Gesture::Ellipse {
+                    origin: root,
+                    end: Point::default(),
+                });
+            }
             AnnotationTool::Arrow => {
                 self.gesture = Some(Gesture::Arrow {
                     origin: root,
@@ -776,6 +790,7 @@ impl Session {
             }
             Some(Gesture::Line { origin, end })
             | Some(Gesture::Rect { origin, end })
+            | Some(Gesture::Ellipse { origin, end })
             | Some(Gesture::Arrow { origin, end }) => {
                 *end = Point {
                     x: root.x - origin.x,
@@ -862,6 +877,20 @@ impl Session {
                 let color = self.color();
                 self.document
                     .insert(origin, color, ObjectData::Rect { end, width_px });
+                self.mark_last_object();
+            }
+            Some(Gesture::Ellipse { origin, .. }) => {
+                let end = Point {
+                    x: root.x - origin.x,
+                    y: root.y - origin.y,
+                };
+                if end == Point::default() {
+                    return;
+                }
+                let width_px = self.width_px();
+                let color = self.color();
+                self.document
+                    .insert(origin, color, ObjectData::Ellipse { end, width_px });
                 self.mark_last_object();
             }
             Some(Gesture::Arrow { origin, .. }) => {
@@ -1177,6 +1206,11 @@ impl Session {
                 &rect_outline(end),
                 self.width_px(),
             )),
+            Some(Gesture::Ellipse { origin, end }) => Some(crate::render::stroke_bounds(
+                origin,
+                &ellipse_outline(end),
+                self.width_px(),
+            )),
             Some(Gesture::Arrow { origin, end }) => Some(crate::render::stroke_bounds(
                 origin,
                 &arrow_outline(end, self.width_px()),
@@ -1439,6 +1473,43 @@ mod tests {
 
     fn ellipse_object(end: Point) -> ObjectData {
         ObjectData::Ellipse { end, width_px: 4 }
+    }
+
+    #[test]
+    fn ellipse_drag_stores_the_drag_box() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Ellipse))
+            .unwrap();
+        drag(
+            &mut session,
+            Point { x: 20, y: 20 },
+            Point { x: 100, y: 70 },
+        );
+        let objects = session.document().objects();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].origin, Point { x: 20, y: 20 });
+        assert_eq!(
+            objects[0].data,
+            ObjectData::Ellipse {
+                end: Point { x: 80, y: 50 },
+                width_px: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn degenerate_ellipse_drag_creates_nothing() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Ellipse))
+            .unwrap();
+        click(
+            &mut session,
+            Point { x: 30, y: 30 },
+            Duration::from_millis(0),
+        );
+        assert!(session.document().objects().is_empty());
     }
 
     #[test]
@@ -2175,6 +2246,7 @@ mod tests {
             ("v", AnnotationTool::Select),
             ("p", AnnotationTool::Pen),
             ("l", AnnotationTool::Line),
+            ("o", AnnotationTool::Ellipse),
             ("e", AnnotationTool::Eraser),
             ("t", AnnotationTool::Text),
         ] {

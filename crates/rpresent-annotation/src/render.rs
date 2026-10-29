@@ -137,6 +137,18 @@ impl Renderer {
                     &clip,
                 );
             }
+            Some(Gesture::Ellipse { origin, end }) => {
+                let width = session.width_px();
+                draw_polyline(
+                    &mut self.pixmap,
+                    &self.mask,
+                    *origin,
+                    &ellipse_outline(*end),
+                    width,
+                    session.color(),
+                    &clip,
+                );
+            }
             _ => {}
         }
 
@@ -1144,6 +1156,72 @@ mod parity_tests {
             0,
             "preview interior"
         );
+        session.pointer(
+            1,
+            PointerInput::Up {
+                root: CanvasPoint { x: 80, y: 60 },
+                time: Duration::from_millis(10),
+            },
+        );
+        let mut released = Renderer::new(100, 100).unwrap();
+        released.redraw(&mut session, whole).unwrap();
+        assert_eq!(preview.pixels(), released.pixels());
+    }
+
+    #[test]
+    fn ellipse_paints_edges_but_leaves_the_interior_transparent() {
+        let mut session = Session::new(
+            &AnnotationConfig::default(),
+            &crate::session::default_bindings(),
+        )
+        .unwrap();
+        session.command(AnnotationCommand::On).unwrap();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Ellipse))
+            .unwrap();
+        session.ownership(Some(1));
+        drag(&mut session, (20, 20), (80, 60));
+
+        let mut renderer = Renderer::new(100, 100).unwrap();
+        let whole = renderer.full_bounds();
+        renderer.redraw(&mut session, whole).unwrap();
+        let alpha = |x: usize, y: usize| renderer.pixels()[(y * 100 + x) * 4 + 3];
+        assert!(alpha(50, 20) > 0, "top edge");
+        assert!(alpha(20, 40) > 0, "left edge");
+        assert!(alpha(80, 40) > 0, "right edge");
+        assert!(alpha(50, 60) > 0, "bottom edge");
+        assert_eq!(alpha(50, 40), 0, "interior");
+    }
+
+    #[test]
+    fn ellipse_drag_preview_matches_the_released_object() {
+        let mut session = Session::new(
+            &AnnotationConfig::default(),
+            &crate::session::default_bindings(),
+        )
+        .unwrap();
+        session.command(AnnotationCommand::On).unwrap();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Ellipse))
+            .unwrap();
+        session.ownership(Some(1));
+        session.pointer(
+            1,
+            PointerInput::Down {
+                root: CanvasPoint { x: 20, y: 20 },
+                time: Duration::ZERO,
+            },
+        );
+        session.pointer(
+            1,
+            PointerInput::Move {
+                root: CanvasPoint { x: 80, y: 60 },
+                time: Duration::from_millis(5),
+            },
+        );
+        let mut preview = Renderer::new(100, 100).unwrap();
+        let whole = preview.full_bounds();
+        preview.redraw(&mut session, whole).unwrap();
         session.pointer(
             1,
             PointerInput::Up {
