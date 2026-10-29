@@ -3,7 +3,7 @@
 `rpresent` is a Linux/X11 presentation daemon with three overlays:
 
 - spotlight, which follows the pointer and shades the rest of the screen
-- annotation, which provides pen, line, arrow, rectangle, text, and eraser tools
+- annotation, which provides pen, line, arrow, rectangle, ellipse, text, and eraser tools
 - zoom, which magnifies a captured monitor image
 
 The daemon runs in the background. The CLI sends commands to it over a Unix socket, and configured X11 shortcuts can send the same commands.
@@ -105,7 +105,7 @@ The structured command forms are:
 spot <on|off|toggle>
 zoom <on|off|toggle|reset>
 annotation <on|off|toggle|clear|undo|redo|delete>
-annotation tool <select|pen|line|arrow|rect|eraser|text>
+annotation tool <select|pen|line|arrow|rect|ellipse|eraser|text>
 annotation color <#RRGGBB|next|prev>
 annotation width <N|next|prev>
 annotation text-size <N|next|prev>
@@ -162,6 +162,7 @@ The default annotation shortcuts are:
 "annotation.tool.line" = "l"
 "annotation.tool.arrow" = "a"
 "annotation.tool.rect" = "r"
+"annotation.tool.ellipse" = "o"
 "annotation.tool.eraser" = "e"
 "annotation.tool.text" = "t"
 "annotation.color.next" = "c"
@@ -219,7 +220,7 @@ Zoom and spotlight can be active at the same time. Annotation editing has the hi
 
 Annotation editing uses the configured shortcut, `Ctrl+Alt+2` by default. The toolbar appears at the top of the monitor under the pointer while editing.
 
-The default tools are Select, Pen, Line, Arrow, Rect, Eraser, and Text. The initial tool is Arrow. Arrow heads scale with stroke width. Rectangle interiors are not selectable or erasable. The eraser deletes whole objects, and Select moves one object at a time.
+The default tools are Select, Pen, Line, Arrow, Rect, Ellipse, Eraser, and Text, selected with `v`, `p`, `l`, `a`, `r`, `o`, `e`, and `t`. The initial tool is Arrow. Arrow heads scale with stroke width. Rectangle and ellipse interiors are not selectable or erasable. Hold Shift while dragging an ellipse to draw a perfect circle instead of a free ellipse. The eraser deletes whole objects, and Select moves one object at a time.
 
 Text editing uses these controls:
 
