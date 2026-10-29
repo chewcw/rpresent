@@ -11,8 +11,8 @@ use crate::catalog::{Preset, Rgb, cycle_index, parse_rgb};
 use crate::command::AnnotationCommand;
 use crate::document::{Document, Object, ObjectData, ObjectId, Point};
 use crate::geometry::{
-    Rect, arrow_outline, point_rect_distance, point_segment_distance, rect_outline,
-    segment_rect_distance, segment_segment_distance,
+    Rect, arrow_outline, ellipse_outline, point_rect_distance, point_segment_distance,
+    rect_outline, segment_rect_distance, segment_segment_distance,
 };
 use crate::text::{TextDraft, TextSystem};
 use crate::toolbar::{DisplayGeometry, Toolbar, ToolbarLayout};
@@ -1257,6 +1257,13 @@ fn object_hit(text_system: &mut TextSystem, object: &Object, point: Point) -> bo
                     <= tolerance
             })
         }
+        ObjectData::Ellipse { end, width_px } => {
+            let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
+            ellipse_outline(*end).windows(2).any(|pair| {
+                point_segment_distance(point, object.point(pair[0]), object.point(pair[1]))
+                    <= tolerance
+            })
+        }
         ObjectData::Arrow { end, width_px } => {
             let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
             let [tail, tip, barb_a, barb_b] = arrow_outline(*end, *width_px);
@@ -1299,6 +1306,16 @@ fn object_touched(text_system: &mut TextSystem, object: &Object, start: Point, e
         } => {
             let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
             rect_outline(*rect_end).windows(2).any(|pair| {
+                segment_segment_distance(object.point(pair[0]), object.point(pair[1]), start, end)
+                    <= tolerance
+            })
+        }
+        ObjectData::Ellipse {
+            end: ellipse_end,
+            width_px,
+        } => {
+            let tolerance = *width_px as f64 / 2.0 + HIT_TOLERANCE_PX;
+            ellipse_outline(*ellipse_end).windows(2).any(|pair| {
                 segment_segment_distance(object.point(pair[0]), object.point(pair[1]), start, end)
                     <= tolerance
             })
@@ -1417,6 +1434,55 @@ mod tests {
                 root: at,
                 time: time + Duration::from_millis(10),
             },
+        );
+    }
+
+    fn ellipse_object(end: Point) -> ObjectData {
+        ObjectData::Ellipse { end, width_px: 4 }
+    }
+
+    #[test]
+    fn ellipse_outline_is_selectable_but_the_interior_is_not() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Select))
+            .unwrap();
+        session.document.insert(
+            Point { x: 20, y: 20 },
+            [255, 0, 0],
+            ellipse_object(Point { x: 60, y: 60 }),
+        );
+
+        click(&mut session, Point { x: 50, y: 50 }, Duration::from_millis(0));
+        assert_eq!(session.selection(), None, "interior misses");
+
+        click(&mut session, Point { x: 50, y: 20 }, Duration::from_millis(100));
+        assert!(session.selection().is_some(), "outline hits");
+    }
+
+    #[test]
+    fn eraser_skips_a_drag_that_stays_inside_an_ellipse() {
+        let mut session = ready_session();
+        session
+            .command(AnnotationCommand::Tool(AnnotationTool::Eraser))
+            .unwrap();
+        session.document.insert(
+            Point { x: 20, y: 20 },
+            [255, 0, 0],
+            ellipse_object(Point { x: 60, y: 60 }),
+        );
+
+        drag(&mut session, Point { x: 40, y: 50 }, Point { x: 60, y: 55 });
+        assert_eq!(
+            session.document().objects().len(),
+            1,
+            "interior drag misses"
+        );
+
+        drag(&mut session, Point { x: 10, y: 50 }, Point { x: 90, y: 50 });
+        assert!(
+            session.document().objects().is_empty(),
+            "crossing drag hits"
         );
     }
 

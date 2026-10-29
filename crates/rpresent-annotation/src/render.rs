@@ -3,7 +3,7 @@ use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, S
 
 use crate::document::{Object, ObjectData, Point};
 use crate::error::OverlayError;
-use crate::geometry::{Rect, arrow_outline, rect_outline};
+use crate::geometry::{Rect, arrow_outline, ellipse_outline, rect_outline};
 use crate::session::{Gesture, Session, TEXT_BOX_PADDING_PX, TextEdit};
 use crate::text::TextSystem;
 
@@ -226,6 +226,15 @@ impl Renderer {
                 object.color,
                 clip,
             ),
+            ObjectData::Ellipse { end, width_px } => draw_polyline(
+                &mut self.pixmap,
+                &self.mask,
+                object.origin,
+                &ellipse_outline(*end),
+                *width_px,
+                object.color,
+                clip,
+            ),
             ObjectData::Arrow { end, width_px } => draw_arrow(
                 &mut self.pixmap,
                 &self.mask,
@@ -271,6 +280,9 @@ pub(crate) fn object_paint_bounds(text_system: &mut TextSystem, object: &Object)
         }
         ObjectData::Rect { end, width_px } => {
             stroke_bounds(object.origin, &rect_outline(*end), *width_px)
+        }
+        ObjectData::Ellipse { end, width_px } => {
+            stroke_bounds(object.origin, &ellipse_outline(*end), *width_px)
         }
         ObjectData::Arrow { end, width_px } => {
             stroke_bounds(object.origin, &arrow_outline(*end, *width_px), *width_px)
@@ -626,6 +638,30 @@ mod tests {
         assert!(alpha(object.point(barb_a)) > 0, "first barb");
         assert!(alpha(object.point(barb_b)) > 0, "second barb");
         assert_eq!(alpha(Point { x: 30, y: 40 }), 0, "open V");
+    }
+
+    #[test]
+    fn ellipse_paints_the_outline_but_leaves_the_interior_transparent() {
+        let mut renderer = Renderer::new(100, 100).unwrap();
+        let whole = renderer.full_bounds();
+        renderer.reset_mask(whole);
+        let mut text_system = crate::text::TextSystem::new();
+        let object = Object {
+            id: 0,
+            origin: Point { x: 20, y: 20 },
+            color: [255, 0, 0],
+            data: ObjectData::Ellipse {
+                end: Point { x: 60, y: 60 },
+                width_px: 4,
+            },
+        };
+        renderer.draw_object(&mut text_system, &object, &whole);
+        let alpha = |x: usize, y: usize| renderer.pixels()[(y * 100 + x) * 4 + 3];
+        assert!(alpha(50, 20) > 0, "top");
+        assert!(alpha(20, 50) > 0, "left");
+        assert!(alpha(80, 50) > 0, "right");
+        assert!(alpha(50, 80) > 0, "bottom");
+        assert_eq!(alpha(50, 50), 0, "interior");
     }
 }
 

@@ -25,6 +25,10 @@ pub enum ObjectData {
         end: Point,
         width_px: u32,
     },
+    Ellipse {
+        end: Point,
+        width_px: u32,
+    },
     Arrow {
         end: Point,
         width_px: u32,
@@ -214,6 +218,30 @@ mod tests {
 
     fn arrow(end: Point) -> ObjectData {
         ObjectData::Arrow { end, width_px: 6 }
+    }
+
+    fn ellipse(end: Point) -> ObjectData {
+        ObjectData::Ellipse { end, width_px: 6 }
+    }
+
+    #[test]
+    fn ellipse_round_trips_through_undo_and_redo() {
+        let mut document = Document::new(4);
+        let origin = Point { x: 10, y: 20 };
+        let end = Point { x: 50, y: 30 };
+        let id = document.insert(origin, [1, 2, 3], ellipse(end));
+        assert!(document.undo());
+        assert!(document.objects().is_empty());
+        assert!(document.redo());
+        assert_eq!(
+            document.objects(),
+            &[Object {
+                id,
+                origin,
+                color: [1, 2, 3],
+                data: ellipse(end),
+            }]
+        );
     }
 
     #[test]
