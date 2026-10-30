@@ -731,7 +731,7 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rpresent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "crossbeam-channel",
@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "rpresent-annotation"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cosmic-text",
  "crossbeam-channel",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "rpresent-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "directories",
  "keybinds",
@@ -779,7 +779,7 @@ dependencies = [
 
 [[package]]
 name = "rpresent-spotlight"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "rpresent-config",
@@ -791,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "rpresent-zoom"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
  "glow",
