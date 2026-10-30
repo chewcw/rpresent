@@ -804,12 +804,21 @@ impl Session {
                     points.push(local);
                 }
             }
-            Some(Gesture::Line { origin, end })
-            | Some(Gesture::Rect { origin, end })
-            | Some(Gesture::Arrow { origin, end }) => {
+            Some(Gesture::Line { origin, end }) | Some(Gesture::Arrow { origin, end }) => {
                 *end = Point {
                     x: root.x - origin.x,
                     y: root.y - origin.y,
+                };
+            }
+            Some(Gesture::Rect { origin, end }) => {
+                let raw = Point {
+                    x: root.x - origin.x,
+                    y: root.y - origin.y,
+                };
+                *end = if modifiers.shift {
+                    constrain_square(raw)
+                } else {
+                    raw
                 };
             }
             Some(Gesture::Ellipse { origin, end }) => {
@@ -892,9 +901,14 @@ impl Session {
                 self.mark_last_object();
             }
             Some(Gesture::Rect { origin, .. }) => {
-                let end = Point {
+                let raw = Point {
                     x: root.x - origin.x,
                     y: root.y - origin.y,
+                };
+                let end = if modifiers.shift {
+                    constrain_square(raw)
+                } else {
+                    raw
                 };
                 if end == Point::default() {
                     return;
@@ -1436,7 +1450,7 @@ pub(crate) fn default_bindings() -> Vec<Binding> {
         .annotation
 }
 
-/// Box for a Shift-constrained ellipse drag. The longer axis decides the
+/// Box for a Shift-constrained square drag. The longer axis decides the
 /// side, each axis keeps its direction, and a zero axis counts as positive
 /// so a straight horizontal or vertical drag still becomes a square.
 fn constrain_square(end: Point) -> Point {
@@ -2628,6 +2642,96 @@ mod tests {
         assert!(
             sizes.windows(2).all(|pair| pair[0] == pair[1]),
             "outline sizes differ: {sizes:?}"
+        );
+    }
+
+    #[test]
+    fn shift_squares_the_rect_drag_box() {
+        let mut session = rect_session();
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        drag_with(
+            &mut session,
+            Point { x: 20, y: 20 },
+            Point { x: 120, y: 70 },
+            shift,
+        );
+        let object = &session.document().objects()[0];
+        assert_eq!(object.origin, Point { x: 20, y: 20 });
+        assert_eq!(
+            object.data,
+            ObjectData::Rect {
+                end: Point { x: 100, y: 100 },
+                width_px: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn shift_can_toggle_during_the_rect_drag() {
+        let mut session = rect_session();
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        let free = Modifiers::default();
+        pointer(
+            &mut session,
+            PointerInput::Down {
+                root: Point { x: 20, y: 20 },
+                time: Duration::ZERO,
+                modifiers: free,
+            },
+        );
+        pointer(
+            &mut session,
+            PointerInput::Move {
+                root: Point { x: 120, y: 70 },
+                time: Duration::from_millis(5),
+                modifiers: free,
+            },
+        );
+        assert_eq!(
+            session.gesture,
+            Some(Gesture::Rect {
+                origin: Point { x: 20, y: 20 },
+                end: Point { x: 100, y: 50 },
+            }),
+            "free drag stores the raw box"
+        );
+        pointer(
+            &mut session,
+            PointerInput::Move {
+                root: Point { x: 130, y: 80 },
+                time: Duration::from_millis(10),
+                modifiers: shift,
+            },
+        );
+        assert_eq!(
+            session.gesture,
+            Some(Gesture::Rect {
+                origin: Point { x: 20, y: 20 },
+                end: Point { x: 110, y: 110 },
+            }),
+            "pressing Shift mid-drag resquares the box"
+        );
+        pointer(
+            &mut session,
+            PointerInput::Up {
+                root: Point { x: 130, y: 80 },
+                time: Duration::from_millis(15),
+                modifiers: free,
+            },
+        );
+        assert_eq!(
+            session.document().objects()[0].data,
+            ObjectData::Rect {
+                end: Point { x: 110, y: 60 },
+                width_px: 6,
+            },
+            "releasing Shift before the release frees the box"
         );
     }
 
